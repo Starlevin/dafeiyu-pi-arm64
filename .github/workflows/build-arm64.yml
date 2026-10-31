@@ -1,0 +1,128 @@
+name: ARM64 build (Raspberry Pi 3B / Debian 13)
+
+# 目标：在原生 arm64 运行器上编译并测试，产出可直接放到树莓派上的静态链接二进制。
+#
+# 说明：
+# - `ubuntu-24.04-arm` 是 GitHub 的免费 arm64 托管运行器，**仅对公开仓库开放**。
+#   私有仓库没有免费的 arm64 运行器，这一点在 README-PI.md 里有说明。
+# - 编译使用官方 `swift:6.1-noble` 镜像，避免依赖发行版自带的 Swift。
+# - 加 `--static-swift-stdlib` 把 Swift 运行库静态链入，产物不再依赖容器内的
+#   libswiftCore.so 等动态库；Debian 13 的 glibc（2.41）比 noble（2.39）新，
+#   因此向后兼容，可直接在 Pi 上运行。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: swift:6.1-noble
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装测试依赖
+        run: |
+          apt-get update -qq
+          # python3-pil：QQStickerTests / QQIncomingImagesTests 的 data(for:) 需要 Pillow，
+          # 缺它会让这两组用例失败，并因返回 nil 连带触发 QQOnlineToolsTests 崩溃。
+          apt-get install -y -qq python3 python3-pil file binutils
+
+      - name: 环境自证
+        run: |
+          echo "架构: $(uname -m)"
+          echo "内核: $(uname -r)"
+          swift --version
+          python3 --version
+          python3 -c "import PIL; print('Pillow', PIL.__version__)"
+          cat /etc/os-release | head -2
+
+      - name: 编译 release
+        run: |
+          set -o pipefail
+          swift build -c release --static-swift-stdlib 2>&1 | tail -40
+
+      - name: 产物 ABI 与依赖自检
+        run: |
+          BIN="$(swift build -c release --static-swift-stdlib --show-bin-path)/WeChatAIBot"
+          echo "=== file ==="
+          file "$BIN"
+          echo "=== 大小 ==="
+          ls -lh "$BIN"
+          echo "=== 动态依赖 ==="
+          ldd "$BIN" || true
+          echo "=== 期望 ==="
+          echo "ELF 64-bit LSB, ARM aarch64；不出现 libswiftCore.so"
+
+      - name: 产物内容自检（关键代码必须真的在二进制里）
+        run: |
+          set -o pipefail
+          BIN="$(swift build -c release --static-swift-stdlib --show-bin-path)/WeChatAIBot"
+          # 背景（2026-11-01 事故）：v4/v5/v6 三个快照丢失了 Services.swift 里
+          # 单轮快速回复与性能日志的 104 行，产物照常构建、照常上传、照常部署，
+          # 结果线上跑的是原版双阶段，而日志里完全看不出异常。
+          # 这里在上传前强制核对标记，缺任何一项就拒绝产出，避免旧版本被部署。
+          #
+          # 注意：必须用 grep -F 固定串匹配。用正则时 "[perf]" 会被当成字符类，
+          # 匹配到 9 万行，完全失去自检意义。
+          fail=0
+          check() {
+            if grep -aqF -- "$2" "$BIN"; then
+              echo "  ✓ $1"
+            else
+              echo "  ✗ 缺少：$1（标记：$2）"
+              fail=1
+            fi
+          }
+          check "单轮快速回复路径" "保持简短。只输出最终 JSON 短答"
+          check "性能日志开关" "DAFEIYU_PERF_LOG"
+          check "快速路径可达性修正" "toolsMayRun"
+          check "首次失败退避重连" "首次连接未成功"
+          check "联网重定向白名单" "allowedRedirectHosts"
+          check "退避预算可配置" "DAFEIYU_RECONNECT_MAX_ATTEMPTS"
+          check "低频守护兜底" "DAFEIYU_RECONNECT_WATCHDOG_INTERVAL"
+          check "单轮表情候选均衡抽样" "balancedShortlist"
+          if [ "$fail" != "0" ]; then
+            echo "产物自检失败：二进制缺少关键代码，拒绝上传（防止把旧版本部署到树莓派）"
+            exit 1
+          fi
+          echo "产物自检通过"
+
+      - name: 组装部署包
+        run: |
+          APP=dist/dafeiyu-linux
+          mkdir -p "$APP/Resources"
+          cp "$(swift build -c release --static-swift-stdlib --show-bin-path)/WeChatAIBot" "$APP/dafeiyu"
+          for dir in QQControl QQStickers Linux SocialControl SocialBrowser; do
+            [ -d "Resources/$dir" ] && cp -R "Resources/$dir" "$APP/Resources/"
+          done
+          tar -czf dafeiyu-linux-arm64.tar.gz -C dist dafeiyu-linux
+          ls -lh dafeiyu-linux-arm64.tar.gz
+
+      # 产物先于测试上传：测试失败不应让已经编好的二进制付之一炬。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dafeiyu-linux-arm64
+          path: dafeiyu-linux-arm64.tar.gz
+          retention-days: 14
+
+      - name: 运行 LLMProvider 测试（无需真实 Key）
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          swift test --filter LLMProviderTests 2>&1 | tail -40
+
+      - name: 完整测试套件（结果记录，但不阻断产物产出）
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tail -60 || true
