@@ -462,6 +462,7 @@ struct QQRuntimeCredentials: Decodable {
             if locked, reconnectAllowed {
                 status = "QQ 连接未成功，正在等待重连"
                 busy = false
+                qqLog("首次连接未成功：\(error.localizedDescription)；保留运行锁与已保存范围，进入有限退避重连")
                 scheduleReconnect()
                 return
             }
@@ -539,6 +540,7 @@ struct QQRuntimeCredentials: Decodable {
         guard connected || reconnectTask != nil else {
             // 尚未成功连接过（例如首次连接就失败）：不重复排队重连。
             self.error = error.localizedDescription
+            qqLog("连接中断（尚未建立过连接）：\(error.localizedDescription)")
             return
         }
         self.error = error.localizedDescription
@@ -548,6 +550,7 @@ struct QQRuntimeCredentials: Decodable {
         watchdog?.cancel(); watchdog = nil
         connection.close()
         status = "QQ 连接中断，正在尝试恢复"
+        qqLog("连接中断：\(error.localizedDescription)；保留运行锁与已保存范围，进入有限退避重连")
         scheduleReconnect()
     }
 
@@ -558,6 +561,7 @@ struct QQRuntimeCredentials: Decodable {
     /// 重连成功并通过身份核对之后，才恢复自动回复；失败到上限则停下并写明原因。
     private func scheduleReconnect() {
         guard reconnectAllowed, reconnectTask == nil else { return }
+        qqLog("开始退避重连：最多 \(Self.reconnectMaxAttempts) 次，间隔 \(Int(Self.reconnectBaseDelay))–\(Int(Self.reconnectMaxDelay)) 秒")
         reconnectTask = Task { [weak self] in
             guard let self else { return }
             var delay = Self.reconnectBaseDelay
@@ -566,6 +570,7 @@ struct QQRuntimeCredentials: Decodable {
                 do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { break }
                 guard self.reconnectAllowed else { break }
                 self.status = "QQ 连接已断开，正在第 \(attempt)/\(Self.reconnectMaxAttempts) 次重连（\(Int(delay)) 秒后重试）"
+                qqLog("重连 \(attempt)/\(Self.reconnectMaxAttempts)：\(Int(delay)) 秒后尝试连接 OneBot")
                 let current = UUID(); self.session = current
                 do {
                     try await self.establishConnection(current: current)
@@ -574,20 +579,30 @@ struct QQRuntimeCredentials: Decodable {
                     self.startWatchdog(current: current)
                     self.status = "QQ 已重新连接并核对账号"
                     restored = true
+                    qqLog("重连成功：已通过账号核对（第 \(attempt) 次尝试）")
                     self.restoreReplyScope()
                     break
                 } catch is CancellationError {
                     break
                 } catch {
                     self.error = error.localizedDescription
+                    qqLog("重连 \(attempt)/\(Self.reconnectMaxAttempts) 失败：\(error.localizedDescription)")
                     delay = min(delay * 2, Self.reconnectMaxDelay)
                 }
             }
             self.reconnectTask = nil
             if !restored, self.reconnectAllowed {
                 self.status = "QQ 连续 \(Self.reconnectMaxAttempts) 次重连未成功，已停止自动重连；请检查 QQ 登录状态后手动重新连接"
+                qqLog("连续 \(Self.reconnectMaxAttempts) 次重连未成功，已停止自动重连；等待人工检查 QQ 登录状态")
             }
         }
+    }
+
+    /// 写一行不含密钥/令牌的运行日志（stdout，由部署方重定向到日志文件）。
+    ///
+    /// 只写状态与错误描述：resolveOneBotToken / resolveModelKey 抛出的消息都不含凭据本身。
+    private func qqLog(_ line: String) {
+        print("[qq] \(line)")
     }
 
     /// 连接恢复后幂等恢复自动回复范围。
