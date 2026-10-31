@@ -171,6 +171,31 @@ struct QQRuntimeCredentials: Decodable {
     private var repliesSinceSticker: [String: Int] = [:]
     @Published private var runtimeCredentials: QQRuntimeCredentials?
     var usesTemporaryCredentials: Bool { runtimeCredentials != nil }
+    // MARK: - 断线自愈
+    /// 断线后的自动重连任务。同一时刻最多一个。
+    private var reconnectTask: Task<Void, Never>?
+    /// 是否允许自动重连。用户在面板上主动断开时置为 false —— 断开后不会自己连回来。
+    private var reconnectAllowed = false
+    /// 连接恢复后是否应把自动回复拉回运行状态。
+    private var resumeReplyAfterReconnect = false
+    /// 自动重连的最大尝试次数；到达上限即停止并在状态里写明原因，绝不无限重试。
+    ///
+    /// 默认 60 次配合 120 秒退避上限，约合 2 小时连续重试，覆盖一整夜的网络中断窗口；
+    /// 可用 `DAFEIYU_RECONNECT_MAX_ATTEMPTS` 调整（上限 600 次）。
+    static var reconnectMaxAttempts: Int {
+        let raw = ProcessInfo.processInfo.environment["DAFEIYU_RECONNECT_MAX_ATTEMPTS"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let value = Int(raw) ?? 60
+        return max(1, min(value, 600))
+    }
+    /// 自动重连的退避基数与上限（秒）：5 → 10 → 20 → 40 → 80 → 120（封顶）。
+    static let reconnectBaseDelay: TimeInterval = 5
+    static var reconnectMaxDelay: TimeInterval {
+        let raw = ProcessInfo.processInfo.environment["DAFEIYU_RECONNECT_MAX_DELAY"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let value = Double(raw) ?? 120
+        return max(5, min(value, 600))
+    }
     init(preview: Bool = false, allowAuthenticationUI: Bool = true, storageDirectory: URL? = nil, modelClient: DeepSeekClient = DeepSeekClient(), stickerLibrary: QQStickerLibrary? = nil, imageGenerator: QQImageGenerator = QQImageGenerator(), incomingImageLoader: QQIncomingImages = QQIncomingImages(), artworkLibrary: QQArtworkLibrary? = nil, credentialWriter: @escaping (String, String) throws -> Void = { value, account in try Keychain.save(value, account: account) }) {
         self.credentialWriter = credentialWriter
         self.allowAuthenticationUI = allowAuthenticationUI
@@ -210,8 +235,19 @@ struct QQRuntimeCredentials: Decodable {
         } catch { storageOK = false; self.error = "QQ 配置读取失败，已阻止启动：\(error.localizedDescription)" }
         connection.event = { [weak self] in self?.receive($0) }
         connection.disconnected = { [weak self] error in
-            self?.error = error.localizedDescription
-            self?.disconnect(reason: "QQ 连接中断；请手动检查并重新连接")
+            // 连接异常断开：保留运行锁与已保存配置，只回收连接层并进入有限退避重连。
+            self?.handleConnectionLoss(error)
+        }
+        // 无人值守：具备凭据文件时，进程启动后自动尝试连接；连上并核对账号后按已保存范围恢复自动回复。
+        if Self.autoResumeEnabled() {
+            resumeReplyAfterReconnect = true
+            // 提前允许重连：首次连接时 OneBot 可能还没上线（夜间断网后 NapCat 起来的顺序不固定），
+            // 这时不能因为「尚未连上过」就放弃退避重连，否则重启后永远躺平。
+            reconnectAllowed = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.connect()
+            }
         }
         #if canImport(AppKit)
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
@@ -405,51 +441,238 @@ struct QQRuntimeCredentials: Decodable {
     func connect() async {
         guard !busy, !runtimeBusy, !connected, storageOK else { return }
         busy = true; error = nil; let current = UUID(); session = current
+        var established = false
+        var locked = false
         defer { if session == current { busy = false } }
         do {
-            guard let file else { throw AppFailure.message("QQ 状态目录不可用") }
-            let lock = open(file.deletingLastPathComponent().appendingPathComponent("qq-engine.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-            guard lock >= 0 else { throw AppFailure.message("无法创建 QQ 运行锁") }
-            guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
-                close(lock); throw AppFailure.message("另一个 QQ 回复引擎正在运行，请先停止它")
-            }
-            runtimeLock = lock
+            try acquireRuntimeLock(); locked = true
             try config.validate(); try persist()
-            let token = try runtimeCredentials?.oneBotToken ?? Keychain.load(account: "qq-onebot-token", allowAuthenticationUI: allowAuthenticationUI)
-            try await connection.connect(endpoint: config.endpoint, token: token)
-            let response = try await connection.action("get_login_info")
-            guard session == current else { return }
-            guard let data = response["data"] as? [String: Any], QQPolicy.identifier(data["user_id"]) == config.expectedSelfID else {
-                throw AppFailure.message("实际登录 QQ 与配置不一致，已停止连接")
-            }
-            let health = try await connection.action("get_status")
-            guard session == current else { return }
-            guard let healthData = health["data"] as? [String: Any], healthData["online"] as? Bool == true,
-                  healthData["good"] as? Bool == true else { throw AppFailure.message("QQ 未在线或服务状态异常") }
-            let friends = try await connection.action("get_friend_list")
-            let groups = try await connection.action("get_group_list")
-            guard session == current else { return }
-            contacts = ((friends["data"] as? [[String: Any]] ?? []).compactMap { item in
-                guard let number = QQPolicy.identifier(item["user_id"]) else { return nil }
-                return QQContact(number: number, name: item["remark"] as? String ?? item["nickname"] as? String ?? number, group: false)
-            }) + ((groups["data"] as? [[String: Any]] ?? []).compactMap { item in
-                guard let number = QQPolicy.identifier(item["group_id"]) else { return nil }
-                return QQContact(number: number, name: item["group_name"] as? String ?? number, group: true)
-            })
-            connected = true; lastHeartbeat = Date(); status = "QQ 已连接并核对账号，自动回复未启动"
-            watchdog = Task { [weak self] in
-                while !Task.isCancelled {
-                    do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { return }
-                    guard let self, self.session == current else { return }
-                    if Date().timeIntervalSince(self.lastHeartbeat) > 75 { self.disconnect(reason: "QQ 心跳超时，已停止托管"); return }
-                    self.scheduleArtworks()
-                    self.scheduleMemoryLearning()
-                }
-            }
+            try await establishConnection(current: current)
+            connected = true; lastHeartbeat = Date()
+            reconnectAllowed = true
+            status = "QQ 已连接并核对账号，自动回复未启动"
+            startWatchdog(current: current)
+            established = true
         } catch {
             guard session == current else { return }
-            self.error = error.localizedDescription; disconnect(reason: "QQ 连接检查失败")
+            self.error = error.localizedDescription
+            // 运行锁已在手、只是连接层没通（例如 OneBot 还没上线）：
+            // 保留配置与运行锁，交给有限退避重连去等它，而不是就此躺平。
+            // 拿不到运行锁时必须直接退出，绝不与另一个实例抢同一份状态。
+            if locked, reconnectAllowed {
+                status = "QQ 连接未成功，正在等待重连"
+                busy = false
+                scheduleReconnect()
+                return
+            }
+            disconnect(reason: "QQ 连接检查失败")
         }
+        // 连接就绪后按需把自动回复拉回运行状态；先解除 busy 占用，否则 start() 会被自身守卫挡下。
+        if established, resumeReplyAfterReconnect {
+            busy = false
+            restoreReplyScope()
+        }
+    }
+
+    /// 取得本进程独占的运行锁。同一时刻只允许一个回复引擎操作同一份状态目录。
+    private func acquireRuntimeLock() throws {
+        guard let file else { throw AppFailure.message("QQ 状态目录不可用") }
+        let lock = open(file.deletingLastPathComponent().appendingPathComponent("qq-engine.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard lock >= 0 else { throw AppFailure.message("无法创建 QQ 运行锁") }
+        guard flock(lock, LOCK_EX | LOCK_NB) == 0 else {
+            close(lock); throw AppFailure.message("另一个 QQ 回复引擎正在运行，请先停止它")
+        }
+        runtimeLock = lock
+    }
+
+    /// 建立 OneBot 连接并完成身份核对。首次连接与断线重连走同一条路径。
+    ///
+    /// 只有 `get_login_info` 的 user_id 与配置的 expectedSelfID 完全一致、
+    /// 且 `get_status` 报告 online/good 时才算连上；否则一律视为失败，交由上层有限退避重试。
+    private func establishConnection(current: UUID) async throws {
+        let token = try resolveOneBotToken()
+        try await connection.connect(endpoint: config.endpoint, token: token)
+        let response = try await connection.action("get_login_info")
+        guard session == current else { throw CancellationError() }
+        guard let data = response["data"] as? [String: Any], QQPolicy.identifier(data["user_id"]) == config.expectedSelfID else {
+            throw AppFailure.message("实际登录 QQ 与配置不一致，已停止连接")
+        }
+        let health = try await connection.action("get_status")
+        guard session == current else { throw CancellationError() }
+        guard let healthData = health["data"] as? [String: Any], healthData["online"] as? Bool == true,
+              healthData["good"] as? Bool == true else { throw AppFailure.message("QQ 未在线或服务状态异常") }
+        let friends = try await connection.action("get_friend_list")
+        let groups = try await connection.action("get_group_list")
+        guard session == current else { throw CancellationError() }
+        contacts = ((friends["data"] as? [[String: Any]] ?? []).compactMap { item in
+            guard let number = QQPolicy.identifier(item["user_id"]) else { return nil }
+            return QQContact(number: number, name: item["remark"] as? String ?? item["nickname"] as? String ?? number, group: false)
+        }) + ((groups["data"] as? [[String: Any]] ?? []).compactMap { item in
+            guard let number = QQPolicy.identifier(item["group_id"]) else { return nil }
+            return QQContact(number: number, name: item["group_name"] as? String ?? number, group: true)
+        })
+    }
+
+    /// 心跳与定时任务看门狗。超时按「连接异常」处理，进入有限退避重连，而不是直接停机。
+    private func startWatchdog(current: UUID) {
+        watchdog?.cancel()
+        watchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { return }
+                guard let self, self.session == current else { return }
+                if Date().timeIntervalSince(self.lastHeartbeat) > 75 {
+                    self.handleConnectionLoss(AppFailure.message("QQ 心跳超时")); return
+                }
+                self.scheduleArtworks()
+                self.scheduleMemoryLearning()
+            }
+        }
+    }
+
+    // MARK: - 断线自愈
+
+    /// 连接异常断开时的处理。
+    ///
+    /// 与面板上的「主动断开」不同：这里保留运行锁、已保存配置与白名单，
+    /// 只回收连接层，然后进入有限退避重连。断线前是否在自动回复会被记下来，连上后恢复。
+    private func handleConnectionLoss(_ error: Error) {
+        guard connected || reconnectTask != nil else {
+            // 尚未成功连接过（例如首次连接就失败）：不重复排队重连。
+            self.error = error.localizedDescription
+            return
+        }
+        self.error = error.localizedDescription
+        if running { resumeReplyAfterReconnect = true }
+        pause()
+        connected = false
+        watchdog?.cancel(); watchdog = nil
+        connection.close()
+        status = "QQ 连接中断，正在尝试恢复"
+        scheduleReconnect()
+    }
+
+    /// 有限退避重连。
+    ///
+    /// 刻意不做无限重试：最多 Self.reconnectMaxAttempts 次，退避 5→10→…→120 秒封顶。
+    /// 全程只与本机 OneBot 端口通信，不会触发任何 QQ 登录动作，因此不会产生扫码重试。
+    /// 重连成功并通过身份核对之后，才恢复自动回复；失败到上限则停下并写明原因。
+    private func scheduleReconnect() {
+        guard reconnectAllowed, reconnectTask == nil else { return }
+        reconnectTask = Task { [weak self] in
+            guard let self else { return }
+            var delay = Self.reconnectBaseDelay
+            var restored = false
+            for attempt in 1...Self.reconnectMaxAttempts {
+                do { try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) } catch { break }
+                guard self.reconnectAllowed else { break }
+                self.status = "QQ 连接已断开，正在第 \(attempt)/\(Self.reconnectMaxAttempts) 次重连（\(Int(delay)) 秒后重试）"
+                let current = UUID(); self.session = current
+                do {
+                    try await self.establishConnection(current: current)
+                    self.connected = true
+                    self.lastHeartbeat = Date()
+                    self.startWatchdog(current: current)
+                    self.status = "QQ 已重新连接并核对账号"
+                    restored = true
+                    self.restoreReplyScope()
+                    break
+                } catch is CancellationError {
+                    break
+                } catch {
+                    self.error = error.localizedDescription
+                    delay = min(delay * 2, Self.reconnectMaxDelay)
+                }
+            }
+            self.reconnectTask = nil
+            if !restored, self.reconnectAllowed {
+                self.status = "QQ 连续 \(Self.reconnectMaxAttempts) 次重连未成功，已停止自动重连；请检查 QQ 登录状态后手动重新连接"
+            }
+        }
+    }
+
+    /// 连接恢复后幂等恢复自动回复范围。
+    ///
+    /// 只依据**已保存**的配置恢复：目标不变、启用集合不变、群聊不变，绝不新增目标。
+    /// 若设置了 DAFEIYU_ALLOWED_TARGETS，则启用集合必须恰好等于它，否则保持停止。
+    private func restoreReplyScope() {
+        let enabled = config.targets.filter(\.enabled)
+        guard !enabled.isEmpty else {
+            status = "QQ 已恢复连接；回复范围为空，自动回复未启动"
+            return
+        }
+        if let allowed = Self.allowedTargets() {
+            let keys = Set(enabled.map(\.key))
+            guard keys == allowed else {
+                error = "已保存的回复范围与部署白名单不一致，已保持停止自动回复"
+                status = "QQ 已恢复连接；回复范围与部署白名单不符，未启动自动回复"
+                return
+            }
+        }
+        guard !running else { return }
+        start()
+        if !running {
+            status = "QQ 已恢复连接；自动回复未恢复：\(error ?? "未知原因")"
+        }
+    }
+
+    // MARK: - 部署策略（环境变量）
+
+    /// 部署侧允许的自动回复目标集合，例如 `DAFEIYU_ALLOWED_TARGETS=private:1915946704`。
+    ///
+    /// 设置后：启用集合必须**恰好**等于该集合，且不得包含群聊目标；
+    /// 不满足时拒绝启动自动回复，而不是"尽量修正后照常回复"。
+    /// 未设置时保持原版行为，不做限制。
+    static func allowedTargets(environment: [String: String] = ProcessInfo.processInfo.environment) -> Set<String>? {
+        let raw = environment["DAFEIYU_ALLOWED_TARGETS"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !raw.isEmpty else { return nil }
+        let items = raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !items.isEmpty else { return nil }
+        return Set(items)
+    }
+
+    /// 无人值守开关：置 1 时进程启动即自动连接，并在连上后恢复自动回复。
+    static func autoResumeEnabled(environment: [String: String] = ProcessInfo.processInfo.environment) -> Bool {
+        let raw = environment["DAFEIYU_AUTO_RESUME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return ["1", "true", "yes"].contains(raw)
+    }
+
+    /// 解析 OneBot 令牌。
+    ///
+    /// 优先级：面板传入的临时凭据（仅内存）→ `DAFEIYU_ONEBOT_TOKEN_FILE` 指向的文件 →
+    /// `DAFEIYU_ONEBOT_TOKEN` 环境变量 → 钥匙串。文件路径由部署方给出，权限需为 0600。
+    private func resolveOneBotToken() throws -> String {
+        if let token = runtimeCredentials?.oneBotToken, !token.isEmpty { return token }
+        let environment = ProcessInfo.processInfo.environment
+        let rawPath = environment["DAFEIYU_ONEBOT_TOKEN_FILE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !rawPath.isEmpty {
+            guard let data = FileManager.default.contents(atPath: rawPath),
+                  let text = String(data: data, encoding: .utf8)?
+                      .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+                throw AppFailure.message("OneBot 令牌文件不可读或为空：\(rawPath)")
+            }
+            return text
+        }
+        if let token = environment["DAFEIYU_ONEBOT_TOKEN"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
+            return token
+        }
+        let token = try Keychain.load(account: "qq-onebot-token", allowAuthenticationUI: allowAuthenticationUI)
+        guard !token.isEmpty else { throw AppFailure.message("请先配置 OneBot 令牌") }
+        return token
+    }
+
+    /// 解析模型 Key。优先级：面板传入的临时凭据 → 环境变量 / 0600 密钥文件 → 钥匙串。
+    private func resolveModelKey() throws -> String {
+        if let key = runtimeCredentials?.deepSeekKey, !key.isEmpty { return key }
+        if let key = try? LLMSecret.resolve(explicit: ""), !key.isEmpty { return key }
+        let key = try Keychain.load(allowAuthenticationUI: allowAuthenticationUI)
+        guard !key.isEmpty else { throw AppFailure.message("请先在 AI 配置保存 DeepSeek Key") }
+        return key
     }
     func start(singleReply: Bool = false, duration: TimeInterval? = nil) {
         guard connected, !busy, !running, storageOK else { return }
@@ -458,8 +681,7 @@ struct QQRuntimeCredentials: Decodable {
             if let duration, !duration.isFinite || duration <= 0 || duration > 3 * 86400 {
                 throw AppFailure.message("运行时长应大于 0 且不超过 72 小时")
             }
-            let key = try runtimeCredentials?.deepSeekKey ?? Keychain.load(allowAuthenticationUI: allowAuthenticationUI)
-            guard !key.isEmpty else { throw AppFailure.message("请先在 AI 配置保存 DeepSeek Key") }
+            let key = try resolveModelKey()
             if config.effectiveImageGeneration.enabled || (config.effectiveVisionEnabled && config.effectiveVisualTools.provider == .zhipu) {
                 // Missing/inaccessible optional image keys must not take down ordinary QQ replies.
                 if imageCredentials.zhipuKey.isEmpty { imageCredentials.zhipuKey = (try? Keychain.load(account: "qq-image-zhipu", allowAuthenticationUI: false)) ?? "" }
@@ -471,6 +693,15 @@ struct QQRuntimeCredentials: Decodable {
             let enabled = config.targets.filter(\.enabled)
             guard !enabled.isEmpty, enabled.allSatisfy({ target in contacts.contains { $0.id == target.key } }) else {
                 throw AppFailure.message("请启用至少一个已通过联系人列表核对的 QQ 号或群号")
+            }
+            // 部署白名单：设置后启用集合必须恰好等于它，且不得含群聊目标。
+            if let allowed = Self.allowedTargets() {
+                guard allowed.allSatisfy({ $0.hasPrefix("private:") }) else {
+                    throw AppFailure.message("部署白名单只允许私聊目标，已拒绝启动自动回复")
+                }
+                guard Set(enabled.map(\.key)) == allowed else {
+                    throw AppFailure.message("启用范围与部署白名单不一致（应为 \(allowed.sorted().joined(separator: ","))），已拒绝启动自动回复")
+                }
             }
             try persist(); self.singleReply = singleReply
             // Hold only an idle-system-sleep assertion; screen locking remains available.
@@ -507,6 +738,10 @@ struct QQRuntimeCredentials: Decodable {
         heldOwnerEvents.removeAll()
     }
     func disconnect(reason: String = "QQ 已断开") {
+        // 面板上的主动断开＝用户意图：不再自动重连，也不自动恢复自动回复。
+        reconnectAllowed = false
+        reconnectTask?.cancel(); reconnectTask = nil
+        resumeReplyAfterReconnect = false
         pause(); session = nil; busy = false; connected = false; contacts = []
         #if os(macOS)
         loginCode = nil
@@ -541,7 +776,9 @@ struct QQRuntimeCredentials: Decodable {
             guard QQPolicy.identifier(object["self_id"]) == config.expectedSelfID else { disconnect(reason: "QQ 账号发生变化，已停止"); return }
             if object["meta_event_type"] as? String == "heartbeat" {
                 guard let s = object["status"] as? [String: Any], s["online"] as? Bool == true, s["good"] as? Bool == true else {
-                    disconnect(reason: "QQ 离线或服务异常，已停止"); return
+                    // QQ 侧掉线（常见于夜间 WiFi 短断）：保留配置与运行锁，进入有限退避重连。
+                    // 这里不会请求二维码，也不会触发任何 QQ 登录动作。
+                    handleConnectionLoss(AppFailure.message("QQ 离线或服务异常")); return
                 }
                 lastHeartbeat = Date()
             }
@@ -690,7 +927,7 @@ struct QQRuntimeCredentials: Decodable {
                 if message.group { rule.prompt += "\n" + QQGroupContext.prompt }
                 // Private turn history remains peer-scoped; groups use one chronological snapshot instead.
                 let contextKey = config.expectedSelfID + ":" + message.key + ":" + message.sender
-                let key = try runtimeCredentials?.deepSeekKey ?? Keychain.load(allowAuthenticationUI: allowAuthenticationUI)
+                let key = (try? resolveModelKey()) ?? ""
                 var preparedImage: ModelToolResult?
                 if !QQVisualTools.wantsWebSearch(message.text) && config.effectiveImageGeneration.enabled && QQImagePromptPlan.needsPlanning(message.text) && persona.rebuff(for: message.text) == nil {
                     preparedImage = try await prepareImage(request: message.text, proactive: proactive, epoch: epoch, message: message, target: target, key: key)
@@ -1202,7 +1439,7 @@ struct QQRuntimeCredentials: Decodable {
                         candidates += index.search(batch.filter { $0.subject == subject }.map(\.text).joined(separator: "\n"), subject: subject, limit: 24).filter { $0.subject == subject }
                     }
                     candidates = Array(Dictionary(grouping: candidates, by: \.id).values.compactMap(\.first).sorted { $0.updatedAt > $1.updatedAt }.prefix(48))
-                    let key = try self.runtimeCredentials?.deepSeekKey ?? Keychain.load(allowAuthenticationUI: self.allowAuthenticationUI)
+                    let key = (try? self.resolveModelKey()) ?? ""
                     self.memoryStatus = "正在整理会话重点"
                     let (delta, tokens, suppliedIDs) = try await self.modelClient.learnQQMemory(key: key, config: self.config.ai, events: batch, candidates: candidates, reserve: { [weak self] in
                         guard let self else { throw CancellationError() }
