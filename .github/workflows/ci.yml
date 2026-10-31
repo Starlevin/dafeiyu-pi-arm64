@@ -1,0 +1,20 @@
+name: macOS checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+      - name: Privacy and public file check
+        run: python3 scripts/check-public.py
+      - name: Unit and simulated integration tests
+        run: bash scripts/test.sh
+      - name: Build app
+        run: bash scripts/build.sh
+      - name: Real HTTP control boundary
+        run: python3 scripts/test-control-panel.py 'dist/WeChat AI Bot.app/Contents/MacOS/WeChatAIBot'
