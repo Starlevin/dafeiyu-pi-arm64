@@ -1,0 +1,92 @@
+name: ARM64 build (Raspberry Pi 3B / Debian 13)
+
+# 目标：在原生 arm64 运行器上编译并测试，产出可直接放到树莓派上的静态链接二进制。
+#
+# 说明：
+# - `ubuntu-24.04-arm` 是 GitHub 的免费 arm64 托管运行器，**仅对公开仓库开放**。
+#   私有仓库没有免费的 arm64 运行器，这一点在 README-PI.md 里有说明。
+# - 编译使用官方 `swift:6.1-noble` 镜像，避免依赖发行版自带的 Swift。
+# - 加 `--static-swift-stdlib` 把 Swift 运行库静态链入，产物不再依赖容器内的
+#   libswiftCore.so 等动态库；Debian 13 的 glibc（2.41）比 noble（2.39）新，
+#   因此向后兼容，可直接在 Pi 上运行。
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: swift:6.1-noble
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装测试依赖
+        run: |
+          apt-get update -qq
+          # python3-pil：QQStickerTests / QQIncomingImagesTests 的 data(for:) 需要 Pillow，
+          # 缺它会让这两组用例失败，并因返回 nil 连带触发 QQOnlineToolsTests 崩溃。
+          apt-get install -y -qq python3 python3-pil file binutils
+
+      - name: 环境自证
+        run: |
+          echo "架构: $(uname -m)"
+          echo "内核: $(uname -r)"
+          swift --version
+          python3 --version
+          python3 -c "import PIL; print('Pillow', PIL.__version__)"
+          cat /etc/os-release | head -2
+
+      - name: 编译 release
+        run: |
+          set -o pipefail
+          swift build -c release --static-swift-stdlib 2>&1 | tail -40
+
+      - name: 运行 LLMProvider 测试（无需真实 Key）
+        run: |
+          set -o pipefail
+          swift test --filter LLMProviderTests 2>&1 | tail -40
+
+      - name: 完整测试套件（结果记录，但不阻断产物产出）
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          swift test 2>&1 | tail -60 || true
+
+      - name: 产物 ABI 与依赖自检
+        run: |
+          BIN="$(swift build -c release --static-swift-stdlib --show-bin-path)/WeChatAIBot"
+          echo "=== file ==="
+          file "$BIN"
+          echo "=== 大小 ==="
+          ls -lh "$BIN"
+          echo "=== 动态依赖 ==="
+          ldd "$BIN" || true
+          echo "=== 期望 ==="
+          echo "ELF 64-bit LSB, ARM aarch64；不出现 libswiftCore.so"
+
+      - name: 组装部署包
+        run: |
+          APP=dist/dafeiyu-linux
+          mkdir -p "$APP/Resources"
+          cp "$(swift build -c release --static-swift-stdlib --show-bin-path)/WeChatAIBot" "$APP/dafeiyu"
+          for dir in QQControl QQStickers Linux SocialControl SocialBrowser; do
+            [ -d "Resources/$dir" ] && cp -R "Resources/$dir" "$APP/Resources/"
+          done
+          tar -czf dafeiyu-linux-arm64.tar.gz -C dist dafeiyu-linux
+          ls -lh dafeiyu-linux-arm64.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dafeiyu-linux-arm64
+          path: dafeiyu-linux-arm64.tar.gz
+          retention-days: 14
