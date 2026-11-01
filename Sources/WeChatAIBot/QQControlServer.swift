@@ -246,6 +246,7 @@ import BotCore
                 "stickers": engine.stickerLibrary.items.map { ["id": $0.id, "title": $0.title, "source": $0.source, "context": $0.context ?? "", "emotion": $0.emotion.rawValue, "author": $0.author ?? "", "license": $0.license ?? "", "local": $0.id.hasPrefix("local-"), "publicSharing": $0.publicSharing ?? false] as [String: Any] },
                 "runDeadline": engine.runDeadline.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
                 "calls": engine.usage.calls, "attempts": engine.sends.attempts, "confirmed": engine.sends.confirmed,
+                "sendUsageDay": engine.sends.day, "sendUsageByChat": engine.sends.byChat,
                 "groupMessageCounts": engine.groupMessageCounts,
                 "queued": engine.queuedCount, "queueCapacity": QQEngine.queueCapacity,
                 "uncertain": engine.sends.uncertain, "rejected": engine.rejectedScopedEvents,

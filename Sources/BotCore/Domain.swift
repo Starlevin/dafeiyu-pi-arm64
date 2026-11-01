@@ -35,7 +35,7 @@ public struct BotConfig: Codable, Equatable, Sendable {
     public func validate() throws {
         try effectiveSendLimits.validate()
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CoreError.invalid("模型不能为空") }
-        guard (64...4000).contains(maxTokens), (1...10000).contains(dailyLimit), (1...300).contains(cooldownSeconds) else {
+        guard (64...4000).contains(maxTokens), (0...10000).contains(dailyLimit), (1...300).contains(cooldownSeconds) else {
             throw CoreError.invalid("输出上限、日调用次数或冷却时间超出范围")
         }
         guard (0...23).contains(workStart), (0...23).contains(workEnd) else { throw CoreError.invalid("工作时段无效") }
@@ -130,7 +130,7 @@ public struct Usage: Codable, Sendable {
     }
     public mutating func reserve(limit: Int, now: Date = Date()) -> Bool {
         rollover(now: now)
-        guard calls < limit else { return false }
+        guard limit == 0 || calls < limit else { return false }
         calls += 1; return true
     }
 }

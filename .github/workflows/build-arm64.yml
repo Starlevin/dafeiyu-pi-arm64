@@ -103,6 +103,12 @@ jobs:
           export DAFEIYU_RESOURCES="$PWD/Resources"
           swift test --no-parallel --filter 'QQImageGeneratorTests.*senseNova' 2>&1 | tail -50
 
+      - name: 验证可配置限额与重连策略
+        run: |
+          set -o pipefail
+          export DAFEIYU_RESOURCES="$PWD/Resources"
+          swift test --no-parallel --filter 'RuntimePolicyTests|QQReconnectWatchdogTests|LLMProviderTests' 2>&1 | tail -70
+
       - name: 组装部署包
         run: |
           APP=dist/dafeiyu-linux
@@ -121,14 +127,3 @@ jobs:
           path: dafeiyu-linux-arm64.tar.gz
           retention-days: 14
 
-      - name: 运行 LLMProvider 测试（无需真实 Key）
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          swift test --filter LLMProviderTests 2>&1 | tail -40
-
-      - name: 完整测试套件（结果记录，但不阻断产物产出）
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          swift test 2>&1 | tail -60 || true

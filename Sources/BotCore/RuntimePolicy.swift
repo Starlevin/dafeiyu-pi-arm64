@@ -23,9 +23,13 @@ public struct SendLimits: Codable, Equatable, Sendable {
     public var daily = 100
     public var perChatDaily = 30
     public var globalIntervalSeconds = 3
+    /// Zero means unlimited; absent entries inherit perChatDaily. Keys are stable target UUIDs.
+    public var perChatDailyOverrides: [String: Int]?
     public init() {}
     public func validate() throws {
-        guard (1...10000).contains(daily), (1...10000).contains(perChatDaily),
+        guard (0...10000).contains(daily), (0...10000).contains(perChatDaily),
+              (perChatDailyOverrides ?? [:]).count <= 20,
+              (perChatDailyOverrides ?? [:]).allSatisfy({ UUID(uuidString: $0.key) != nil && (0...10000).contains($0.value) }),
               (1...300).contains(globalIntervalSeconds) else { throw CoreError.invalid("发送限额或间隔超出范围") }
     }
 }
@@ -49,8 +53,9 @@ public struct SendUsage: Codable, Sendable {
     }
     public mutating func allowance(chat: UUID, limits: SendLimits, chatCooldown: Int, now: Date = Date()) -> SendAllowance {
         rollover(now: now)
-        if attempts >= limits.daily { return .globalLimit }
-        if byChat[chat.uuidString, default: 0] >= limits.perChatDaily { return .chatLimit }
+        if limits.daily > 0 && attempts >= limits.daily { return .globalLimit }
+        let chatLimit = limits.perChatDailyOverrides?[chat.uuidString] ?? limits.perChatDaily
+        if chatLimit > 0 && byChat[chat.uuidString, default: 0] >= chatLimit { return .chatLimit }
         if let lastGlobal, now.timeIntervalSince(lastGlobal) < Double(limits.globalIntervalSeconds) { return .cooldown }
         if let last = lastByChat[chat.uuidString], now.timeIntervalSince(last) < Double(chatCooldown) { return .cooldown }
         return .allowed

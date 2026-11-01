@@ -70,7 +70,36 @@ struct RuntimePolicyTests {
         dictionary.removeValue(forKey: "sendLimits")
         var config = try JSONDecoder().decode(BotConfig.self, from: JSONSerialization.data(withJSONObject: dictionary))
         #expect(config.effectiveSendLimits.daily == 100)
-        config.effectiveSendLimits.daily = 0
+        config.effectiveSendLimits.daily = -1
         #expect(throws: (any Error).self) { try config.validate() }
+    }
+    @Test func unlimitedAndPerTargetOverridesPreserveCountersAndCooldown() throws {
+        var limits = SendLimits(); limits.daily = 0; limits.perChatDaily = 0
+        let chat = UUID(), other = UUID(), now = Date()
+        var usage = SendUsage()
+        for i in 0..<110 {
+            let t = try usage.reserve(chat: chat, limits: limits, chatCooldown: 1, now: now.addingTimeInterval(Double(i * 4)))
+            usage.finish(t, confirmed: true, now: now.addingTimeInterval(Double(i * 4)))
+        }
+        #expect(usage.attempts == 110 && usage.confirmed == 110)
+        let later = now.addingTimeInterval(450)
+        limits.perChatDailyOverrides = [chat.uuidString: 100]
+        #expect(usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: later) == .chatLimit)
+        #expect(usage.allowance(chat: other, limits: limits, chatCooldown: 1, now: later) == .allowed)
+        limits.perChatDailyOverrides = [chat.uuidString: 0]
+        #expect(usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: later) == .allowed)
+        #expect(usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: now.addingTimeInterval(437)) == .cooldown)
+        try limits.validate()
+        let roundTrip = try JSONDecoder().decode(SendLimits.self, from: JSONEncoder().encode(limits))
+        #expect(roundTrip == limits)
+        limits.perChatDailyOverrides = ["not-a-uuid": 1]
+        #expect(throws: (any Error).self) { try limits.validate() }
+    }
+    @Test func unlimitedModelCallsStillCountAndPositiveCapStillWorks() {
+        var usage = Usage(); let now = Date()
+        for _ in 0..<250 { #expect(usage.reserve(limit: 0, now: now)) }
+        #expect(usage.calls == 250)
+        #expect(!usage.reserve(limit: 250, now: now))
+        #expect(usage.reserve(limit: 251, now: now))
     }
 }
