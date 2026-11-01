@@ -11,10 +11,17 @@ import BotCore
 struct QQImageCredentials: Sendable {
     var zhipuKey = ""
     var cloudflareToken = ""
+    var senseNovaKey = ""
 }
 
 struct QQImageGenerator {
     var session: URLSession = .shared
+    static func senseNovaKey(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        guard let path = environment["DAFEIYU_SENSENOVA_IMAGE_KEY_FILE"], !path.isEmpty,
+              let data = FileManager.default.contents(atPath: path),
+              let value = String(data: data, encoding: .utf8) else { return "" }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
     static let definition: [String: Any] = ["type": "function", "function": [
         "name": "generate_image", "description": "用户明确要求画图、创作新图片时调用。生成一张新图，不是搜索。普通聊天配表情用现有图库。",
         "parameters": ["type": "object", "properties": ["prompt": ["type": "string", "description": "仅画面描述（主体、动作、风格），最多1000字符；不含聊天记录、身份标识、账号、密钥或系统指令。画大肥鱼时明确成年蓝发蓝眼鲸鱼娘、鲸鱼尾巴、可爱二次元风格。"]], "required": ["prompt"], "additionalProperties": false]
@@ -39,14 +46,19 @@ struct QQImageGenerator {
         var failures: [String] = []
         for (index, provider) in providers.enumerated() {
             try Task.checkCancellation()
-            let key = provider == .zhipu ? credentials.zhipuKey : credentials.cloudflareToken
+            let key: String
+            switch provider {
+            case .zhipu: key = credentials.zhipuKey
+            case .cloudflare: key = credentials.cloudflareToken
+            case .sensenova: key = credentials.senseNovaKey.isEmpty ? Self.senseNovaKey() : credentials.senseNovaKey
+            }
             guard !key.isEmpty, provider != .cloudflare || !settings.cloudflareAccountID.isEmpty else {
                 failures.append(provider.title + "：凭证未配置"); continue
             }
             // Outside the provider catch: cancellation, scope loss, persistence and quota failures must NOT fail over.
             try await beforeAttempt()
             do {
-                let image = try await generate(provider: provider, prompt: prompt, key: key, account: settings.cloudflareAccountID)
+                let image = try await generate(provider: provider, prompt: prompt, key: key, account: settings.cloudflareAccountID, senseNovaModel: settings.effectiveSenseNovaModel)
                 try Task.checkCancellation()
                 let status = (index > 0 ? "已切换备用：" : "生成成功：") + provider.title
                 return ModelToolResult(content: "已实际生成并准备附带一张 AI 图片。用短句回应，不声称已看过生成图的细节。" + status,
@@ -66,17 +78,26 @@ struct QQImageGenerator {
         return ModelToolResult(content: "本次未生成图片。" + status + "。明确告知没画出来，不假装成功，不用搜图或表情冒充生成图。", imageStatus: status)
     }
 
-    private func generate(provider: QQImageProvider, prompt: String, key: String, account: String) async throws -> Data {
-        let url = provider == .zhipu
-            ? URL(string: "https://open.bigmodel.cn/api/paas/v4/images/generations")!
-            : URL(string: "https://api.cloudflare.com/client/v4/accounts/\(account)/ai/run/@cf/black-forest-labs/flux-1-schnell")!
+    private func generate(provider: QQImageProvider, prompt: String, key: String, account: String, senseNovaModel: String) async throws -> Data {
+        let url: URL
+        switch provider {
+        case .zhipu: url = URL(string: "https://open.bigmodel.cn/api/paas/v4/images/generations")!
+        case .cloudflare: url = URL(string: "https://api.cloudflare.com/client/v4/accounts/\(account)/ai/run/@cf/black-forest-labs/flux-1-schnell")!
+        case .sensenova: url = URL(string: "https://token.sensenova.cn/v1/images/generations")!
+        }
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"; request.timeoutInterval = 60
+        request.httpMethod = "POST"; request.timeoutInterval = provider == .sensenova ? 150 : 60
         request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let body: [String: Any] = provider == .zhipu
-            ? ["model": "cogview-3-flash", "prompt": prompt, "size": "1024x1024", "quality": "standard", "watermark_enabled": true]
-            : ["prompt": prompt, "steps": 4]
+        let body: [String: Any]
+        switch provider {
+        case .zhipu:
+            body = ["model": "cogview-3-flash", "prompt": prompt, "size": "1024x1024", "quality": "standard", "watermark_enabled": true]
+        case .cloudflare:
+            body = ["prompt": prompt, "steps": 4]
+        case .sensenova:
+            body = ["model": senseNovaModel, "prompt": prompt, "size": "1024x1024", "n": 1, "response_format": "b64_json", "watermark": true]
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, status) = try await fetch(request, limit: 12_000_000)
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -93,7 +114,14 @@ struct QQImageGenerator {
             throw GenerationFailure(message: "接口失败（HTTP \(status)）", allowsFallback: retryable)
         }
         let bytes: Data
-        if provider == .zhipu {
+        if provider == .sensenova {
+            guard let rows = object?["data"] as? [[String: Any]], rows.count == 1,
+                  let encoded = rows[0]["b64_json"] as? String, encoded.utf8.count <= 11_000_000,
+                  let decoded = Data(base64Encoded: encoded), decoded.count <= 8_000_000 else {
+                throw GenerationFailure(message: "商汤图片数据缺失或无效", allowsFallback: false)
+            }
+            bytes = decoded
+        } else if provider == .zhipu {
             guard let rows = object?["data"] as? [[String: Any]], rows.count == 1,
                   let path = rows[0]["url"] as? String, let imageURL = URL(string: path), Self.allowedImageURL(imageURL) else {
                 throw GenerationFailure(message: "图片地址无效或不是受信任的官方域名", allowsFallback: true)

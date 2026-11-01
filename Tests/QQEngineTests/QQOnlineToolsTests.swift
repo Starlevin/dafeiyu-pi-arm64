@@ -158,7 +158,11 @@ private actor ReservationCount {
         let item = QQStickerLibrary.Item(id: "fixture-sleep", title: "睡觉", emotion: .sleepy, file: "sleep.png", sha256: "fixture", source: "fixture", context: "晚安")
         let reservations = ReservationCount()
         let result = try await DeepSeekClient(session: session).reviewedQQReply(key: "synthetic", config: QQConfig().ai,
-            rule: rule, history: [], text: "晚安", stickerOptions: [item], reserve: { await reservations.add() })
+            rule: rule, history: [], text: "晚安", stickerOptions: [item],
+            // 本用例验证的是**双阶段校对**里的表情候选选择（期望两次模型调用），
+            // 因此显式要求走双阶段。普通闲聊现在会走单轮快速路径，
+            // 那是另一条分支，由 QQFastReplyPathTests 单独覆盖。
+            toolsMayRun: true, reserve: { await reservations.add() })
         #expect(await reservations.value == 2)
         #expect(result.stickerID == (mode == "valid" ? "fixture-sleep" : nil))
         #expect(!QQPersona().decode(result.text, input: "晚安").isFallback)

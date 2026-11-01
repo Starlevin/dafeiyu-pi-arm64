@@ -7,6 +7,8 @@ import FoundationNetworking
 // enforces the same limit while receiving, not after allocating an unbounded body.
 private final class BoundedDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     let limit: Int
+    /// 允许跟随的重定向目标主机（由调用方写死的白名单，绝不接受用户输入）。
+    private let redirectHosts: Set<String>
     private let lock = NSLock()
     private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
     private var session: URLSession?
@@ -15,7 +17,10 @@ private final class BoundedDownload: NSObject, URLSessionDataDelegate, @unchecke
     private var data = Data()
     private var response: URLResponse?
     private var oversized = false
-    init(limit: Int) { self.limit = limit }
+    init(limit: Int, redirectHosts: Set<String> = []) {
+        self.limit = limit
+        self.redirectHosts = redirectHosts
+    }
     func start(configuration: URLSessionConfiguration, request: URLRequest, continuation: CheckedContinuation<(Data, URLResponse), Error>) {
         lock.lock(); defer { lock.unlock() }
         if cancelled { continuation.resume(throwing: CancellationError()); return }
@@ -27,7 +32,11 @@ private final class BoundedDownload: NSObject, URLSessionDataDelegate, @unchecke
         lock.lock(); cancelled = true; let task = task; lock.unlock(); task?.cancel()
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        // 默认仍然拒绝一切重定向（防 SSRF）；只有目标主机在调用方写死的白名单里才跟随。
+        let host = request.url?.host?.lowercased() ?? ""
+        completionHandler(redirectHosts.contains(host) ? request : nil)
+    }
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         self.response = response
@@ -49,8 +58,9 @@ private final class BoundedDownload: NSObject, URLSessionDataDelegate, @unchecke
 }
 
 extension URLSession {
-    func boundedData(for request: URLRequest, limit: Int) async throws -> (Data, URLResponse) {
-        let download = BoundedDownload(limit: limit)
+    /// `redirectHosts` 为空时行为与原来一致：拒绝一切重定向。
+    func boundedData(for request: URLRequest, limit: Int, redirectHosts: Set<String> = []) async throws -> (Data, URLResponse) {
+        let download = BoundedDownload(limit: limit, redirectHosts: redirectHosts)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 download.start(configuration: configuration, request: request, continuation: continuation)

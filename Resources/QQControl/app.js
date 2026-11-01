@@ -169,6 +169,7 @@ function syncForms() {
     const settings=state.imageGeneration??{};
     $('imageGenEnabled').checked=settings.enabled??false; $('imageGenPrimary').value=settings.primary??'zhipu';
     $('imageGenFallback').checked=settings.fallbackEnabled??true; $('imageGenAccount').value=settings.cloudflareAccountID??'';
+    $('imageGenSenseNovaModel').value=settings.sensenovaModel??'sensenova-u1-fast';
   }
   if(shouldSync('reply')) {
     const ai=state.config.ai, persona=state.persona, memory=state.memoryOptions;
@@ -383,7 +384,7 @@ function render() {
   text('groupParticipationCounts', state.config.groupParticipationEnabled ? state.config.targets.filter(t=>t.enabled && t.group).map(t=>`${t.name}：${state.groupMessageCounts?.['group:'+t.number] ?? 0} / ${state.config.groupParticipationEvery ?? 10} 条`).join('；') || '尚未启用群聊' : '');
   text('memoryStatus', state.memoryStatus==='记忆等待新消息' ? '' : state.memoryStatus);
   text('imageGenStatus', state.imageGenerationStatus==='尚未调用生图' ? '' : state.imageGenerationStatus);
-  for(const id of ['imageGenEnabled','imageGenPrimary','imageGenFallback','imageGenZhipuKey','imageGenAccount','imageGenCloudflareToken','imageGenPersist','imageGenSave']) $(id).disabled = state.running || state.busy || pending;
+  for(const id of ['imageGenEnabled','imageGenPrimary','imageGenSenseNovaModel','imageGenFallback','imageGenZhipuKey','imageGenAccount','imageGenCloudflareToken','imageGenPersist','imageGenSave']) $(id).disabled = state.running || state.busy || pending;
   text('visualCredentials', `Google 凭证：${state.googleVisionCredential ? '已载入' : '未载入'}`);
   text('visualStatus',state.visualStatus==='尚未调用外置识图或搜图' ? '' : state.visualStatus);
   for(const id of ['visionProvider','googleWebEnabled','googleVisionKey','visualPersist','visualSave']) $(id).disabled = state.running || state.busy || pending;
@@ -473,7 +474,7 @@ $('visualSave').addEventListener('click',async()=>{
   if(await act(action)) $('googleVisionKey').value='';
 });
 $('imageGenSave').addEventListener('click',async()=>{
-  const action={action:'saveImageGeneration',imageGeneration:{enabled:$('imageGenEnabled').checked,primary:$('imageGenPrimary').value,fallbackEnabled:$('imageGenFallback').checked,cloudflareAccountID:$('imageGenAccount').value.trim()},zhipuKey:$('imageGenZhipuKey').value,cloudflareToken:$('imageGenCloudflareToken').value,persistImageCredentials:$('imageGenPersist').checked};
+  const action={action:'saveImageGeneration',imageGeneration:{enabled:$('imageGenEnabled').checked,primary:$('imageGenPrimary').value,sensenovaModel:$('imageGenSenseNovaModel').value.trim(),fallbackEnabled:$('imageGenFallback').checked,cloudflareAccountID:$('imageGenAccount').value.trim()},zhipuKey:$('imageGenZhipuKey').value,cloudflareToken:$('imageGenCloudflareToken').value,persistImageCredentials:$('imageGenPersist').checked};
   if(await act(action)) { $('imageGenZhipuKey').value='';$('imageGenCloudflareToken').value=''; }
 });
 $('search').addEventListener('input',renderContacts);

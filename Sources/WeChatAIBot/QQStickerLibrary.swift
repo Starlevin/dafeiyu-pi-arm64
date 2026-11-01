@@ -59,6 +59,36 @@ struct QQStickerLibrary {
         let gentle = emotion == .neutral ? [] : available.filter { $0.emotion == .neutral }.shuffled()
         return Array(matching.prefix(12)) + Array(gentle.prefix(4))
     }
+
+    /// 单轮快速路径用的候选池：按情绪分组轮转抽样，保证每种情绪都有图可选。
+    ///
+    /// 2026-11-01 修正（实测发现的缺陷）：单轮路径原本直接用 `emotion: .neutral` 预筛，
+    /// 而双阶段路径是「先出草稿、读出真实情绪，再按该情绪筛图」。
+    /// 单轮路径没有草稿这一步，于是只能按 neutral 筛 ——
+    /// 表情库里若没有中性图，候选会直接变成空集，
+    /// 生产私聊就会**静默丢失表情包**（回复照发，只是永远不带图）。
+    ///
+    /// 现在改为按情绪分组轮转抽样：每种情绪都至少有一席，
+    /// 模型仍按原口径自行选择，选完继续用「id 必须在候选内 + 情绪相容」校验兜底，
+    /// 因此不会选到不合情境的图。
+    static func balancedShortlist(_ available: [Item], limit: Int = 16) -> [Item] {
+        guard limit > 0, !available.isEmpty else { return [] }
+        var groups: [QQEmotion: [Item]] = [:]
+        for item in available { groups[item.emotion, default: []].append(item) }
+        var picked: [Item] = []
+        var round = 0
+        while picked.count < limit {
+            var added = false
+            for emotion in QQEmotion.allCases {
+                guard picked.count < limit else { break }
+                let bucket = groups[emotion] ?? []
+                if round < bucket.count { picked.append(bucket[round]); added = true }
+            }
+            if !added { break }
+            round += 1
+        }
+        return picked
+    }
     func data(for item: Item) -> Data? {
         let directory = item.id.hasPrefix("local-") ? localDirectory : directory
         guard let directory, item.file == (item.file as NSString).lastPathComponent,
