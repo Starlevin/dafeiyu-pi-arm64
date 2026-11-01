@@ -84,11 +84,15 @@ struct RuntimePolicyTests {
         #expect(usage.attempts == 110 && usage.confirmed == 110)
         let later = now.addingTimeInterval(450)
         limits.perChatDailyOverrides = [chat.uuidString: 100]
-        #expect(usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: later) == .chatLimit)
-        #expect(usage.allowance(chat: other, limits: limits, chatCooldown: 1, now: later) == .allowed)
+        let blocked = usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: later)
+        let otherAllowed = usage.allowance(chat: other, limits: limits, chatCooldown: 1, now: later)
+        #expect(blocked == .chatLimit)
+        #expect(otherAllowed == .allowed)
         limits.perChatDailyOverrides = [chat.uuidString: 0]
-        #expect(usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: later) == .allowed)
-        #expect(usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: now.addingTimeInterval(437)) == .cooldown)
+        let unlimited = usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: later)
+        let cooldown = usage.allowance(chat: chat, limits: limits, chatCooldown: 1, now: now.addingTimeInterval(437))
+        #expect(unlimited == .allowed)
+        #expect(cooldown == .cooldown)
         try limits.validate()
         let roundTrip = try JSONDecoder().decode(SendLimits.self, from: JSONEncoder().encode(limits))
         #expect(roundTrip == limits)
@@ -97,9 +101,11 @@ struct RuntimePolicyTests {
     }
     @Test func unlimitedModelCallsStillCountAndPositiveCapStillWorks() {
         var usage = Usage(); let now = Date()
-        for _ in 0..<250 { #expect(usage.reserve(limit: 0, now: now)) }
+        for _ in 0..<250 { let reserved = usage.reserve(limit: 0, now: now); #expect(reserved) }
         #expect(usage.calls == 250)
-        #expect(!usage.reserve(limit: 250, now: now))
-        #expect(usage.reserve(limit: 251, now: now))
+        let rejected = usage.reserve(limit: 250, now: now)
+        let reserved = usage.reserve(limit: 251, now: now)
+        #expect(!rejected)
+        #expect(reserved)
     }
 }
