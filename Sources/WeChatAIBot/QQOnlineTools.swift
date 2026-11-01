@@ -21,6 +21,16 @@ struct ModelToolResult: Sendable {
 
 // Requests go only to fixed search providers and Wikimedia's image CDN. Result pages are not fetched.
 struct QQOnlineTools {
+    /// 允许访问的固定主机白名单（非用户输入）。
+    ///
+    /// `cn.bing.com` 是 `www.bing.com` 的 RSS 端点在部分地区网络下的 302 跳转目标，
+    /// 不放行它会让联网工具必然失败；仍然只允许固定主机，不接受任何用户提供的地址。
+    static let allowedHosts: Set<String> = [
+        "www.bing.com", "cn.bing.com", "en.wikipedia.org", "zh.wikipedia.org",
+        "commons.wikimedia.org", "upload.wikimedia.org", "thumb.wikimedia.org"
+    ]
+    /// 允许跟随的重定向目标主机（写死白名单，防 SSRF 的前提不变）。
+    static let allowedRedirectHosts: Set<String> = ["www.bing.com", "cn.bing.com"]
     var session: URLSession = .shared
     static let definitions: [[String: Any]] = [
         ("search_web", "搜索需要联网核对的事实、近期信息。只依据摘要回答；不足就说没查实。"),
@@ -119,13 +129,13 @@ struct QQOnlineTools {
     }
     private func fetch(_ url: URL, limit: Int) async throws -> Data {
         guard url.scheme == "https", url.user == nil, url.password == nil, url.port == nil,
-              ["www.bing.com", "en.wikipedia.org", "zh.wikipedia.org", "commons.wikimedia.org", "upload.wikimedia.org", "thumb.wikimedia.org"].contains(url.host ?? "") else { throw URLError(.badURL) }
+              Self.allowedHosts.contains(url.host ?? "") else { throw URLError(.badURL) }
         var request = URLRequest(url: url); request.timeoutInterval = 15
         request.setValue("DaFeiYuBot/1.0 (personal QQ assistant)", forHTTPHeaderField: "User-Agent")
         #if os(Linux)
-        let (linuxData, response) = try await session.boundedData(for: request, limit: limit)
+        let (linuxData, response) = try await session.boundedData(for: request, limit: limit, redirectHosts: Self.allowedRedirectHosts)
         #else
-        let (bytes, response) = try await session.bytes(for: request, delegate: NoSearchRedirect())
+        let (bytes, response) = try await session.bytes(for: request, delegate: NoSearchRedirect(allowedHosts: Self.allowedRedirectHosts))
         #endif
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= limit else { throw URLError(.badServerResponse) }
         var result = Data()
@@ -150,8 +160,14 @@ struct QQOnlineTools {
 }
 
 private final class NoSearchRedirect: NSObject, URLSessionTaskDelegate {
+    /// 允许跟随的重定向目标主机；为空时拒绝一切重定向（与原版一致）。
+    private let allowedHosts: Set<String>
+    init(allowedHosts: Set<String> = []) { self.allowedHosts = allowedHosts }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        let host = request.url?.host?.lowercased() ?? ""
+        completionHandler(allowedHosts.contains(host) ? request : nil)
+    }
 }
 private final class SearchRSS: NSObject, XMLParserDelegate {
     var items: [[String: String]] = []

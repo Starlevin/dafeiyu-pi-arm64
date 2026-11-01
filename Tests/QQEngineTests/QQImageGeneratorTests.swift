@@ -54,6 +54,10 @@ private final class ImageProviderFixture: URLProtocol, @unchecked Sendable {
             else if mode == "malformed" { object = [:] }
             else if mode == "falseSuccess" { object = ["success": false] }
             else { object = ["data": [["url": mode == "badURL" ? "http://127.0.0.1/secret" : "https://maas-watermark-prod-new.cn-wlcb.ufileos.com/fixture.png"]]] }
+        } else if host == "token.sensenova.cn" {
+            if mode == "senseNovaMissing" { object = ["data": []] }
+            else if mode == "senseNovaModeration" { object = ["error": ["message": "content safety refusal"]] }
+            else { object = ["data": [["b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGNkSDnBgA0wYRUdtBIA7kgBPOB9vN0AAAAASUVORK5CYII="]]] }
         } else if host == "api.cloudflare.com" {
             if ["bothFail", "reverse"].contains(mode) { status = 503; object = ["success": false, "errors": [["code": 3040, "message": "busy"]]] }
             else { object = ["success": true, "result": ["image": Self.png.base64EncodedString()]] }
@@ -75,6 +79,40 @@ private final class ImageProviderFixture: URLProtocol, @unchecked Sendable {
         var value = QQImageGenerationConfig(); value.enabled = true; value.cloudflareAccountID = String(repeating: "a", count: 32); return value
     }
     private let credentials = QQImageCredentials(zhipuKey: "synthetic-zhipu", cloudflareToken: "synthetic-cloudflare")
+
+    @Test func senseNovaUsesIndependentKeyModelAndWatermark() async throws {
+        var images = settings; images.primary = .sensenova; images.fallbackEnabled = false
+        images.sensenovaModel = "sensenova-u1.5-lite"
+        let result = try await QQImageGenerator(session: session("senseNovaSuccess")).execute(
+            arguments: "{\"prompt\":\"a blue flower\"}", settings: images,
+            credentials: QQImageCredentials(senseNovaKey: "synthetic-sensenova"), beforeAttempt: {})
+        #expect(result.image != nil)
+        let sent = try #require(ImageProviderFixture.captured.first)
+        #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer synthetic-sensenova")
+        let body = try JSONSerialization.jsonObject(with: #require(sent.httpBody)) as! [String: Any]
+        #expect(body["model"] as? String == "sensenova-u1.5-lite")
+        #expect(body["watermark"] as? Bool == true)
+        #expect(body["n"] as? Int == 1)
+        #expect(body["response_format"] as? String == "b64_json")
+        #expect(ImageProviderFixture.captured.count == 1)
+    }
+
+    @Test func senseNovaRejectsMissingImageAndDoesNotFailOverOnModeration() async throws {
+        for mode in ["senseNovaMissing", "senseNovaModeration"] {
+            var images = settings; images.primary = .sensenova; images.fallbackEnabled = true
+            let result = try await QQImageGenerator(session: session(mode)).execute(arguments: "{\"prompt\":\"a flower\"}",
+                settings: images, credentials: QQImageCredentials(zhipuKey: "synthetic-zhipu", senseNovaKey: "synthetic-sensenova"), beforeAttempt: {})
+            #expect(result.image == nil)
+            #expect(ImageProviderFixture.captured.count == 1)
+        }
+    }
+
+    @Test func senseNovaLegacySettingsAndInvalidModel() throws {
+        let old = try JSONDecoder().decode(QQImageGenerationConfig.self, from: Data("{\"enabled\":false,\"primary\":\"zhipu\",\"fallbackEnabled\":true,\"cloudflareAccountID\":\"\"}".utf8))
+        #expect(old.effectiveSenseNovaModel == "sensenova-u1-fast")
+        var invalid = old; invalid.sensenovaModel = "invalid model/route"
+        #expect(throws: (any Error).self) { try invalid.validate() }
+    }
 
     @Test func imagePlansRequireBoundedTypedDecisions() throws {
         #expect(try QQImagePromptPlan.decode("{\"action\":\"generate\",\"prompt\":\"成年动漫角色\",\"note\":\"\"}").action == .generate)

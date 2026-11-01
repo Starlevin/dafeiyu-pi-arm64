@@ -15,6 +15,22 @@ import Foundation
 ///     DAFEIYU_LLM_MAX_RETRIES=2
 ///
 /// 密钥本身只在这里解析、只在请求头里使用，不写日志、不进错误信息、不落盘。
+/// 回复链路模式。
+///
+/// - `.original`：原版行为，每条回复固定走「草稿 + 语义校对」两次模型调用。
+/// - `.fast`：普通短文本私聊只走一次调用；只有当消息命中风险信号时才回退到原版双阶段。
+///
+/// 实测（SenseNova 6.8 Flash Lite，合成填充负载，非真实聊天内容）：
+/// 单次调用约 2.5 秒 / ~2100 tokens，双阶段约 9.2 秒 / ~8900 tokens。
+/// 延迟主要来自「第二次调用」本身，而不是 `reasoning_effort` 的取值
+/// （high / none / low 实测差异在噪声范围内）。
+///
+/// 回滚：设置 `DAFEIYU_REPLY_MODE=original` 即完全恢复原版双阶段链路。
+enum QQReplyMode: String, Equatable, Sendable {
+    case fast
+    case original
+}
+
 struct LLMProvider: Equatable, Sendable {
     enum Kind: String, Equatable, Sendable {
         case deepseek
@@ -32,6 +48,17 @@ struct LLMProvider: Equatable, Sendable {
     var modelOverride: String?
     var requestTimeout: TimeInterval
     var maxRetries: Int
+    /// 回复链路模式；`.original` 即原版双阶段，用于回滚对照。
+    var replyMode: QQReplyMode
+    /// 双阶段被保留时的思考强度。**默认 high，与原版一致**；
+    /// 需要缩短超长校对输入的耗时可用 DAFEIU_REVIEW_EFFORT 降到 low。
+    var reviewEffort: String
+    /// 只向日志输出脱敏的阶段统计（耗时 / tokens / 调用次数），绝不输出消息原文。
+    var perfLogEnabled: Bool
+    /// 是否把图片像素发给模型。实测 SenseNova 6.8 Flash Lite 对 image_url 稳定返回
+    /// HTTP 500 `engine is not available temporarily`（纯文本同一 Key 正常），
+    /// 即该模型不支持图片输入。关掉后改为文字说明「未读取图片」，避免整条回复失败。
+    var imageInputEnabled: Bool
     /// 配置本身不成立时的说明；第一次真正调用时抛出，避免静默打到错误地址。
     var configurationProblem: String?
 
@@ -53,6 +80,10 @@ struct LLMProvider: Equatable, Sendable {
          modelOverride: String? = nil,
          requestTimeout: TimeInterval = 45,
          maxRetries: Int = 2,
+         replyMode: QQReplyMode = .original,
+         reviewEffort: String = "high",
+         perfLogEnabled: Bool = false,
+         imageInputEnabled: Bool = true,
          configurationProblem: String? = nil) {
         self.kind = kind
         self.baseURL = baseURL ?? LLMProvider.defaultBaseURL(for: kind)
@@ -61,6 +92,10 @@ struct LLMProvider: Equatable, Sendable {
         self.modelOverride = modelOverride
         self.requestTimeout = requestTimeout
         self.maxRetries = maxRetries
+        self.replyMode = replyMode
+        self.reviewEffort = reviewEffort
+        self.perfLogEnabled = perfLogEnabled
+        self.imageInputEnabled = imageInputEnabled
         self.configurationProblem = configurationProblem
     }
 
@@ -103,6 +138,37 @@ struct LLMProvider: Equatable, Sendable {
         default: thinkingOverride = nil
         }
 
+        // DAFEIYU_REPLY_MODE=original 完全恢复原版「草稿+校对」双阶段链路。
+        // DAFEIYU_REPLY_MODE=fast 启用单轮快速路径（普通短发言只调一次模型）。
+        //
+        // 2026-11-01 修正：默认值由 fast 改为 original。
+        //   单轮路径此前 100% 不可达，默认值取哪个都看不出差别；修正可达性后，
+        //   默认 fast 会让**所有**下游行为（模型调用次数、表情选择时机）都偏离原版，
+        //   与本文件下方「不设任何环境变量时行为与原版一致」的既有原则相矛盾。
+        //   现在默认回到原版双阶段：想要单轮必须显式设置 DAFEIYU_REPLY_MODE=fast，
+        //   生产部署脚本已经显式设置了该变量，线上行为不受影响。
+        let rawMode = environment["DAFEIYU_REPLY_MODE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let replyMode = QQReplyMode(rawValue: rawMode) ?? .original
+
+        // 保留双阶段时使用的思考强度。**默认与原版一致（high）**；
+        // 需要缩短超长校对输入耗时可用 DAFEIYU_REVIEW_EFFORT 降到 low。
+        // 只接受被测过的值，未知值一律回落到 high，避免向 API 传不支持的枚举，
+        // 也保证「不设任何环境变量时行为与原版一致」这一前提不被破坏。
+        let rawEffort = environment["DAFEIYU_REVIEW_EFFORT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let allowedEfforts: Set<String> = ["none", "minimal", "low", "medium", "high"]
+        let reviewEffort = allowedEfforts.contains(rawEffort) ? rawEffort : "high"
+
+        let perfRaw = environment["DAFEIYU_PERF_LOG"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let perfLogEnabled = ["1", "true", "yes"].contains(perfRaw)
+
+        // DAFEIYU_IMAGE_INPUT=0 时不下发图片像素（模型不支持 image_url 时避免整条回复 500）。
+        let imageRaw = environment["DAFEIYU_IMAGE_INPUT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let imageInputEnabled = !["0", "false", "no", "off"].contains(imageRaw)
+
         return LLMProvider(kind: kind,
                            baseURL: base,
                            sendsThinkingField: thinkingOverride ?? (kind == .deepseek),
@@ -110,6 +176,10 @@ struct LLMProvider: Equatable, Sendable {
                            modelOverride: rawModel.isEmpty ? nil : rawModel,
                            requestTimeout: timeout > 0 ? timeout : 45,
                            maxRetries: max(0, min(retries, 5)),
+                           replyMode: replyMode,
+                           reviewEffort: reviewEffort,
+                           perfLogEnabled: perfLogEnabled,
+                           imageInputEnabled: imageInputEnabled,
                            configurationProblem: problem)
     }
 }
