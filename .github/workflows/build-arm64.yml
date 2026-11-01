@@ -101,13 +101,17 @@ jobs:
         run: |
           set -o pipefail
           export DAFEIYU_RESOURCES="$PWD/Resources"
-          swift test --no-parallel --filter 'QQImageGeneratorTests.*senseNova' 2>&1 | tail -50
+          result=0
+          swift test -j 2 --no-parallel --filter 'QQImageGeneratorTests.*senseNova' >native-tests.log 2>&1 || result=$?
+          tail -50 native-tests.log
+          if [ "$result" != 0 ]; then grep -nE 'error:|failed|signal' native-tests.log | tail -35 || true; fi
+          exit "$result"
 
       - name: 验证可配置限额与重连策略
         run: |
           set -o pipefail
           export DAFEIYU_RESOURCES="$PWD/Resources"
-          swift test --no-parallel --filter 'RuntimePolicyTests|QQReconnectWatchdogTests|LLMProviderTests' 2>&1 | tail -70
+          swift test -j 2 --no-parallel --filter 'RuntimePolicyTests|QQReconnectWatchdogTests|LLMProviderTests' 2>&1 | tail -70
 
       - name: 组装部署包
         run: |
