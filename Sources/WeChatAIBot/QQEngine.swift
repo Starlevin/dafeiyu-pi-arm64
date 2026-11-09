@@ -33,6 +33,7 @@ private struct QQStored: Codable {
     var stickerHistory: [String: [QQStickerLibrary.Use]]?
     var stickerLastSentAt: Date?
     var artworkLedger: QQArtworkLedger?
+    var proactiveSendHistory: [String: [Date]]?
 }
 struct QQContact: Identifiable {
     var number: String; var name: String; var group: Bool
@@ -96,6 +97,8 @@ struct QQRuntimeCredentials: Decodable {
     private var sleepPrevention: Process?
     private var history: [String: [ChatTurn]] = [:]
     @Published private(set) var groupMessageCounts: [String: Int] = [:]
+    private let scopedProactive = QQScopedProactiveProfile.fromEnvironment()
+    private var proactiveSendHistory: [String: [Date]] = [:]
     private var groupRecentMessages: [String: [QQMemoryEvent]] = [:]
     private var groupRecentInputs: [String: [String: QQIncoming]] = [:]
     private var activeGroupSubmissions: [UUID: String] = [:]
@@ -237,6 +240,7 @@ struct QQRuntimeCredentials: Decodable {
                 if var artwork = config.artwork { artwork.repeatDays = min(7, max(1, artwork.repeatDays)); config.artwork = artwork }
                 usage = state.usage; sends = state.sends; seen = state.seen
                 botMessageIDs = state.botMessageIDs ?? [:]; ownershipSince = state.ownershipSince ?? ownershipSince
+                proactiveSendHistory = state.proactiveSendHistory ?? [:]
                 recentStickers = state.stickerHistory ?? [:]; lastStickerAt = state.stickerLastSentAt
                 if let books = state.memoryBooks { memoryBooks = books }
                 else {
@@ -815,7 +819,12 @@ struct QQRuntimeCredentials: Decodable {
                 }
             }
             scheduleMemoryLearning()
-            status = config.effectiveGroupParticipationEnabled ? "QQ 自动回复中 · 群真实 @ 或每 \(config.effectiveGroupParticipationEvery) 条主动接话" : "QQ 自动回复中 · 群聊仅响应真实 @"; error = nil
+            if let profile = scopedProactive, config.targets.contains(where: { $0.enabled && $0.key == profile.groupKey }) {
+                status = "QQ 自动回复中 · \(profile.groupKey) \(profile.mode.rawValue) 主动接话，其余群仅响应真实 @"
+            } else {
+                status = config.effectiveGroupParticipationEnabled ? "QQ 自动回复中 · 群真实 @ 或每 \(config.effectiveGroupParticipationEvery) 条主动接话" : "QQ 自动回复中 · 群聊仅响应真实 @"
+            }
+            error = nil
         } catch { self.error = error.localizedDescription }
     }
     func pause() {
@@ -942,18 +951,26 @@ struct QQRuntimeCredentials: Decodable {
                                           messages: groupRecentInputs[message.key, default: [:]], account: config.expectedSelfID)
         }
         var proactive = false
-        if message.group && config.effectiveGroupParticipationEnabled {
-            // Real mentions are an independent direct-reply lane: neither increment nor reset ordinary-message progress.
+        let groupProfile = scopedProactive?.groupKey == message.key ? scopedProactive : nil
+        if message.group && (config.effectiveGroupParticipationEnabled || groupProfile != nil) {
+            // Real mentions are independent: never increment or reset proactive progress.
             if !message.mentionsSelf {
+                // The scoped profile is fail-closed outside its one explicit group.
+                if let profile = groupProfile {
+                    guard profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) else { return }
+                }
                 let count = groupMessageCounts[message.key, default: 0] + 1
-                let reached = count >= config.effectiveGroupParticipationEvery
+                let interval = groupProfile?.interval ?? config.effectiveGroupParticipationEvery
+                let reached = count >= interval
                 groupMessageCounts[message.key] = reached ? 0 : count
                 guard reached else { return }
+                if let profile = groupProfile {
+                    guard profile.shouldEvaluate(messageCount: count, roll: Double.random(in: 0..<1)) else { return }
+                }
                 guard let groupContext, groupContext.hasUnansweredText || (config.effectiveVisionEnabled && !groupContext.recentImages.isEmpty) else {
                     record(target.id, .skipped, "接话计数已到：当前时段只有未读取媒体或已回复话题，不翻旧话题补答")
                     return
                 }
-                // A real mention of another member is not an invitation to speak for them, even from OWNER.
                 if message.mentionedUsers.contains(where: { $0 != "all" }) {
                     record(target.id, .skipped, "接话计数已到：当前在点名其他成员，不代答")
                     return
@@ -1262,6 +1279,12 @@ struct QQRuntimeCredentials: Decodable {
                     }
                     if ownerReplied { record(target.id, .skipped, "主人已人工接话，本轮取消自动回复，后续新消息继续监听"); continue }
                 }
+                // Re-check immediately before submission; earlier queued turns cannot bypass cooldown.
+                if proactive, let profile = scopedProactive, profile.groupKey == message.key {
+                    guard profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) else {
+                        record(target.id, .skipped, "主动接话冷却、夜间静默或每日次数上限，本轮不发送"); continue
+                    }
+                }
                 ticket = try sends.reserve(chat: target.id, limits: config.ai.effectiveSendLimits, chatCooldown: config.ai.cooldownSeconds)
                 if let sticker {
                     lastStickerAt = Date()
@@ -1280,6 +1303,9 @@ struct QQRuntimeCredentials: Decodable {
                 }
                 botMessageIDs[config.expectedSelfID + ":" + message.key + ":" + sentID] = Date().timeIntervalSince1970
                 if let ticket { sends.finish(ticket, confirmed: true); artworkLedger.finish(ticket, confirmed: true) }; ticket = nil
+                if proactive, scopedProactive?.groupKey == message.key {
+                    proactiveSendHistory[message.key, default: []].append(Date())
+                }
                 try persist()
                 activeGroupSubmissions.removeValue(forKey: submissionID)
                 if message.group, fence.permits(epoch) {
@@ -1622,7 +1648,8 @@ struct QQRuntimeCredentials: Decodable {
             if botMessageIDs.count > 10000 { botMessageIDs = Dictionary(uniqueKeysWithValues: botMessageIDs.sorted { $0.value > $1.value }.prefix(10000).map { ($0.key, $0.value) }) }
             recentStickers = recentStickers.mapValues { Array($0.filter { Date().timeIntervalSince($0.at) < 7 * 86400 }.suffix(500)) }.filter { !$0.value.isEmpty }
             if recentStickers.count > 60 { recentStickers = Dictionary(uniqueKeysWithValues: recentStickers.sorted { ($0.value.last?.at ?? .distantPast) > ($1.value.last?.at ?? .distantPast) }.prefix(60).map { ($0.key, $0.value) }) }
-            let state = QQStored(config: config, usage: usage, sends: sends, logs: logs, seen: seen, memories: nil, memoryBooks: memoryBooks, botMessageIDs: botMessageIDs, ownershipSince: ownershipSince, stickerHistory: recentStickers, stickerLastSentAt: lastStickerAt, artworkLedger: artworkLedger)
+            proactiveSendHistory = proactiveSendHistory.mapValues { $0.filter { Date().timeIntervalSince($0) < 2 * 86400 } }.filter { !$0.value.isEmpty }
+            let state = QQStored(config: config, usage: usage, sends: sends, logs: logs, seen: seen, memories: nil, memoryBooks: memoryBooks, botMessageIDs: botMessageIDs, ownershipSince: ownershipSince, stickerHistory: recentStickers, stickerLastSentAt: lastStickerAt, artworkLedger: artworkLedger, proactiveSendHistory: proactiveSendHistory)
             // QQ uses authenticated network events and may run while the desktop is locked.
             // User-enabled structured memories and bounded/redacted pending excerpts; never image bytes or credentials.
             let data = try JSONEncoder().encode(state)
