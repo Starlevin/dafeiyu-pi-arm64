@@ -9,7 +9,7 @@ public struct QQScopedProactiveProfile: Sendable {
     public let mode: Mode
 
     public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> Self? {
-        guard let id = env["DAFEIYU_PROACTIVE_GROUP_ID"], QQPolicy.validID(id),
+        guard let id = env["DAFEIYU_PROACTIVE_GROUP_ID"], QQConfig.validID(id),
               let modeName = env["DAFEIYU_PROACTIVE_MODE"],
               let mode = Mode(rawValue: modeName) else { return nil }
         return Self(groupKey: "group:" + id, mode: mode)
