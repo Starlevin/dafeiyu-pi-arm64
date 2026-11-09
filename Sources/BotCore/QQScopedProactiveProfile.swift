@@ -15,8 +15,26 @@ public struct QQScopedProactiveProfile: Sendable {
         return Self(groupKey: "group:" + id, mode: mode)
     }
 
+    /// Explicit multi-group opt-in; malformed or duplicate IDs fail the whole set closed.
+    public static func profilesFromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> [String: Self] {
+        guard let rawMode = env["DAFEIYU_PROACTIVE_MODE"],
+              let mode = Mode(rawValue: rawMode) else { return [:] }
+        if let csv = env["DAFEIYU_PROACTIVE_GROUP_IDS"] {
+            let ids = csv.split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard (1...20).contains(ids.count), Set(ids).count == ids.count,
+                  ids.allSatisfy(QQConfig.validID) else { return [:] }
+            return Dictionary(uniqueKeysWithValues: ids.map { id in
+                let profile = Self(groupKey: "group:" + id, mode: mode)
+                return (profile.groupKey, profile)
+            })
+        }
+        if let legacy = fromEnvironment(env) { return [legacy.groupKey: legacy] }
+        return [:]
+    }
+
     public var interval: Int {
-        switch mode { case .quiet: return 10; case .natural: return 5; case .active: return 3 }
+        switch mode { case .quiet: return 10; case .natural: return 3; case .active: return 3 }
     }
     public var evaluationProbability: Double {
         switch mode { case .quiet: return 0.15; case .natural: return 0.25; case .active: return 0.35 }
@@ -25,7 +43,7 @@ public struct QQScopedProactiveProfile: Sendable {
         switch mode { case .quiet: return 1200; case .natural: return 480; case .active: return 240 }
     }
     public var dailyLimit: Int {
-        switch mode { case .quiet: return 3; case .natural: return 8; case .active: return 15 }
+        switch mode { case .quiet: return 3; case .natural: return 30; case .active: return 15 }
     }
 
     private var localCalendar: Calendar {
