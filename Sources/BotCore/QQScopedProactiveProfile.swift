@@ -16,16 +16,16 @@ public struct QQScopedProactiveProfile: Sendable {
     }
 
     public var interval: Int {
-        switch mode { case .quiet: 10; case .natural: 5; case .active: 3 }
+        switch mode { case .quiet: return 10; case .natural: return 5; case .active: return 3 }
     }
     public var evaluationProbability: Double {
-        switch mode { case .quiet: 0.15; case .natural: 0.25; case .active: 0.35 }
+        switch mode { case .quiet: return 0.15; case .natural: return 0.25; case .active: return 0.35 }
     }
     public var cooldown: TimeInterval {
-        switch mode { case .quiet: 1200; case .natural: 480; case .active: 240 }
+        switch mode { case .quiet: return 1200; case .natural: return 480; case .active: return 240 }
     }
     public var dailyLimit: Int {
-        switch mode { case .quiet: 3; case .natural: 8; case .active: 15 }
+        switch mode { case .quiet: return 3; case .natural: return 8; case .active: return 15 }
     }
 
     private var localCalendar: Calendar {
