@@ -247,6 +247,7 @@ import BotCore
                 "runDeadline": engine.runDeadline.map { $0.timeIntervalSince1970 as Any } ?? NSNull(),
                 "calls": engine.usage.calls, "attempts": engine.sends.attempts, "confirmed": engine.sends.confirmed,
                 "groupMessageCounts": engine.groupMessageCounts,
+                "proactiveMetrics": try JSONSerialization.jsonObject(with: JSONEncoder().encode(engine.proactiveMetrics)),
                 "queued": engine.queuedCount, "queueCapacity": QQEngine.queueCapacity,
                 "uncertain": engine.sends.uncertain, "rejected": engine.rejectedScopedEvents,
                 "contacts": engine.contacts.map { ["key": $0.id, "name": $0.name, "number": $0.number, "group": $0.group] as [String: Any] }]
