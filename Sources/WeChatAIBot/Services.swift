@@ -316,7 +316,7 @@ struct DeepSeekClient {
             let captions = options.map { ["id": $0.id, "配字或画面": $0.title, "适用情境": $0.context ?? $0.title] }
             fastRule.prompt += "\n最终 JSON 在 text、emotion、intensity 外增加 sticker_id 字段，值为下列候选的准确 id 或 null。按当前对话选择：图片配字、角色立场、动作与语气必须一起合适，不能仅凭情绪相同就选；无合适图一律 null。最多一张，不输出任何路径或 URL。\n本轮可选表情 JSON：\n" + String(decoding: try JSONSerialization.data(withJSONObject: captions, options: [.sortedKeys]), as: UTF8.self)
         }
-        fastRule.prompt += "\n保持简短。只输出最终 JSON 短答，不解释推理过程。"
+        fastRule.prompt += "\n按本轮角色提示的场景长度生成合适回复；简单问题简答，认真问题可以完整解释，不要因为 fast 模式硬压成一句。只输出最终 JSON，不展示推理过程。"
         var result = try await reply(key: key, config: config, rule: fastRule, history: history, text: text,
                                      jsonOutput: true, thinkingEnabled: false, images: images, reserve: reserve)
         if !options.isEmpty, let data = result.text.data(using: .utf8),

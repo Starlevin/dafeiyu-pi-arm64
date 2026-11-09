@@ -1,0 +1,37 @@
+name: P1 QQ memory and reply policy tests
+
+on:
+  push:
+    paths:
+      - "Sources/BotCore/**"
+      - "Sources/WeChatAIBot/QQEngine.swift"
+      - "Sources/WeChatAIBot/Services.swift"
+      - "Tests/BotCoreTests/**"
+      - ".github/workflows/p1-memory-policy-tests.yml"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  p1-memory-policy:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    container:
+      image: swift:6.1-noble
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Swift environment
+        run: swift --version
+      - name: Verify subject-isolated memory and corrections
+        run: |
+          set -euo pipefail
+          swift test --jobs 4 --filter QQMemoryBookTests
+      - name: Verify adaptive lengths and non-repeating replies
+        run: |
+          set -euo pipefail
+          swift test --jobs 4 --filter QQReplyPoliciesTests

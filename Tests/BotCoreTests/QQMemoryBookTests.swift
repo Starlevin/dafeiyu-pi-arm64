@@ -75,4 +75,44 @@ struct QQMemoryBookTests {
         #expect(milliseconds < 50)
         #expect(index.search("晚饭", subject: "MEMBER_42", now: now.addingTimeInterval(366 * 86400)).isEmpty)
     }
+
+    @Test func perSpeakerRetrievalNeverLeaksOtherGroupMembers() throws {
+        var book = QQMemoryBook()
+        let a = QQMemoryEvent(id: "member-a", subject: "MEMBER_A",
+                              text: "我喜欢旅行和星空摄影", at: now)
+        let b = QQMemoryEvent(id: "member-b", subject: "MEMBER_B",
+                              text: "我喜欢旅行和秘密收藏模型", at: now)
+        book.append(a)
+        try book.apply(delta(source: a, text: "喜欢旅行和星空摄影"), batch: [a], candidateIDs: [], now: now)
+        book.append(b)
+        try book.apply(delta(source: b, text: "喜欢旅行和秘密收藏模型"), batch: [b], candidateIDs: [], now: now)
+        let index = QQMemoryIndex(book.items)
+        let result = index.search("喜欢旅行", subject: "MEMBER_A", now: now)
+        #expect(!result.isEmpty)
+        #expect(result.allSatisfy { $0.subject == "MEMBER_A" })
+        let context = index.context("旅行", subject: "MEMBER_A", characters: 1200, now: now)
+        #expect(context.contains("星空摄影"))
+        #expect(!context.contains("秘密收藏模型"))
+        let peer = index.context("旅行", subject: "MEMBER_B", characters: 1200, now: now)
+        #expect(peer.contains("秘密收藏模型"))
+        #expect(!peer.contains("星空摄影"))
+    }
+
+    @Test func duplicateMemoryFactsNormalizePunctuationWithoutErasingCorrections() throws {
+        var book = QQMemoryBook()
+        let first = QQMemoryEvent(id: "one", subject: "PEER", text: "我喜欢清淡的晚饭", at: now)
+        book.append(first)
+        try book.apply(delta(source: first, text: "喜欢清淡的晚饭"), batch: [first], candidateIDs: [], now: now)
+        let same = QQMemoryEvent(id: "two", subject: "PEER", text: "我还是喜欢清淡的晚饭。", at: now.addingTimeInterval(10))
+        book.append(same)
+        try book.apply(delta(source: same, text: "喜欢 清淡的晚饭！"), batch: [same], candidateIDs: [], now: now.addingTimeInterval(10))
+        #expect(book.items.filter { $0.current(now.addingTimeInterval(10)) && $0.kind == "preference" }.count == 1)
+        let correction = QQMemoryEvent(id: "three", subject: "PEER", text: "我现在不喜欢清淡的晚饭", at: now.addingTimeInterval(20))
+        book.append(correction)
+        let old = try #require(book.items.first { $0.current(now.addingTimeInterval(20)) && $0.kind == "preference" })
+        try book.apply(delta(source: correction, text: "现在不喜欢清淡的晚饭", replaces: [old.id]),
+                       batch: [correction], candidateIDs: [old.id], now: now.addingTimeInterval(20))
+        let index = QQMemoryIndex(book.items)
+        #expect(index.context("晚饭", subject: "PEER", characters: 500, now: now.addingTimeInterval(21)).contains("不喜欢"))
+    }
 }
