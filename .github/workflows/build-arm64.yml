@@ -132,3 +132,36 @@ jobs:
         run: |
           set -o pipefail
           swift test 2>&1 | tail -60 || true
+
+  # P0 systemd / 恢复脚本专项校验：只覆盖本轮新增的 deploy/pi-systemd 与
+  # scripts/test-pi-systemd-p0.py，不声称所有平台 CI 通过（既有 macOS/Linux
+  # 工作流仍红，与本作业无关）。纯 Python 标准库 + 静态断言，无 Swift 依赖、
+  # 无网络业务调用、无凭证、不访问 Pi、不启动任何服务。
+  p0-systemd-scripts:
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 脚本语法与单元文件校验
+        run: |
+          set -euo pipefail
+          python3 --version
+          bash -n deploy/pi-systemd/dafeiyu-launch.sh
+          bash -n deploy/pi-systemd/dafeiyu-p0-preflight.sh
+          python3 -m py_compile deploy/pi-systemd/qq-recovery.py
+          python3 -m py_compile deploy/pi-systemd/prepare-runtime-profile.py
+          python3 -m py_compile scripts/test-pi-systemd-p0.py
+          # systemd 单元静态检查：Type=simple、无 PIDFile、无 QQ 单元依赖。
+          # 只看非注释行（单元文件里的说明性注释会合法提到这些词）。
+          grep -q '^Type=simple' deploy/pi-systemd/dafeiyu.service
+          ! grep -v '^\s*#' deploy/pi-systemd/dafeiyu.service | grep -q 'PIDFile'
+          ! grep -v '^\s*#' deploy/pi-systemd/dafeiyu.service | grep -q 'napcat-qq'
+
+      - name: P0 本地合成验收测试
+        run: python3 scripts/test-pi-systemd-p0.py
+
+      - name: 公开文件隐私检查
+        run: python3 scripts/check-public.py

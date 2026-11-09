@@ -1,0 +1,45 @@
+# 大肥鱼回复引擎 · 用户级 systemd 单元（P0 修复版）
+# 安装位置：~/.config/systemd/user/dafeiyu.service
+# 唯一进程所有者：本单元。恢复守护（qq-recovery）只观测，不启动/停止/重启引擎。
+#
+# 与旧单元的差异（对应 2026-11-09 迁移失败）：
+#   Type=forking -> Type=simple          ：不再要求父进程 fork 并退出
+#   PIDFile=...  -> 删除                 ：systemd 直接跟踪 MainPID，不再依赖易过期的 PID 文件
+#   ExecStart=start-dafeiyu-autostart.sh -> dafeiyu-launch.sh ：预检无阻塞、无 status 轮询
+#   Restart=on-failure 保留，但加 StartLimit* 上限，杜绝无限 auto-restart 循环
+[Unit]
+Description=Dafeiyu QQ reply engine (systemd is the sole process owner)
+# 用户级 systemd + loginctl Linger=yes：随 default.target 开机启动，无需 Windows 常驻。
+# 刻意不写 After=/Wants=/Requires= 指向 QQ 单元或 network-online.target：
+#   1. 用户管理器没有 network-online.target，写了也不会提供真正的网络宽限；
+#   2. 任何 Wants/Requires 到 napcat-qq.service 都可能误启第二个 QQ 登录态；
+#   3. 引擎内置 OneBot 有限退避重连 + 低频守护，可容忍开机时 OneBot 尚未就绪；
+#      用「等端口就绪」当启动条件正是旧脚本阻塞超时的来源。
+# 网络恢复宽限、退避与冷却由 qq-recovery.timer 的观测脚本承担（默认只观测）。
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+UMask=0077
+WorkingDirectory=%h/dafeiyu-test/dafeiyu-linux
+Environment=DAFEIYU_RESOURCES=%h/dafeiyu-test/dafeiyu-linux/Resources
+ExecStart=%h/.local/bin/dafeiyu-launch.sh
+# 就绪信号 = 前台进程存活；不等端口、不轮询 status，因此不会触发 TimeoutStartSec。
+# 旧的 10-startup-timeout.conf（TimeoutStartSec=180s）应删除，见维护窗口命令清单。
+# 部署目录若与上面默认值不同，用 systemctl --user edit dafeiyu.service 的 drop-in
+# 覆盖 WorkingDirectory / Environment / ExecStart，不要改本文件本身。
+TimeoutStartSec=30
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+# 预检发现「存在非本单元的实例」时以 78 退出，避免重启风暴与双实例；
+# 由维护窗口人工确认后再处理，启动器本身绝不 kill 任何进程。
+RestartPreventExitStatus=78
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dafeiyu
+# 凭证仍由面板在进程内输入；本单元不读取任何账号/令牌/密钥文件。
+
+[Install]
+WantedBy=default.target
