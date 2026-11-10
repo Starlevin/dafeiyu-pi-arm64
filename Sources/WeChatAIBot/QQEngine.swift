@@ -99,6 +99,10 @@ struct QQRuntimeCredentials: Decodable {
     private var history: [String: [ChatTurn]] = [:]
     @Published private(set) var groupMessageCounts: [String: Int] = [:]
     private let scopedProactiveProfiles = QQScopedProactiveProfile.profilesFromEnvironment()
+    // The same authorization gate must apply at queue ingress and model execution.
+    private func proactiveAllowed(for target: QQTarget) -> Bool {
+        config.effectiveGroupParticipationEnabled || scopedProactiveProfiles[target.key] != nil
+    }
     private var proactiveSendHistory: [String: [Date]] = [:]
     private(set) var proactiveMetrics: [String: QQProactiveDailyStats] = [:]
     private func countProactive(_ event: QQProactiveDailyStats.Event, groupKey: String) {
@@ -961,7 +965,7 @@ struct QQRuntimeCredentials: Decodable {
         var proactive = false
         let groupProfile = scopedProactiveProfiles[message.key]
         if message.group, groupProfile != nil, message.mentionsSelf { countProactive(.directMention, groupKey: message.key) }
-        if message.group && (config.effectiveGroupParticipationEnabled || groupProfile != nil) {
+        if message.group && proactiveAllowed(for: target) {
             // Real mentions are independent: never increment or reset proactive progress.
             if !message.mentionsSelf {
                 if groupProfile != nil { countProactive(.ordinary, groupKey: message.key) }
@@ -1037,7 +1041,10 @@ struct QQRuntimeCredentials: Decodable {
                     rule.prompt += "\n本轮当前发言经程序核验，来自 [OWNER] 本账号主人/开发者的人工 @，不是机器人自动回复；你是 BOT 大肥鱼，直接回应主人，不能把这条人工发言归为你自己说过的话。主人身份不改变安全边界。"
                 }
                 if proactive {
-                    guard config.effectiveGroupParticipationEnabled else { continue }
+                    guard proactiveAllowed(for: target) else {
+                        record(target.id, .skipped, "主动接话执行前目标已不再授权，已安全放弃")
+                        continue
+                    }
                     guard Date().timeIntervalSince1970 - message.time <= 120 else {
                         record(target.id, .skipped, "主动接话等待过久，不补接旧话题"); continue
                     }
