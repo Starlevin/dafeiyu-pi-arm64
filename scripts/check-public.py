@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Fail closed on common secrets/runtime files; print locations, never values."""
-import argparse, io, os, pathlib, re, subprocess, sys
+import argparse, io, ipaddress, os, pathlib, re, subprocess, sys
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--staged', action='store_true', help='scan the Git index, exactly as prepared for commit')
 args = parser.parse_args()
@@ -33,6 +33,9 @@ authorized_notice_files = {
     'integrations/wechat-pi/core/LICENSE',
     'integrations/wechat-pi/core/docs/NOTICE.md',
 }
+documentation_networks = tuple(ipaddress.ip_network(value) for value in (
+    '192.0.2.0/24', '198.51.100.0/24', '203.0.113.0/24'))
+ipv4_pattern = re.compile(r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])')
 private_email_pattern = rules['private email']
 failures=[]
 scan_paths=[]
@@ -84,6 +87,18 @@ for p in scan_paths:
                 if len(emails) == 1 and emails[0] in authorized_notice_emails and author_row:
                     continue
             failures.append((str(rel),number,label))
+        if rel.parts[:2] == ('integrations', 'pi-console'):
+            for match in ipv4_pattern.finditer(line):
+                try:
+                    address = ipaddress.ip_address(match.group(0))
+                except ValueError:
+                    failures.append((str(rel),number,'invalid IPv4 literal'))
+                    continue
+                if address.is_loopback or address.is_unspecified:
+                    continue
+                if any(address in network for network in documentation_networks):
+                    continue
+                failures.append((str(rel),number,'non-documentation IPv4 literal'))
 for path,line,label in failures: print(f'{path}:{line}: {label}')
 print(f'Checked {len(paths)} public files ({"index" if args.staged else "working tree"}); findings={len(failures)}. Images and commit metadata require separate review.')
 sys.exit(bool(failures))

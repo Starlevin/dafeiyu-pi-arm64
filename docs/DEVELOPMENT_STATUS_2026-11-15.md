@@ -23,7 +23,7 @@
 | [#3](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/3) | Pi systemd 生命周期与运行配置 | 新提交 `11545e5` 后：`p0-systemd-scripts` 有一项 **PASS**；其余当前工作流仍 **PENDING**。 |
 | [#4](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/4) | 长期记忆、去重回复与回复长度策略 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 构建。 |
 | [#5](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/5) | QQ 三群主动接话与计数 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 构建。 |
-| [#6](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 微信 Linux 实验集成、公开范围和许可说明 | 全部 CI 检查 **PENDING**；保持草稿。 |
+| [#6](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 微信 Linux 集成、Pi 统一控制台源码、公开范围和许可说明 | 本次新增内容的 CI 状态需在推送后复查；保持草稿。 |
 
 三项仍为草稿，保持未合并。CI 失败原因需要结合对应运行日志继续定位；不能把“分支已上传”写成部署成功。
 
@@ -34,6 +34,13 @@
 - 本次上传过程中没有运行 Pi 编译、真实微信客户端、服务重启、真实消息或桌面输入。公开快照的功能验收为 **NOT_RUN**。
 - 未纳入真实账号/群资料、个人专属性格模块、来源未确认的知识库数据，以及读取客户端进程内数据库密钥的实验工具。目标群和管理员标识需要部署者在本机私有配置中提供；公开代码默认没有主动接话授权群。
 - Whale Girl core 保留 AGPL-3.0-only 许可证、上游 NOTICE、署名和修改说明；SnowLuma 与 NapCatQQ 分支源代码未复制，详见[公开代码范围](OPEN_SOURCE_SCOPE.md)。
+
+## Pi 统一控制台源码
+
+- 本次将控制台服务端、网页界面、合成夹具、源代码级测试和用量记账集成整理到 `integrations/pi-console/`；二维码生成器保留 Project Nayuki 的 MIT 声明。
+- 清除了部署用局域网地址、个人数据目录和模型路由默认值；服务默认仅绑定回环地址，用户状态目录在仓库之外，NapCat/QQ 数据根目录和密钥路径须由部署者显式配置。
+- 未纳入生产用量记录、生产配置、服务文件、证书、二进制、归档/回滚包、截图、真实聊天或给已安装模型网关打补丁的脚本。控制台仍属实验代码，**本次功能测试与真实后台验收 NOT_RUN**。
+- 没有启动控制台、连接 Pi/QQ/微信/NapCat/model-hub、触发后台写操作或发送真实消息。
 
 ## 下一步验收
 
