@@ -23,7 +23,7 @@
 | [#3](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/3) | Pi systemd 生命周期与运行配置 | 新提交 `11545e5` 后：`p0-systemd-scripts` 有一项 **PASS**；其余当前工作流仍 **PENDING**。 |
 | [#4](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/4) | 长期记忆、去重回复与回复长度策略 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 构建。 |
 | [#5](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/5) | QQ 三群主动接话与计数 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 构建。 |
-| [#6](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 微信 Linux 集成、Pi 统一控制台源码、公开范围和许可说明 | 本次新增内容的 CI 状态需在推送后复查；保持草稿。 |
+| [#6](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 微信 Linux 集成、Pi 统一控制台源码、公开范围和许可说明 | 截至提交 `99b225c` 的查询：Linux、test、ARM64 build 均 **PENDING**（两组工作流）；保持草稿。 |
 
 三项仍为草稿，保持未合并。CI 失败原因需要结合对应运行日志继续定位；不能把“分支已上传”写成部署成功。
 
