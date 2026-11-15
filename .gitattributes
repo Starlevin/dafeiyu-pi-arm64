@@ -1,0 +1,6 @@
+# P0 Linux service artifacts must retain LF on Windows checkouts.
+deploy/pi-systemd/*.sh text eol=lf
+deploy/pi-systemd/*.py text eol=lf
+deploy/pi-systemd/*.service text eol=lf
+deploy/pi-systemd/*.timer text eol=lf
+scripts/test-pi-systemd-p0.py text eol=lf

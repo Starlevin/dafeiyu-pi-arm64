@@ -1,0 +1,17 @@
+# qq-recovery 周期触发（P0 修复版参考单元）
+# 安装位置：~/.config/systemd/user/qq-recovery.timer
+#
+# ⚠ 本轮交付只提供文件，不启用、不替换、不重启任何现有单元。
+#   现场已有 active 的 qq-recovery.timer，保持原状直到 ChatGPT 验收。
+[Unit]
+Description=Run Dafeiyu P0 recovery probe
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=false
+Unit=qq-recovery.service
+
+[Install]
+WantedBy=timers.target

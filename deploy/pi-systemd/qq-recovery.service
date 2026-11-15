@@ -1,0 +1,19 @@
+# qq-recovery 的 oneshot 服务（P0 修复版参考单元）
+# 安装位置：~/.config/systemd/user/qq-recovery.service
+#
+# ⚠ 本轮交付只提供文件，不启用、不替换、不重启任何现有单元。
+#   现场 qq-recovery.timer 已 active，本轮保持原状，见维护窗口命令清单「不做的事」。
+# 用途：把周期观测从「可能重启引擎的脚本」改成「默认纯观测 + flock 单例」。
+[Unit]
+Description=Dafeiyu P0 recovery watchdog (observe-only by default)
+# 不声明 After/Requires 到 dafeiyu.service：观测守护不得与引擎启动顺序耦合，
+# 否则会重现「双重管理」竞态。
+
+[Service]
+Type=oneshot
+# 默认无 --managed：绝不 start/stop/restart/kill 引擎或 QQ。
+ExecStart=%h/.local/bin/qq-recovery.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qq-recovery
+# 绝不把任何账号/令牌/密钥通过 Environment/EnvironmentFile 传入。

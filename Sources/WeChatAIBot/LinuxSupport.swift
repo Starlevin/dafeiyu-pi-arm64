@@ -36,6 +36,26 @@ enum LinuxImages {
         process.arguments = ["--signal=KILL", "20", "/usr/bin/python3", resources.appendingPathComponent("Linux/image-helper.py").path]
         process.standardInput = stdin; process.standardOutput = stdout; process.standardError = FileHandle.nullDevice
         try process.run(); process.waitUntilExit()
+        // Emit only process metadata, never the image, path, prompt, or credentials.
+        // A helper SIGSEGV is distinct from a Swift process crash and must be
+        // observable in production logs to support root-cause attribution.
+        if process.terminationStatus != 0 {
+            let status = process.terminationStatus
+            let reason: String
+            if process.terminationReason == .uncaughtSignal {
+                reason = "wrapper_signal"
+            } else if status == 124 {
+                reason = "timeout"
+            } else if (129...159).contains(status) {
+                // GNU timeout typically propagates child signal as 128 + signo.
+                // SIGSEGV from image-helper.py is therefore exit code 139.
+                reason = "child_signal_\(status - 128)"
+            } else {
+                reason = "helper_exit"
+            }
+            let diagnostic = "linux_image_helper_failure mode=\(mode) reason=\(reason) status=\(status)\n"
+            FileHandle.standardError.write(Data(diagnostic.utf8))
+        }
         guard process.terminationStatus == 0, let size = try output.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 20_000_000,
               let encoded = try JSONSerialization.jsonObject(with: Data(contentsOf: output)) as? [String] else {
             throw AppFailure.message("图片格式、尺寸或处理时间不符合要求；请检查 Python Pillow 安装")
