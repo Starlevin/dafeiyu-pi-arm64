@@ -45,8 +45,9 @@
 
 | 模块 | 当前判断 | 本轮证据与限制 |
 |---|---|---|
-| QQ 主动接话、群聊上下文、回复时序 | **DEPLOYED（代码/群级配置） / NOT_RUN（本轮真实触发）** | 当前运行二进制含主动评分、群聊上下文和回复时序模块标记；群级主动模式与评分配置存在。全局 `groupParticipationEnabled` 仍为 false，不能把它写成全群无条件插话。11 月 14 日记录过真实评分与全群部署；本轮没有发消息复测。 |
+| QQ 主动接话、群聊上下文、回复时序 | **DEPLOYED（代码/群级配置） / NOT_RUN（本轮真实触发）** | 当前运行二进制含主动评分、群聊上下文和回复时序模块标记；群级主动模式与评分配置存在。全局 `groupParticipationEnabled` 仍为 false，不能把它写成全群无条件插话。运行二进制与 11 月 14 日登记的构建哈希不同，本地没有找到对应的新构建记录；模块标记仍在，但需补齐版本来源。11 月 14 日记录过真实评分与全群部署；本轮没有发消息复测。 |
 | QQ 游戏知识 | **DEPLOYED（模块存在） / NOT_RUN（索引新鲜度）** | 当前运行二进制仍含第五人格/游戏知识模块标记；上次报告有索引规模记录，本轮未重新检查索引内容和更新时间。 |
+| QQ 记忆、去重与场景长度增强（PR #4） | **NOT_VERIFIED（Pi 实装）** | PR #4 仍为草稿，目标改动没有合并；本轮没有将运行版本与该 PR 的具体实现逐项对照，不能从基础状态文件或 PR 源码推断已上线。 |
 | 微信表情库与自动选图 | **PASS（运行配置） / PARTIAL（自然触发）** | 当前 `/api/stickers/status` 显示已启用、6 张素材、3 个情绪分类，自动选图概率为 0.10，接收素材收集关闭。11 月 14 日有 PNG/GIF 真实发送和重复任务拦截证据；自然聊天触发与本轮新发送未测。 |
 | 微信图片/动态表情识别 | **PARTIAL** | 识别链路此前在 Pi 上通过合成图请求，接收识别代码和桥接服务仍在；当前视觉模型配置为 `workbuddy-deepseek`。真实入站图片/动态表情事件仍没有可引用的验收记录。 |
 | 微信 WAL 唤醒与回复时序 | **PASS（配置已加载） / NOT_RUN（当前延迟）** | 桥接服务环境包含 WAL sweep、WAL wake 和 UI 状态等待开关，相关脚本存在。11 月 14 日有部署及耗时记录，本轮没有测端到端延迟。 |
@@ -84,16 +85,16 @@ PR #6 公开的是脱敏的 Linux 微信桥接和 Whale Girl core、Pi 控制台
 
 ### 公开分支检查状态
 
-以下状态来自 2026-11-16 对 GitHub 当前检查的只读查询。新提交会触发新的检查，表格不是未来检查结果的保证。
+以下状态来自 2026-11-16 对 GitHub 当前检查的只读查询。PR #3–#5 记录各自当前提交状态；PR #6 的上一提交检查已完成，最新提交检查正在重跑。本表中 PR #6 的查询时提交为 `f983736`；后续文档提交会再次触发 CI。
 
 | 草稿 PR | 当前检查摘要 |
 |---|---|
 | [#3 systemd 生命周期](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/3) | P0 脚本 **PASS**；Linux 与通用测试 **FAIL**；ARM64 build **CANCELLED**。 |
 | [#4 记忆与回复长度](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/4) | P0 脚本、P1 记忆策略 **PASS**；Linux 与通用测试 **FAIL**；ARM64 build **CANCELLED**。 |
 | [#5 QQ 主动接话](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/5) | P0 脚本、P1 记忆策略 **PASS**；Linux 与通用测试 **FAIL**；ARM64 build **CANCELLED**。 |
-| [#6 微信与 Pi 控制台公开源码](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | macOS、Linux/WSL 与通用测试 **FAIL**；ARM64 build **CANCELLED**。 |
+| [#6 微信与 Pi 控制台公开源码](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 上一提交 `85968fa`：macOS、Linux/WSL 与通用测试 **FAIL**，ARM64 build **CANCELLED**。最新提交 `f983736`：macOS **QUEUED/IN_PROGRESS**，Linux/WSL 与 ARM64 **IN_PROGRESS**。 |
 
-PR #6 前一提交的失败日志指向仓库现有 Swift 快速回复/表情断言和作品管理并行引擎检查；本次查询确认新提交对应的检查也已失败/取消，但没有重新抓取新一轮完整日志，也没有运行 Pi 控制台 Python 功能测试。公开内容扫描和差异格式检查不代替功能测试或 Pi 实测。
+PR #6 上一提交的失败日志指向仓库现有 Swift 快速回复/表情断言和作品管理并行引擎检查；最新提交的检查尚未结束，本轮没有抓取新一轮日志，也没有运行 Pi 控制台 Python 功能测试。公开内容扫描和差异格式检查不代替功能测试或 Pi 实测。
 
 ## 接下来要收尾的事
 
