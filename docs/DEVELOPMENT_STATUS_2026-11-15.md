@@ -20,12 +20,12 @@
 
 | PR | 内容 | 最新检查 |
 | --- | --- | --- |
-| [#3](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/3) | Pi systemd 生命周期与运行配置 | 新提交 `11545e5` 后：`p0-systemd-scripts` 有一项 **PASS**；其余当前工作流仍 **PENDING**。 |
-| [#4](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/4) | 长期记忆、去重回复与回复长度策略 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 构建。 |
-| [#5](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/5) | QQ 三群主动接话与计数 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 构建。 |
-| [#6](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 微信 Linux 集成、Pi 统一控制台源码、公开范围和许可说明 | 截至提交 `99b225c` 的查询：Linux、test、ARM64 build 均 **PENDING**（两组工作流）；保持草稿。 |
+| [#3](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/3) | Pi systemd 生命周期与运行配置 | **PASS** P0 systemd 脚本；**FAIL** Linux 与通用测试；ARM64 build **PENDING**。 |
+| [#4](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/4) | 长期记忆、去重回复与回复长度策略 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 build。 |
+| [#5](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/5) | QQ 三群主动接话与计数 | **PASS** P0 脚本、P1 记忆策略；**FAIL** Linux、通用测试与 ARM64 build。 |
+| [#6](https://github.com/Starlevin/dafeiyu-pi-arm64/pull/6) | 微信 Linux 集成、Pi 统一控制台源码、公开范围和许可说明 | 截至提交 `819804e` 查询：Linux 与通用测试 **FAIL**；ARM64 build **PENDING**（有重复工作流）。 |
 
-三项仍为草稿，保持未合并。CI 失败原因需要结合对应运行日志继续定位；不能把“分支已上传”写成部署成功。
+四项仍为草稿，保持未合并。PR #6 的 CI 日志失败在既有 Swift 应用用例：快速回复路径的模型调用次数/表情预期不符，以及作品管理用例发现另一处 QQ 引擎仍在运行。它们没有执行 Pi 控制台 Python 测试；新增控制台源码的功能测试仍为 **NOT_RUN**。不能把“分支已上传”写成部署成功。
 
 ## 微信 Linux 代码
 
@@ -47,4 +47,4 @@
 1. 在不触碰生产桌面的隔离环境中，对公开快照重新跑静态检查与合成测试。
 2. 在目标 ARM64 环境编译并以测试账号验证启动、读图、帮助命令和故障退出。
 3. 仅在获得聊天参与者同意并启用最小测试白名单后，完成真实消息和目标群校验。
-4. 分别修复 PR #3–#5 的 CI 失败项；通过后仍先请求人工审阅，再决定是否合并。
+4. 分别修复 PR #3–#6 的 CI 失败项；通过后仍先请求人工审阅，再决定是否合并。
