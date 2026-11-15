@@ -1,0 +1,214 @@
+'use strict';
+
+/**
+ * 运行时组装（唯一的依赖注入点）：
+ *   config / logger / store / llm / bot / gateways
+ * 所有模块都从这里拿到依赖，不再各自 require 单例。
+ */
+const path = require('node:path');
+const { ensureConfigFile, loadConfig } = require('./infra/config');
+const { createLogger } = require('./infra/logger');
+const { migrateOwnerName } = require('./infra/ownerName');
+const { watchConfigFile } = require('./infra/configPatch');
+const features = require('./infra/features');
+const configSchema = require('./infra/configSchema');
+const { describeError } = require('./infra/errors');
+const { Store } = require('./memory/store');
+const memoryBackup = require('./memory/backup');
+const mediaCache = require('./adapters/mediaCache');
+const { DeepSeekClient } = require('./llm/client');
+const { Bot } = require('./pipeline/chat');
+const { createTrace } = require('./core/trace');
+const { createGateways } = require('./adapters/gateway');
+const personaStore = require('./persona/store');
+const { StickerService } = require('./services/stickerService');
+const stickersAdapter = require('./adapters/stickers');
+const probe = require('./infra/probe');
+const { ContactsCache } = require('./services/contacts');
+const { MomentsService } = require('./services/moments');
+const { ReminderService } = require('./services/reminderService');
+const { DiaryService } = require('./services/diary');
+const locationProbe = require('./services/location');
+
+const VERSION = require('../package.json').version;
+
+function createRuntime({ root = path.resolve(__dirname, '..'), env = process.env, loggerLevel } = {}) {
+  const probeT0 = probe.now();   // 探针：createRuntime 整体耗时（listen 之前的关键路径）
+  ensureConfigFile(root);
+  const config = loadConfig({ root, env });
+  // 称呼只认一个真源：config.json 的 persona.ownerName。
+  // 老版本把它存在 data/settings.json 的 userName 里，这里做一次迁移，之后设置接口和界面改的是同一个值。
+  migrateOwnerName(config);
+  // 加载主人在微信里调过的语态 / 能力（data/persona.json）
+  personaStore.apply(config, personaStore.load(config));
+  // 测试/自检可以传 WHALE_LOG_FILE='' 关掉文件日志：Windows 上'日志流没关'会把 data 目录占住，删不掉
+  const logFileFromEnv = Object.prototype.hasOwnProperty.call(env || {}, 'WHALE_LOG_FILE') ? String(env.WHALE_LOG_FILE) : null;
+  const logFile = logFileFromEnv === null ? config.paths.logFile : (logFileFromEnv || null);
+  const logger = createLogger({
+    level: loggerLevel || config.log.level,
+    // 文件永远记 debug 全量：界面按 level 过滤，出问题回看文件时不能丢细节
+    fileLevel: (config.log && config.log.fileLevel) || 'debug',
+    file: logFile,
+  });
+  // 探针：事件循环延迟采样必须从 createRuntime 就开始 —— 同步迁移就堵在这里，
+  // 放到 listen 之后再开会永远看不到那 10 秒。默认关，WHALE_PROBE_LOOP=1 才启动。
+  const loopProbe = probe.startEventLoopProbe(logger);
+  // 配置体检：非法值以前会被各处的 `Number(x) || 默认` 静默吃掉，
+  // 用户在启动器或 config.json 里填错了也看不出来。这里启动时报一次，不阻断运行。
+  try {
+    const configErrors = configSchema.validate(config);
+    if (configErrors.length) {
+      logger.warn(
+        'config.json 有 ' + configErrors.length + ' 项不合法（会按原值继续跑，建议修掉）：' +
+          configSchema.formatErrors(configErrors)
+      );
+    }
+  } catch { /* 校验失败不影响启动 */ }
+  // 模块子日志：info 行首带 [memory] / [llm] 这种模块名，warn/error 仍由 logger 自己抓 file:line。
+  // 测试里传进来的 logger 是桩对象、没有 child，这里兜一下，别让日志把启动搞挂。
+  const child = (name) => (logger && typeof logger.child === 'function' ? logger.child(name) : logger);
+  const store = new Store({
+    file: config.paths.storeFile,
+    // 关系卡份额（120 token）跟着 features.relations 走：关掉就并回 recent
+    limits: { ...(config.memory || {}), relationsEnabled: features.isOn(config, 'relations') },
+    logger: child('memory'),
+  });
+  // 启动时先「忘」一遍：太久没被想起、又不重要的记忆沉到归档，别一直占着检索位
+  try {
+    const swept = store.sweep();
+    if (swept.archived || swept.evicted) {
+      logger.info(`记忆清理：归档 ${swept.archived} 条、淘汰 ${swept.evicted} 条（归档共 ${store.archiveCount()} 条）`);
+    }
+  } catch (err) {
+    logger.warn('记忆清理失败（不影响使用）：' + describeError(err));
+  }
+  // 每次启动留一份记忆快照：换目录/重装/误点重置都能捞回来
+  try {
+    const snap = features.isOn(config, 'memorySnapshot') ? memoryBackup.writeSnapshot(root, 'startup') : null;
+    if (snap) logger.info('记忆快照：' + snap);
+  } catch (err) {
+    logger.warn('记忆快照失败（不影响使用）：' + describeError(err));
+  }
+  // 媒体缓存（图片/表情包/语音 wav）永不清理会越堆越大，启动时清一次
+  try {
+    if (features.isOn(config, 'mediaCleanup')) {
+      const mediaDir = path.join(root, 'data', 'media-cache');
+      const mc = mediaCache.cleanup(mediaDir, {
+        maxAgeDays: Number((config.storage || {}).mediaKeepDays) || 7,
+        maxTotalMB: Number((config.storage || {}).mediaMaxMB) || 500,
+      });
+      if (mc.removed) logger.info(`媒体缓存清理：删 ${mc.removed} 个文件，释放 ${mc.freedMB} MB`);
+    }
+  } catch (err) {
+    logger.warn('媒体缓存清理失败（不影响使用）：' + err.message);
+  }
+
+  const runtime = { config, logger, store, startedAt: Date.now(), version: VERSION, loopProbe };
+  runtime.child = child;
+
+  // 长时间挂着也要有断点：每 30 分钟留一份（启动那份可能已经是几十小时前了）
+  try {
+    const timer = setInterval(() => {
+      try {
+        if (!features.isOn(runtime.config, 'memorySnapshot')) return;
+        const file = memoryBackup.writeSnapshot(root, 'cron');
+        if (file) logger.info('记忆快照（定时）：' + file);
+      } catch (err) {
+        logger.warn('定时记忆快照失败：' + describeError(err));
+      }
+    }, 30 * 60 * 1000);
+    if (timer.unref) timer.unref();
+    runtime.snapshotTimer = timer;
+  } catch { /* 定时器起不来不影响主流程 */ }
+
+  runtime.llm = new DeepSeekClient({ config, logger: child('llm') });
+  runtime.diary = new DiaryService(config, {
+    store,
+    llm: runtime.llm,
+    logger: child('diary'),
+    // 日记写完要发给主人时，借用提醒的主动发送队列；runtime.reminders 在下面才创建，
+    // 所以这里用闭包延迟取，真正发日记时它已经存在。
+    enqueue: (item) => runtime.reminders.enqueueNow(item),
+  });
+  runtime.diary.start();
+  // 记忆层用同一个模型做 episode 摘要/抽取（后台跑，不在回复热路径）
+  store.llm = runtime.llm;
+  // 判定链：为什么回 / 为什么不回。默认只记原因和状态；正文在 data/trace/raw 里留 24 小时，
+  // 导出日志包时默认不带（要带得在启动器里手动勾选）。
+  const trace = createTrace({
+    dataDir: config.paths.dataDir,
+    enabled: !(config.log && config.log.trace === false),
+    raw: Boolean(config.log && config.log.traceRaw !== false),
+  });
+  runtime.trace = trace;
+  runtime.bot = new Bot({ config, store, llm: runtime.llm, logger: child('pipeline'), trace, version: VERSION });
+  // 主人问起日记时，聊天模型通过 [[diary:日期]] 标记读取；不给它直接塞全文。
+  runtime.bot.diary = runtime.diary;
+  // 本机所在地：后台探一次（Windows 定位服务优先，挂 VPN 也准），之后定期刷新。
+  // 只放在内存里，给 <env> 块用；关掉 features.envContext 或 env.autoDetect=false 就完全不动。
+  try {
+    runtime.stopLocationProbe = locationProbe.startAutoProbe(config, { logger: child('env') });
+  } catch (err) {
+    logger.warn('所在地探测没起来（不影响聊天）：' + ((err && err.message) || err));
+  }
+  // 表情包任务队列：内存态，重启不重放（避免把上一条没发出去的表情再补发一次）
+  // store 用来记动作账：发了哪张、桥接确认没确认，下一轮提示词才看得见
+  stickersAdapter.setProbeLogger(child('sticker'));   // 探针：让适配层也往同一份日志写
+  runtime.stickerService = new StickerService(config, { store, logger: child('sticker') });
+  runtime.bot.stickerService = runtime.stickerService;
+  // 联系人缓存：桥接推上来的 wxid 清单，给启动器选择器和 care 白名单用
+  runtime.contacts = new ContactsCache(config, { logger: child('contacts') });
+  runtime.moments = new MomentsService({
+    dir: path.join(config.paths.dataDir, 'moments'),
+    logger: child('moments'),
+    llm: runtime.llm,
+    config,
+  });
+  runtime.bot.moments = runtime.moments;
+  runtime.moments.startAutoRead();
+  // 提醒：到点由桥接来取（/api/reminders/due），这里只管存和状态
+  runtime.reminders = new ReminderService(config, {
+    logger: child('reminder'),
+    // 「刚聊过先跳过」规则要看会话最后一条消息的时间
+    lastActiveAt: (wxid) => {
+      const keys = [`wechat:u:${wxid}`, `wechat:g:${wxid}`];
+      let last = 0;
+      for (const key of keys) {
+        try {
+          const msgs = store.messages(key, 1);
+          const ts = Number(msgs && msgs[0] && msgs[0].ts) || 0;
+          if (ts > last) last = ts;
+        } catch { /* 读不到就算了 */ }
+      }
+      return last;
+    },
+  });
+  runtime.bot.reminders = runtime.reminders;
+  // 启动扫描：已经过了提醒时间（连 5 分钟重试窗口都过了）的一律标过期，不再补发
+  try {
+    const swept = runtime.reminders.sweepStale();
+    if (swept.expired) logger.info(`提醒清理：${swept.expired} 条已过期（过了提醒时间，不再补发）`);
+  } catch (err) {
+    logger.warn('提醒清理失败（不影响使用）：' + err.message);
+  }
+  // 启动：检测 30 分钟空闲的 episode 补写 L2；超过 3,200 token 的按需压缩。
+  // 后台跑，不阻塞服务启动；原文已经在磁盘上，补写失败也只是晚一轮。
+  try {
+    store.startupRecovery({ llm: runtime.llm })
+      .then((r) => {
+        if (r && (r.episodesClosed || r.chats)) {
+          logger.info(`记忆启动恢复：${r.chats} 个聊天，补写 ${r.episodesClosed || 0} 个 episode`);
+        }
+      })
+      .catch((err) => logger.warn('记忆启动恢复失败（不影响聊天）：' + describeError(err)));
+  } catch (err) {
+    logger.warn('记忆启动恢复失败（不影响聊天）：' + describeError(err));
+  }
+  runtime.gateways = createGateways({ config, bot: runtime.bot, logger: child('gateway') });
+  watchConfigFile(runtime);
+  // 探针：createRuntime 结束 = server.js 可以 listen 的时刻，这条就是「启动被堵了多久」
+  probe.emit(logger, 'info', `createRuntime 耗时=${probe.ms(probe.now() - probeT0)}ms（listen 之前）`);
+  return runtime;
+}
+
+module.exports = { VERSION, createRuntime };

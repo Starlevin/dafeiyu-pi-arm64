@@ -1,0 +1,29 @@
+{
+    "name": "whale-girl-bot",
+    "version": "4.1.0",
+    "private": false,
+    "description": "Whale Girl core adapted by DaFeiYu for experimental Linux WeChat integration",
+    "main": "server.js",
+    "type": "commonjs",
+    "scripts": {
+        "start": "node server.js",
+        "doctor": "node server.js --doctor"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "keywords": [
+        "deepseek",
+        "chatbot",
+        "wechat",
+        "wechat-bot",
+        "bilibili",
+        "llm"
+    ],
+    "license": "AGPL-3.0-only",
+    "author": "",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/Starlevin/dafeiyu-pi-arm64/tree/main/integrations/wechat-pi/core"
+    }
+}
