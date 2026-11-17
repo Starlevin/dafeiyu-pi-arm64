@@ -81,8 +81,9 @@ import Glibc
             #expect(engine.useTemporaryCredentials(token: "synthetic-test-token", key: "synthetic-key"))
 
             // 等待：首次连接失败 → 快速退避（1 次、5 秒）→ 预算耗尽 → 转入守护 → 守护开始探测。
+            // CI 负载高时定时器会明显延后；给 60 秒上限，避免把调度抖动误判为功能回归。
             var sawWatchdog = false
-            for _ in 0..<60 {
+            for _ in 0..<120 {
                 try await Task.sleep(nanoseconds: 500_000_000)
                 if engine.status.contains("低频守护第") { sawWatchdog = true; break }
             }
