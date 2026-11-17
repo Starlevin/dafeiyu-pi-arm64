@@ -83,7 +83,7 @@ jobs:
               fail=1
             fi
           }
-          check "单轮快速回复路径" "保持简短。只输出最终 JSON 短答"
+          check "单轮快速回复路径" "按本轮角色提示的场景长度生成合适回复"
           check "性能日志开关" "DAFEIYU_PERF_LOG"
           check "快速路径可达性修正" "toolsMayRun"
           check "首次失败退避重连" "首次连接未成功"

@@ -137,7 +137,7 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
             for i in items.indices where change.replaces.contains(items[i].id) || (items[i].kind == "episode" && !obsoleteSources.isDisjoint(with: items[i].sourceIDs)) { items[i].invalidatedAt = now }
             guard change.operation == "upsert" else { continue }
             let text = Self.redact(change.text)
-            if items.contains(where: { $0.subject == change.subject && $0.text == text && $0.current(now) }) { continue }
+            if items.contains(where: { $0.subject == change.subject && $0.kind == change.kind && QQReplyRepetitionPolicy.normalized($0.text) == QQReplyRepetitionPolicy.normalized(text) && $0.current(now) }) { continue }
             let days = min(change.days, change.kind == "event" ? 90 : change.kind == "task" ? 30 : 365)
             items.append(QQMemoryItem(subject: change.subject, kind: change.kind, text: text, keywords: change.keywords.map(Self.redact), importance: change.importance, sourceIDs: [change.sourceID], updatedAt: now, expiresAt: now.addingTimeInterval(Double(days * 86400))))
         }
@@ -190,12 +190,13 @@ public struct QQMemoryIndex: Sendable {
         for term in Self.terms(query) {
             let matches = postings[term] ?? []
             let weight = log(1 + Double(records.count + 1) / Double(matches.count + 1))
-            for id in matches { scores[id, default: 0] += weight }
+            for id in matches where records[id]?.subject == subject { scores[id, default: 0] += weight }
         }
         // Small persistent context: current speaker's profile and open tasks, even without word overlap.
         for item in records.values where item.subject == subject && ["preference", "task", "legacy"].contains(item.kind) { scores[item.id, default: 0] += 1 }
         return scores.compactMap { id, score -> (QQMemoryItem, Double)? in
-            guard let item = records[id], item.current(now) || (history && now.timeIntervalSince(item.invalidatedAt ?? item.expiresAt) < 90 * 86400) else { return nil }
+            guard let item = records[id], item.subject == subject,
+                  item.current(now) || (history && now.timeIntervalSince(item.invalidatedAt ?? item.expiresAt) < 90 * 86400) else { return nil }
             let freshness = 1 / (1 + max(0, now.timeIntervalSince(item.updatedAt)) / 86400)
             return (item, score + Double(item.importance) * 0.15 + freshness * 0.3 + (item.subject == subject ? 0.5 : 0))
         }.sorted { $0.1 == $1.1 ? $0.0.id < $1.0.id : $0.1 > $1.1 }.prefix(limit).map(\.0)
