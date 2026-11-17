@@ -193,7 +193,15 @@ struct DeepSeekClient {
                 do {
                     let data = try await request(path: "chat/completions", key: key, body: body,
                                                  timeout: thinkingEnabled ? 90 : provider.requestTimeout)
-                    response = try JSONDecoder().decode(Response.self, from: data); break
+                    do {
+                        response = try JSONDecoder().decode(Response.self, from: data)
+                    } catch {
+                        // Keep malformed upstream bodies distinguishable from HTTP/transport failures.
+                        // The generic JSONDecoder localizedDescription ("data is not in the correct format")
+                        // gives no stage context and was the Observed 22:21 QQ failure text.
+                        throw AppFailure.message("模型响应格式无效（阶段：chat_completion_response）")
+                    }
+                    break
                 } catch let error as HTTPFailure where error.isRetryable && attempt < provider.maxRetries {
                     // 超时与 5xx 指数退避重试；429 在免费额度场景通常意味着配额耗尽，
                     // 退避次数用尽后如实上报，不自动切换到任何付费方案。
