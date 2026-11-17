@@ -1,0 +1,530 @@
+#!/usr/bin/env python3
+"""Fail-closed WeChat media delivery for explicitly approved local attachments.
+
+Only the locally configured special group is permitted.
+No network download, DB reads, clipboard image bytes, or arbitrary model paths.
+An unknown UI submission is never retried by the bridge.
+
+v2: buttons are located semantically via AT-SPI and mapped through the
+AT-SPI-frame -> X-window affine transform (the Pi client resizes its window,
+so raw AT-SPI extents are stale). The Qt file dialog receives no WM focus,
+so it is raised and focused via Xlib before keyboard-driven file selection.
+"""
+from __future__ import annotations
+
+import ctypes
+import hashlib
+import json
+import re
+import stat
+import time
+from pathlib import Path
+from runtime_paths import configured_group
+
+MAX_BYTES = 10 * 1024 * 1024
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+KINDS = {"image": {".png", ".jpg", ".jpeg", ".gif"},
+         "file": {".txt", ".pdf"}}
+ANIMATED_ROWS = {"Animated Stickers", "Animated sticker", "动画表情", "[动画表情]",
+                 "[动态表情]", "[GIF]", "[gif]"}
+
+
+def approved_path(spec, directory):
+    if not isinstance(spec, dict) or not directory:
+        return None
+    kind, name = spec.get("kind"), spec.get("name")
+    if kind not in KINDS or not isinstance(name, str) or not NAME.fullmatch(name):
+        return None
+    root = Path(directory)
+    if not root.is_dir() or root.is_symlink():
+        return None
+    item = root / name
+    try:
+        if item.is_symlink() or not item.is_file() or item.resolve().parent != root.resolve():
+            return None
+        info = item.stat()
+        if not 0 < info.st_size <= MAX_BYTES or not stat.S_ISREG(info.st_mode):
+            return None
+        if item.suffix.lower() not in KINDS[kind]:
+            return None
+        manifest = root / "approved-media.json"
+        if manifest.is_symlink() or not manifest.is_file():
+            return None
+        catalog = json.loads(manifest.read_text(encoding="utf-8"))
+        entry = catalog.get("files", {}).get(name)
+        if not isinstance(entry, dict) or entry.get("kind") != kind:
+            return None
+        expected = entry.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            return None
+        with item.open("rb") as src:
+            magic = src.read(16)
+        if kind == "image" and item.suffix.lower() == ".png" and not magic.startswith(b"\x89PNG\r\n\x1a\n"):
+            return None
+        if kind == "image" and item.suffix.lower() in (".jpg", ".jpeg") and not magic.startswith(b"\xff\xd8\xff"):
+            return None
+        if kind == "image" and item.suffix.lower() == ".gif" and not magic.startswith((b"GIF87a", b"GIF89a")):
+            return None
+        if item.suffix.lower() == ".pdf" and not magic.startswith(b"%PDF-"):
+            return None
+        if item.suffix.lower() == ".txt" and b"\x00" in magic:
+            return None
+        digest = hashlib.sha256()
+        with item.open("rb") as src:
+            for block in iter(lambda: src.read(65536), b""):
+                digest.update(block)
+        if digest.hexdigest() != expected:
+            return None
+        return item
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _mapper(bridge, pf):
+    """Affine map from AT-SPI coordinates to real X pixels, or None."""
+    app = bridge.get_app()
+    if app is None:
+        return None
+    fr = None
+    for n, _ in bridge.walk(app, maxd=3):
+        if bridge.role(n) == "frame" and bridge.nm(n) == "Weixin":
+            fr = bridge.ext(n)
+            break
+    if not fr or fr[2] <= 0 or fr[3] <= 0:
+        return None
+    mw = pf.main_window()
+    if not mw:
+        return None
+    g = pf.windows().get(mw)
+    if not g or g[2] <= 0 or g[3] <= 0:
+        return None
+    sx, sy = g[2] / fr[2], g[3] / fr[3]
+    if not (0.8 <= sx <= 1.3 and 0.8 <= sy <= 1.3):
+        return None
+
+    def m(rect):
+        x, y, w, h = rect
+        return (int((x - fr[0]) * sx + g[0]), int((y - fr[1]) * sy + g[1]),
+                max(1, int(w * sx)), max(1, int(h * sy)))
+    return m, g
+
+
+def _toolbar_buttons(bridge, app, composer):
+    x, y, w, h = composer
+    sendfile, send = [], []
+    for n, _ in bridge.walk(app, maxd=26):
+        if bridge.role(n) != "button":
+            continue
+        r = bridge.ext(n)
+        if not r or r[2] <= 0 or r[3] <= 0:
+            continue
+        if not (y + h - 10 <= r[1] <= y + h + 90):
+            continue
+        nm = bridge.nm(n)
+        if nm == "Send File" and x - 50 <= r[0] <= x + w:
+            sendfile.append(r)
+        elif nm in ("Send", "发送") and r[0] >= x + w * 0.5:
+            send.append(r)
+    return sendfile, send
+
+
+def _dialog_visible(bridge):
+    app = bridge.get_app()
+    if app is None:
+        return False
+    for n, _ in bridge.walk(app, maxd=28):
+        if bridge.role(n) == "button" and bridge.nm(n) in ("Open", "Cancel", "打开", "取消"):
+            r = bridge.ext(n)
+            if r and r[2] > 0 and r[3] > 0 and bridge.showing(n):
+                return True
+    return False
+
+
+def _is_media_row(bridge, visible, spec, path):
+    if path.name in visible:
+        return True
+    if spec["kind"] != "image":
+        return False
+    return bridge.is_image(visible) or visible.strip() in ANIMATED_ROWS
+
+
+def _clear_draft(bridge, xi, m):
+    try:
+        app = bridge.get_app()
+        node, comp = bridge.composer(app)
+        if not comp:
+            return
+        cx, cy, cw, ch = m(comp)
+        xi.click(cx + cw // 2, cy + ch // 2, settle=.25)
+        xi.key("a", ("Control_L",), settle=.12)
+        xi.key("Delete", settle=.2)
+        xi.key("BackSpace", settle=.2)
+    except Exception:
+        pass
+
+
+def _composer_pre_return_state(bridge, target, own_fp):
+    """选完路径准备按 Return 前，确认仍停在原目标且原输入框仍完全空白。"""
+    app = bridge.get_app()
+    if (app is None or not bridge.group_is_open(app, target)
+            or len(bridge.visible_chat_matches(app, target)) != 1):
+        return "target_changed"
+    node, _ = bridge.composer(app)
+    if node is None:
+        return "missing"
+    fp_fn = getattr(bridge, "_tx_composer_fp", None)
+    if not callable(fp_fn) or fp_fn(node) != own_fp:
+        return "composer_replaced"
+    reader = node.get_text_iface()
+    if reader is None:
+        return "missing"
+    draft = bridge.Atspi.Text.get_text(reader, 0, -1)
+    if (draft or "") != "" or reader.get_character_count() != 0:
+        return "concurrent_draft"
+    return "ok"
+
+
+def _x11_is_same_or_descendant(pf, focus_win, dlg):
+    """确认 X11 焦点窗口就是 dlg 本身或其子控件（如 Qt 对话框内部子窗口）。"""
+    try:
+        cur = int(focus_win)
+    except (TypeError, ValueError):
+        return False
+    if cur in (0, 1):
+        return False
+    if cur == dlg:
+        return True
+    xlib = getattr(pf, "X", None)
+    dpy_fn = getattr(pf, "dpy", None)
+    if xlib is None or not callable(dpy_fn) or not hasattr(xlib, "XQueryTree"):
+        return False
+    dpy = dpy_fn()
+    if not dpy:
+        return False
+    try:
+        xlib.XQueryTree.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.POINTER(ctypes.c_ulong)),
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+    except Exception:
+        pass
+    seen = set()
+    for _ in range(16):
+        if cur in seen or cur in (0, 1):
+            return False
+        seen.add(cur)
+        rr = ctypes.c_ulong()
+        pr = ctypes.c_ulong()
+        kids = ctypes.POINTER(ctypes.c_ulong)()
+        n = ctypes.c_uint()
+        status = xlib.XQueryTree(
+            dpy, cur, ctypes.byref(rr), ctypes.byref(pr),
+            ctypes.byref(kids), ctypes.byref(n),
+        )
+        if kids and hasattr(xlib, "XFree"):
+            try:
+                xlib.XFree.argtypes = [ctypes.c_void_p]
+            except Exception:
+                pass
+            try:
+                xlib.XFree(kids)
+            except Exception:
+                pass
+        if status == 0:
+            return False
+        parent = int(pr.value)
+        if parent == dlg:
+            return True
+        if parent == int(rr.value) or parent == 0:
+            return False
+        cur = parent
+    return False
+
+
+def _picker_has_focus(pf, dlg):
+    """fail-closed 验证文件对话框当前确实存在且拥有输入焦点。"""
+    try:
+        wins = pf.windows()
+    except Exception:
+        return False
+    rect = wins.get(dlg) if isinstance(wins, dict) else None
+    if not rect or len(rect) < 4 or rect[2] <= 0 or rect[3] <= 0:
+        return False
+    fw_fn = getattr(pf, "focused_window", None)
+    if callable(fw_fn):
+        try:
+            fw = fw_fn()
+        except Exception:
+            return False
+        if fw is None:
+            return False
+        return fw == dlg or _x11_is_same_or_descendant(pf, fw, dlg)
+    xlib = getattr(pf, "X", None)
+    dpy_fn = getattr(pf, "dpy", None)
+    if xlib is not None and callable(dpy_fn) and hasattr(xlib, "XGetInputFocus"):
+        try:
+            dpy = dpy_fn()
+            if not dpy:
+                return False
+            try:
+                xlib.XGetInputFocus.argtypes = [
+                    ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong),
+                    ctypes.POINTER(ctypes.c_int),
+                ]
+            except Exception:
+                pass
+            fw = ctypes.c_ulong()
+            revert = ctypes.c_int()
+            xlib.XGetInputFocus(dpy, ctypes.byref(fw), ctypes.byref(revert))
+            return _x11_is_same_or_descendant(pf, fw.value, dlg)
+        except Exception:
+            return False
+    return False
+
+
+def _picker_window_present(pf, dlg):
+    try:
+        wins = pf.windows()
+    except Exception:
+        return False
+    rect = wins.get(dlg) if isinstance(wins, dict) else None
+    return bool(rect and len(rect) >= 4 and rect[2] > 0 and rect[3] > 0)
+
+
+def _target_intact(bridge, target):
+    app = bridge.get_app()
+    return bool(
+        app is not None
+        and bridge.group_is_open(app, target)
+        and len(bridge.visible_chat_matches(app, target)) == 1
+    )
+
+
+def _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi):
+    """每次向文件对话框发键前都必须正面证明：dlg 仍存在、焦点确在 dlg、目标与原输入框空白未变。"""
+    if not _picker_window_present(pf, dlg):
+        return (
+            "media_picker_closed" if _target_intact(bridge, target)
+            else "media_draft_target_changed"
+        )
+    if not _picker_has_focus(pf, dlg):
+        return "media_picker_focus_failed"
+    state = _composer_pre_return_state(bridge, target, own_fp)
+    if state == "ok":
+        return None
+    if _picker_window_present(pf, dlg) and _picker_has_focus(pf, dlg):
+        xi.key("Escape", settle=.3)
+    if state == "target_changed":
+        return "media_draft_target_changed"
+    if callable(getattr(bridge, "log", None)):
+        bridge.log("media_draft_preserved", stage="pre_return", reason=state)
+    return "media_draft_unverified"
+
+
+def _focus_picker(bridge, pf, dlg, target, own_fp, xi, settle_s):
+    """先验证 dlg 尚在且输入框未变，再聚焦并正面核验焦点确实落在 dlg 上。"""
+    if not _picker_window_present(pf, dlg):
+        return (
+            "media_picker_closed" if _target_intact(bridge, target)
+            else "media_draft_target_changed"
+        )
+    state = _composer_pre_return_state(bridge, target, own_fp)
+    if state == "target_changed":
+        return "media_draft_target_changed"
+    if state != "ok":
+        if callable(getattr(bridge, "log", None)):
+            bridge.log("media_draft_preserved", stage="pre_focus", reason=state)
+        return "media_draft_unverified"
+    focus_ret = pf.focus(dlg)
+    time.sleep(settle_s)
+    if focus_ret is False:
+        return (
+            "media_picker_closed" if not _picker_window_present(pf, dlg)
+            else "media_picker_focus_failed"
+        )
+    return _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+
+
+def _drive_picker_input(bridge, pf, dlg, target, own_fp, path, xi, focus_key, settle_s):
+    """驱动文件对话框输入并按 Return；任一阶段对话窗关闭或失焦均 fail-closed 中止。"""
+    err = _focus_picker(bridge, pf, dlg, target, own_fp, xi, settle_s)
+    if err is not None:
+        return err
+    mods = ("Alt_L",) if focus_key == "n" else ("Control_L",)
+    xi.key(focus_key, mods, settle=.25)
+    err = _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    if err is not None:
+        return err
+    xi.key("a", ("Control_L",), settle=.12)
+    err = _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    if err is not None:
+        return err
+    if not xi.type_text(str(path), settle=.4):
+        if _picker_window_present(pf, dlg) and _picker_has_focus(pf, dlg):
+            xi.key("Escape", settle=.3)
+        return "media_filename_failed"
+    err = _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    if err is not None:
+        return err
+    xi.key("Return", settle=1.0)
+    return None
+
+
+def send_media(target, spec, media_dir, on_submit, bridge, xi):
+    """Submit one verified attachment, returning only a status enum."""
+    if target != configured_group("SPECIAL_GROUP"):
+        return "media_target_unapproved"
+    path = approved_path(spec, media_dir)
+    if path is None:
+        return "media_not_approved"
+    try:
+        import picker_focus as pf
+    except Exception:
+        return "media_focus_unavailable"
+    verify_fn = getattr(bridge, "verify_media_target", None)
+    clear_fn = getattr(bridge, "verify_media_clear", None)
+    if not callable(verify_fn) or not callable(clear_fn):
+        return "media_target_guard_missing"
+    app = bridge.get_app()
+    if (app is None or bridge.blocking_state(app)
+            or len(bridge.visible_chat_matches(app, target)) != 1
+            or not bridge.group_is_open(app, target)):
+        return "media_target_unverified"
+    ok_before, _ = verify_fn(target, phase="before_media")
+    if not ok_before:
+        return "media_target_unverified"
+    node, bounds = bridge.composer(app)
+    if not node or not bounds:
+        return "media_composer_missing"
+    reader = node.get_text_iface()
+    if reader is None or reader.get_character_count() != 0:
+        return "media_composer_busy"
+    fp_fn = getattr(bridge, "_tx_composer_fp", None)
+    own_fp = fp_fn(node) if callable(fp_fn) else None
+    if own_fp is None:
+        return "media_composer_unverified"
+    mapped = _mapper(bridge, pf)
+    if mapped is None:
+        return "media_layout_unverified"
+    m, g = mapped
+    sf, sd = _toolbar_buttons(bridge, app, bounds)
+    if len(sf) != 1 or len(sd) != 1:
+        return "media_layout_unverified"
+    sfx, sfy, sfw, sfh = m(sf[0])
+    sdx, sdy, sdw, sdh = m(sd[0])
+    for cx, cy in ((sfx + sfw // 2, sfy + sfh // 2), (sdx + sdw // 2, sdy + sdh // 2)):
+        if not (g[0] <= cx <= g[0] + g[2] and g[1] <= cy <= g[1] + g[3]):
+            return "media_layout_unverified"
+    # Reserve before any UI mutation. If the ledger is unavailable, do not
+    # create an attachment draft that another actor might accidentally send.
+    on_submit()
+    mw = pf.main_window()
+    if mw:
+        pf.focus(mw)
+        time.sleep(.25)
+    before = pf.windows()
+    xi.click(sfx + sfw // 2, sfy + sfh // 2, settle=.6)
+    dlg = None
+    for _ in range(16):
+        time.sleep(.5)
+        cands = pf.find_new(before)
+        a2 = bridge.get_app()
+        if cands or (a2 is not None and bridge.blocking_state(a2) == "window_blocked"):
+            dlg = cands[-1][0] if cands else None
+            break
+    if dlg is None:
+        return "media_picker_unverified"
+    drive_err = _drive_picker_input(
+        bridge, pf, dlg, target, own_fp, path, xi, "n", settle_s=.35)
+    if drive_err is not None:
+        return drive_err
+
+    def gone():
+        if _picker_window_present(pf, dlg):
+            return False
+        return not _dialog_visible(bridge)
+
+    closed = False
+    for _ in range(10):
+        time.sleep(.5)
+        if gone():
+            closed = True
+            break
+    if not closed:
+        retry_err = _drive_picker_input(
+            bridge, pf, dlg, target, own_fp, path, xi, "l", settle_s=.25)
+        if retry_err is not None:
+            return retry_err
+        for _ in range(6):
+            time.sleep(.5)
+            if gone():
+                closed = True
+                break
+    if not closed:
+        if _picker_window_present(pf, dlg) and _picker_has_focus(pf, dlg):
+            xi.key("Escape", settle=.4)
+        return "media_picker_failed"
+    mw = pf.main_window()
+    if mw:
+        pf.focus(mw)
+        time.sleep(.3)
+    app = bridge.get_app()
+    ok_send, _ = verify_fn(target, phase="before_media_send")
+    if (not ok_send or app is None or bridge.blocking_state(app)
+            or _dialog_visible(bridge)
+            or not bridge.group_is_open(app, target)
+            or len(bridge.visible_chat_matches(app, target)) != 1):
+        # 切群或目标身份存疑时绝不执行 Ctrl+A/Delete，防止误清用户草稿。
+        return "media_draft_target_changed"
+    node, _ = bridge.composer(app)
+    reader = node.get_text_iface() if node is not None else None
+    if node is None or reader is None:
+        return "media_draft_missing"
+    cur_fp = fp_fn(node) if callable(fp_fn) else None
+    if cur_fp != own_fp:
+        if callable(getattr(bridge, "log", None)):
+            bridge.log("media_draft_preserved", stage="before_media_send", reason="composer_replaced")
+        return "media_draft_unverified"
+    draft = bridge.Atspi.Text.get_text(reader, 0, -1)
+    char_count = reader.get_character_count()
+    expected_drafts = ("\ufffc",) if spec["kind"] == "image" else ("\ufffc", path.name)
+    if char_count != len(draft) or draft not in expected_drafts:
+        if draft:
+            ok_clear, clear_reason = clear_fn(
+                target, own_fp,
+                expected_draft=path.name if (spec["kind"] == "file" and draft == path.name) else None)
+            if ok_clear:
+                _clear_draft(bridge, xi, m)
+            elif callable(getattr(bridge, "log", None)):
+                bridge.log("media_draft_preserved", stage="media_draft_unverified", reason=clear_reason)
+        return "media_draft_unverified"
+    _, before_msgs = bridge.read_messages(app)
+    base0 = bridge.baseline(before_msgs)
+    xi.click(sdx + sdw // 2, sdy + sdh // 2, settle=.8)
+    for _ in range(12):
+        app = bridge.get_app()
+        if app is None or not bridge.group_is_open(app, target):
+            return "media_post_target_changed"
+        anchor, after = bridge.read_messages(app)
+        appended = bridge.new_rows(base0, bridge.baseline(after))
+        if appended:
+            for visible, rect in after[-len(appended):]:
+                side = bridge.avatar_side(rect, anchor)
+                if side and side[0] == "outgoing" and _is_media_row(bridge, visible, spec, path):
+                    return "visible_outgoing"
+        time.sleep(.6)
+    app = bridge.get_app()
+    post_node, _ = bridge.composer(app) if app is not None else (None, None)
+    post_reader = post_node.get_text_iface() if post_node is not None else None
+    post_draft = (bridge.Atspi.Text.get_text(post_reader, 0, -1)
+                  if post_reader is not None else None)
+    if post_draft:
+        ok_clear, clear_reason = clear_fn(
+            target, own_fp,
+            expected_draft=path.name if (spec["kind"] == "file" and post_draft == path.name) else None)
+        if ok_clear:
+            _clear_draft(bridge, xi, m)
+        elif callable(getattr(bridge, "log", None)):
+            bridge.log("media_draft_preserved", stage="media_submission_unknown", reason=clear_reason)
+    return "media_submission_unknown"

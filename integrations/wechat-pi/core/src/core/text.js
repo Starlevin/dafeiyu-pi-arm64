@@ -1,0 +1,63 @@
+'use strict';
+
+/**
+ * 文本处理纯函数：清洗、匹配、时间格式化、数值收敛。
+ * 不依赖任何 IO，便于单测。
+ */
+
+/** 清洗可能触发模型内容审核的词，避免整段请求被 400 拒掉 */
+const SENSITIVE_PATTERNS = [
+  /操(你|他|她|你妈|你妈逼)?/g, /你妈/g, /妈的/g, /他妈/g, /傻逼/gi, /傻B/gi, /煞笔/g,
+  /草泥马/g, /尼玛/g, /性交/g, /做爱/g, /色情/g, /黄片/g, /裸(照|聊)?/g, /约炮/g, /嫖/g,
+];
+
+function sanitizeForModel(text) {
+  let s = String(text == null ? '' : text);
+  for (const re of SENSITIVE_PATTERNS) s = s.replace(re, '***');
+  return s;
+}
+
+/** 兼容群名末尾的「群」称呼，避免子串把相似名称的其他群一并禁言。 */
+function nameMatches(a, b) {
+  const x = String(a || '').replace(/\s+/g, '').toLowerCase();
+  const y = String(b || '').replace(/\s+/g, '').toLowerCase();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const trimGroup = (name) => name.replace(/(?:那个|这个)?群$/, '');
+  const target = trimGroup(x);
+  return Boolean(target && target === trimGroup(y));
+}
+
+/**
+ * 消息时间戳 [MM-DD HH:mm]：提示词里每条历史消息前面的那个标记。
+ * 必须确定性：同一个 ts，不管当「当前消息」还是当「历史消息」，渲染结果一样。
+ * 用本地时区手写补零，不走 toLocaleString（不同 ICU 版本格式会飘）。
+ */
+function formatStamp(ts) {
+  const t = Number(ts) || 0;
+  if (!t) return '';
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 只留文字，用来比较「是不是把对方的话重复了一遍」 */
+function normalizeForCompare(s) {
+  return String(s || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase();
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(n)));
+}
+
+module.exports = {
+  SENSITIVE_PATTERNS,
+  sanitizeForModel,
+  nameMatches,
+  formatStamp,
+  normalizeForCompare,
+  clampInt,
+};

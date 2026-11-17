@@ -101,6 +101,9 @@ struct QQEngineSharedState: Sendable {
     private var worker: Task<Void, Never>?
     private let decisionSettings = QQDecisionSettings.load()
     private let proactiveDecision = QQProactiveDecision()
+    // ReplyDecision Protocol v1 (opt-in; default off keeps the legacy path unchanged).
+    private let replyDecisionSettings = QQReplyDecisionSettings.load()
+    private lazy var replyDecisionGate = QQReplyDecisionGate()
     private var watchdog: Task<Void, Never>?
     private var deadlineTask: Task<Void, Never>?
     private var session: UUID?
@@ -1090,13 +1093,23 @@ struct QQEngineSharedState: Sendable {
             if let groupContext {
                 evaluateProactiveDecision(message, target: target, context: groupContext, settings: settings, work: work)
             }
-            if settings.mode == .enforce { return }
+            // v1 enforce owns the enqueue decision; returning here also prevents double
+            // enqueue when the legacy mode is shadow but v1 is enforce.
+            if settings.mode == .enforce || replyDecisionSettings.enforces { return }
         }
         enqueueReply(work, groupKey: proactive && groupProfile != nil ? message.key : nil)
     }
     private func evaluateProactiveDecision(_ message: QQIncoming, target: QQTarget, context: QQGroupContext,
                                            settings: QQDecisionSettings, work: Work) {
         let key = message.key
+        // v1 switch: enforce replaces the 0–1 score gate; shadow only logs, legacy path continues.
+        if replyDecisionSettings.enforces {
+            evaluateProactiveDecisionV2(message, target: target, context: context, settings: settings, work: work)
+            return
+        }
+        if replyDecisionSettings.mode == .shadow {
+            logProactiveDecisionShadow(message, context: context, settings: settings)
+        }
         let texts = QQProactiveDecision.context(context.eventsText())
         guard !texts.isEmpty, modelClient.provider.baseURL.absoluteString == QQProactiveDecision.gateway,
               sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits,
@@ -1124,6 +1137,64 @@ struct QQEngineSharedState: Sendable {
             self.enqueueReply(work, groupKey: self.scopedProactiveProfiles[key] == nil ? nil : key)
         }
     }
+
+    private func evaluateProactiveDecisionV2(_ message: QQIncoming, target: QQTarget, context: QQGroupContext,
+                                             settings: QQDecisionSettings, work: Work) {
+        let key = message.key
+        guard let profile = scopedProactiveProfiles[key] else { return }
+        let texts = QQProactiveDecision.context(context.eventsText())
+        guard !texts.isEmpty, modelClient.provider.baseURL.absoluteString == QQProactiveDecision.gateway,
+              sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits,
+                              chatCooldown: config.ai.cooldownSeconds) == .allowed,
+              proactiveDecision.reserve(group: key, budget: settings.dailyBudget) else { return }
+        let epoch = fence.epoch
+        let traceID = UUID()
+        let start = ContinuousClock.now
+        let v2 = replyDecisionSettings
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.proactiveDecision.finish(group: key) }
+            guard (try? self.check(epoch, scope: key, target: target)) != nil else { return }
+            // A missing bearer is passed as a nil scorer value: score() returns nil and the protocol fails closed.
+            let scorer = QQProactiveScorer(context: texts, bearer: try? self.resolveModelKey())
+            guard let trace = await self.replyDecisionGate.decide(
+                message: message, context: context, profile: profile, settings: v2, scorer: scorer
+            ) else { return }
+            let elapsed = start.duration(to: .now).components
+            let latency = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
+            let heuristic = trace.result.heuristicScore.map { String(format: "%.4f", $0) } ?? "-"
+            print("[qq_reply_decision_v2] trace=\(traceID) mode=enforce mention=\(trace.input.mention.rawValue) heuristic=\(heuristic) score=\(String(format: "%.4f", trace.result.score)) reason=\(trace.result.reason.rawValue) source=\(trace.result.source.rawValue) scorer=\(trace.result.scorerCalled) latency_ms=\(latency)")
+            guard trace.result.action == .speak,
+                  (try? self.check(epoch, scope: key, target: target)) != nil,
+                  self.proactiveAllowed(for: target),
+                  self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? false,
+                  self.groupRecentMessages[key]?.last?.id == message.id,
+                  Date().timeIntervalSince1970 - message.time <= 120 else { return }
+            self.enqueueReply(work, groupKey: key)
+        }
+    }
+
+    /// Shadow mode must not affect delivery: it only records what v1 would have decided.
+    private func logProactiveDecisionShadow(_ message: QQIncoming, context: QQGroupContext,
+                                           settings: QQDecisionSettings) {
+        let key = message.key
+        guard let profile = scopedProactiveProfiles[key] else { return }
+        let texts = QQProactiveDecision.context(context.eventsText())
+        guard !texts.isEmpty else { return }
+        let v2 = replyDecisionSettings
+        Task { [weak self] in
+            guard let self else { return }
+            let scorer: (any ReplyScoring)? = v2.scoreInShadow
+                ? QQProactiveScorer(context: texts, bearer: try? self.resolveModelKey())
+                : nil
+            guard let trace = await self.replyDecisionGate.decide(
+                message: message, context: context, profile: profile, settings: v2, scorer: scorer
+            ) else { return }
+            let heuristic = trace.result.heuristicScore.map { String(format: "%.4f", $0) } ?? "-"
+            print("[qq_reply_decision_v2] mode=shadow mention=\(trace.input.mention.rawValue) heuristic=\(heuristic) score=\(String(format: "%.4f", trace.result.score)) reason=\(trace.result.reason.rawValue) source=\(trace.result.source.rawValue) scorer=\(trace.result.scorerCalled)")
+        }
+    }
+
     private func enqueueReply(_ work: Work, groupKey: String?) {
         guard queue.count < Self.queueCapacity else { return }
         queue.append(work)
@@ -1464,6 +1535,17 @@ struct QQEngineSharedState: Sendable {
                     try persist(); continue
                 }
                 let reply = persona.decode(result.text, input: !proactive ? message.text : "主动加入群话题")
+                // PersonaGuard only runs when v1 is enabled; default off keeps the legacy output path.
+                if replyDecisionSettings.enabled, replyDecisionSettings.personaGuard != .off,
+                   proactive || replyDecisionSettings.personaGuard == .all {
+                    let check = QQPersonaRuntimeGuard.check(reply: reply.text, message: message, persona: persona)
+                    if check.blocking {
+                        let codes = check.hits.filter { $0.severity == .block }.map { $0.code.rawValue }.joined(separator: ",")
+                        print("[qq_persona_guard] blocked proactive=\(proactive) codes=\(codes)")
+                        record(target.id, .skipped, "人格契约拦截：候选回复未发送")
+                        continue
+                    }
+                }
                 // Preserve legitimate requests to repeat; avoid sending an identical substantive answer again.
                 let explicitRepeat = ["再说一遍", "重复", "原话", "刚才那句", "再来一次"].contains { message.text.contains($0) }
                 if !proactive, !reply.isFallback, !result.usedTools, result.image == nil, !explicitRepeat,
@@ -1526,6 +1608,9 @@ struct QQEngineSharedState: Sendable {
                 if proactive, scopedProactiveProfiles[message.key] != nil {
                     proactiveSendHistory[message.key, default: []].append(Date())
                     countProactive(.confirmed, groupKey: message.key)
+                    if replyDecisionSettings.enabled {
+                        replyDecisionGate.recordSpeak(chatKey: message.key, text: reply.text)
+                    }
                 }
                 try persist()
                 activeGroupSubmissions.removeValue(forKey: submissionID)

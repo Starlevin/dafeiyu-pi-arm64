@@ -1,0 +1,198 @@
+/* 大肥鱼统一控制台 —— 用量视图样式（独立可合并模块）
+ *
+ * 只引用 app.css 已有的 CSS 变量，因此浅色/深色主题自动跟随，不需要改 app.css。
+ * 合并方式：在 index.html 里 <link rel="stylesheet" href="usage.css">，
+ * 或直接并入 app.css 末尾（本文件没有全局选择器，不会影响其它区块）。
+ */
+
+.usage-embed { margin: 0 0 28px; }
+
+.usage-card {
+  padding: 18px 20px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.usage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  padding-bottom: 12px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.usage-head .card-title { margin: 0; }
+
+.usage-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.usage-refresh { flex: 0 0 auto; }
+
+.usage-window { margin: 0 0 18px; }
+.usage-window:last-of-type { margin-bottom: 8px; }
+
+.usage-window-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+}
+
+/* ---- 指标块：等宽网格，390px 两列 ---- */
+.usage-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.usage-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.usage-tile.warn { border-color: var(--warn-fg); background: var(--warn-bg); }
+
+.usage-tile-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.usage-tile-value {
+  font-size: 20px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  line-height: 1.2;
+}
+
+.usage-tile.warn .usage-tile-value { color: var(--warn-fg); }
+
+.usage-tile-note {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+/* ---- 明细表：窄屏横向滚动，不撑破布局 ---- */
+.usage-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 8px 10px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.usage-table thead th {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.usage-table tbody tr:last-child td { border-bottom: 0; }
+
+.usage-table .usage-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-table .usage-num.warn { color: var(--warn-fg); font-weight: 600; }
+
+.usage-table .usage-provider {
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.usage-table .usage-model {
+  color: var(--ink);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* ---- 覆盖边界 / 空态 ---- */
+.usage-coverage {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.usage-coverage summary {
+  cursor: pointer;
+  color: var(--muted);
+  outline-offset: 3px;
+}
+
+.usage-coverage summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  border-radius: 4px;
+}
+
+.usage-cov-title {
+  margin: 12px 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+.usage-cov-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.65;
+}
+
+.usage-empty,
+.usage-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.usage-unavailable {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--warn-fg);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-fg);
+  border-radius: var(--radius-sm);
+}
+
+@media (max-width: 560px) {
+  .usage-card { padding: 16px 14px; }
+  .usage-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-tile-value { font-size: 18px; }
+}

@@ -54,6 +54,11 @@ public struct QQGroupContext: Sendable {
         }
     }
 
+    /// 最近一条 BOT 发言（已去除传输占位符）；仅供主动决策判断“刚说过/重复话题”，不参与生成。
+    public var lastBotEvent: (text: String, at: Date)? {
+        events.last(where: { $0.subject == "BOT" }).map { (Self.readableText($0.text), $0.at) }
+    }
+
     public func context(characters: Int) -> String {
         var lines: [String] = [], used = 0
         let formatter = ISO8601DateFormatter()

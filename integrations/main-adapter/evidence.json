@@ -1,0 +1,22 @@
+{
+  "schema": "main-adapter-r2-evidence-v1",
+  "generated_at": "2026-11-17T18:18:06+08:00",
+  "worktree": "E:\\个人\\大肥鱼\\开发工作区\\2026-11-17-main-adapter-r2",
+  "branch": "feat/main-adapter-r2-20261117",
+  "base_commit": "d0e6c93e7dca028fc2e5d2175b95d7075693aa1a",
+  "test_command": "python -m unittest discover -s tests -v",
+  "tests_total": 113,
+  "tests_main_adapter": 17,
+  "mock_e2e_cases": 30,
+  "mock_sent": 30,
+  "mock_rejected": 0,
+  "mock_p50_ms": 0.125,
+  "mock_p95_ms": 0.228,
+  "wrong_group_accepted": 0,
+  "wrong_group_rejected": 6,
+  "cross_scope_leak_count": 0,
+  "memory_fact_cap": 3,
+  "status": "CODE PASS / STAGED",
+  "real_qq_wechat_e2e": "NOT_RUN",
+  "production_deploy": "NOT_RUN"
+}

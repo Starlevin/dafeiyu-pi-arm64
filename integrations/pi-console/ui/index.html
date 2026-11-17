@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151b26" media="(prefers-color-scheme: dark)">
+<title>大肥鱼统一控制台</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="usage.css">
+<link rel="stylesheet" href="content.css">
+<link rel="stylesheet" href="admin-tools.css">
+<!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
+<script src="app.js"></script>
+<script src="usage.js" defer></script>
+<script src="content.js" defer></script>
+<script src="admin-tools.js" defer></script>
+</head>
+<body>
+
+<!-- 页头：品牌 + 标题 -->
+<header class="site-header">
+  <div class="wrap header-inner">
+    <div class="brand">
+      <span class="avatar-slot">
+        <span class="avatar-fallback" aria-hidden="true">鱼</span>
+      </span>
+      <span class="brand-copy">
+        <span class="brand-title">大肥鱼统一控制台</span>
+        <span class="brand-sub">DaFeiYu Unified Console</span>
+      </span>
+    </div>
+    <span class="header-tag">本机控制台</span>
+  </div>
+</header>
+
+<!-- 状态区：连接 / 请求 / 错误提示，文字统一由 JS 以 textContent 注入 -->
+<div class="status-bar" id="statusBar" role="status" aria-live="polite" data-kind="">
+  <div class="wrap status-inner">
+    <span class="status-dot" aria-hidden="true"></span>
+    <span class="status-text" id="statusText">正在连接…</span>
+    <span class="status-meta" id="statusMeta"></span>
+  </div>
+</div>
+
+<main class="wrap">
+
+  <!-- 认证层：首次设置 / 重置密码 / 登录 -->
+  <section class="auth-card" id="authCard" hidden aria-labelledby="authTitle">
+    <div class="auth-head">
+      <p class="eyebrow">访问控制</p>
+      <h1 class="auth-title" id="authTitle">登录</h1>
+      <p class="auth-desc" id="authDesc">请输入密码以继续。</p>
+    </div>
+
+    <p class="hint-block" id="setupHint" hidden>首次设置 / 恢复密码需要在本机浏览器打开带 <code>#pair=...</code> 的链接。</p>
+
+    <!-- 首次设置 / 重置密码：新密码 + 确认密码 -->
+    <form class="form" id="setupForm" hidden novalidate autocomplete="off">
+      <div class="field">
+        <label for="setupPassword">新密码</label>
+        <input class="input" id="setupPassword" type="password" autocomplete="new-password" required>
+      </div>
+      <div class="field">
+        <label for="setupConfirm">确认密码</label>
+        <input class="input" id="setupConfirm" type="password" autocomplete="new-password" required>
+      </div>
+      <p class="form-error" id="setupError" role="alert" hidden></p>
+      <button class="btn btn-primary" type="submit" data-action id="setupSubmit">设置密码</button>
+    </form>
+
+    <!-- 登录：密码 -->
+    <form class="form" id="loginForm" hidden novalidate autocomplete="off">
+      <div class="field">
+        <label for="loginPassword">密码</label>
+        <input class="input" id="loginPassword" type="password" autocomplete="current-password" required>
+      </div>
+      <p class="form-error" id="loginError" role="alert" hidden></p>
+      <button class="btn btn-primary" type="submit" data-action id="loginSubmit">登录</button>
+    </form>
+
+    <p class="auth-foot" id="authFoot">配对链接仅在本机浏览器打开时有效。</p>
+  </section>
+
+  <!-- 主控制台 -->
+  <div id="console" hidden>
+    <nav class="console-nav" aria-label="控制台导航">
+      <a class="chip" href="#hOverview">概览</a>
+      <a class="chip" href="#hConversations">会话</a>
+      <a class="chip" href="#usagePane">Token 用量</a>
+      <a class="chip" href="#contentRoot">内容阅读</a>
+      <a class="chip" href="#hSettings">设置与维护</a>
+    </nav>
+
+    <section class="section" aria-labelledby="hOverview">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">运行状态</p>
+          <h2 class="section-title" id="hOverview">概览</h2>
+        </div>
+        <button class="btn btn-quiet btn-sm" type="button" data-action id="refreshBtn">刷新</button>
+      </div>
+      <p class="section-lead" id="overviewLead">正在读取状态…</p>
+      <div class="platform-grid" id="platformGrid"></div>
+    </section>
+
+    <section class="section" aria-labelledby="hConversations">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">逐项配置</p>
+          <h2 class="section-title" id="hConversations">会话</h2>
+        </div>
+        <span class="count" id="convCount"></span>
+      </div>
+      <p class="section-lead">按会话调整自动回复、性格、主动频率与每日上限；只有该平台支持的项目才可编辑。</p>
+      <!-- 平台筛选：手机 390px 下优先用；桌面表格仍一次显示全部（筛选「全部」时为无损视图） -->
+      <div class="conv-filters" id="convFilters" role="group" aria-label="按平台筛选">
+        <button class="chip is-on" type="button" data-filter="all" aria-pressed="true">全部 <span class="chip-n" data-count="all">0</span></button>
+        <button class="chip" type="button" data-filter="qq" aria-pressed="false">QQ <span class="chip-n" data-count="qq">0</span></button>
+        <button class="chip" type="button" data-filter="wechat" aria-pressed="false">微信 <span class="chip-n" data-count="wechat">0</span></button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th scope="col">平台</th>
+              <th scope="col">会话</th>
+              <th scope="col">自动回复</th>
+              <th scope="col">性格</th>
+              <th scope="col">主动频率</th>
+              <th scope="col">每日上限</th>
+            </tr>
+          </thead>
+          <tbody id="convBody"></tbody>
+        </table>
+      </div>
+      <!-- 手机视图：每个会话一张可展开卡片（桌面宽度下隐藏） -->
+      <div class="conv-cards" id="convCards"></div>
+      <p class="empty" id="convEmpty" hidden>暂无会话。</p>
+      <p class="empty" id="convFilteredEmpty" hidden>该平台下没有会话。</p>
+      <div class="card" id="globalCard" hidden>
+        <h3 class="card-title" id="globalTitle">全局设置</h3>
+        <p class="card-note">此设置对该平台的所有会话同时生效，不能按会话分别设置。</p>
+        <div id="globalBody"></div>
+      </div>
+    </section>
+
+    <section id="usagePane" class="section" aria-label="模型 Token 用量"></section>
+
+    <section id="contentRoot" class="section" data-content-root aria-label="内容阅读"></section>
+
+    <section class="section" aria-labelledby="hDiagnostics">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">系统提示</p>
+          <h2 class="section-title" id="hDiagnostics">诊断</h2>
+        </div>
+        <span class="count" id="diagCount"></span>
+      </div>
+      <ul class="diag-list" id="diagList"></ul>
+      <p class="empty" id="diagEmpty" hidden>暂无诊断信息。</p>
+    </section>
+
+    <section class="section" aria-labelledby="hSettings">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">本机与账户</p>
+          <h2 class="section-title" id="hSettings">设置与连接</h2>
+        </div>
+      </div>
+
+      <details id="maintenanceTools" class="card maintenance-tools">
+        <summary>QQ 维护与原版工具</summary>
+        <div id="toolsMount"></div>
+      </details>
+
+      <div class="card">
+        <h3 class="card-title">连接信息</h3>
+        <dl class="meta-list">
+          <div class="meta-row"><dt>连接方式</dt><dd id="secureText">—</dd></div>
+          <div class="meta-row"><dt>局域网地址</dt><dd id="lanUrl" class="mono">—</dd></div>
+        </dl>
+        <p class="card-note">手机和电脑连上同一个 Wi-Fi 后，都可以用这个地址和同一个密码登录。</p>
+        <p class="ca-row" id="caRow" hidden>
+          <a class="text-link" id="caLink" href="/api/ca">下载 CA 证书</a>
+          <span class="muted" id="caNote">证书仅在本机（localhost）提供，用于让局域网设备信任本服务的自签名证书。</span>
+        </p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">外观</h3>
+        <p class="card-note">深色为低饱和深蓝灰。选择只保存在这台设备的浏览器里，不含账户信息。</p>
+        <div class="field theme-field">
+          <label for="themeSelect">主题</label>
+          <select class="select" id="themeSelect" data-theme-select>
+            <option value="system">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </div>
+        <p class="card-note" id="themeNote" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">修改密码</h3>
+        <form class="form" id="passwordForm" novalidate autocomplete="off">
+          <div class="field">
+            <label for="pwdCurrent">当前密码</label>
+            <input class="input" id="pwdCurrent" type="password" autocomplete="current-password" required>
+          </div>
+          <div class="field">
+            <label for="pwdNew">新密码</label>
+            <input class="input" id="pwdNew" type="password" autocomplete="new-password" required>
+          </div>
+          <div class="field">
+            <label for="pwdConfirm">确认新密码</label>
+            <input class="input" id="pwdConfirm" type="password" autocomplete="new-password" required>
+          </div>
+          <p class="form-error" id="pwdError" role="alert" hidden></p>
+          <button class="btn btn-primary" type="submit" data-action id="pwdSubmit">保存新密码</button>
+        </form>
+      </div>
+
+      <div class="card">
+        <h3 class="card-title">登录状态</h3>
+        <p class="card-note">退出后需要重新输入密码。</p>
+        <button class="btn btn-quiet" type="button" data-action id="logoutBtn">退出登录</button>
+      </div>
+    </section>
+
+    <footer class="site-foot">
+      <span>大肥鱼统一控制台 · 本机运行</span>
+      <span class="muted">数据仅来自本机服务</span>
+    </footer>
+  </div>
+</main>
+</body>
+</html>

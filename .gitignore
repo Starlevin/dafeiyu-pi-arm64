@@ -2,3 +2,9 @@
 .test-output*
 backup-*/
 Tests/fixtures/qq-state-synthetic.json
+.tmp-merge/
+Resources/
+Resources-full/
+r3_swift_test*.log
+r3_swift_test*.log.err
+Dockerfile.r3test
