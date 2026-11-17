@@ -67,13 +67,15 @@ struct QQMemoryBookTests {
     @Test func hardCapRefusesNewExcerptsWithoutDeletingQueuedOnes() throws {
         var book = QQMemoryBook()
         for i in 0..<QQMemoryBook.pendingHardLimit {
-            #expect(book.append(QQMemoryEvent(id: "cap\(i)", subject: "PEER", text: "队列消息\(i)", at: now.addingTimeInterval(Double(i))))
+            let accepted = book.append(QQMemoryEvent(id: "cap\(i)", subject: "PEER", text: "队列消息\(i)", at: now.addingTimeInterval(Double(i))))
+            #expect(accepted)
         }
         #expect(book.queueCount == QQMemoryBook.pendingHardLimit)
         #expect(book.pending.count == QQMemoryBook.pendingSoftLimit)
         #expect(book.archivedPending?.count == QQMemoryBook.pendingHardLimit - QQMemoryBook.pendingSoftLimit)
         let refused = QQMemoryEvent(id: "over-cap", subject: "PEER", text: "硬上限后的新消息", at: now.addingTimeInterval(999))
-        #expect(!book.append(refused))
+        let refusedAccepted = book.append(refused)
+        #expect(!refusedAccepted)
         #expect((book.refusedEvents ?? 0) == 1)
         #expect(book.queueCount == QQMemoryBook.pendingHardLimit)
         #expect(book.lastQueueWarningAt == refused.at)
@@ -146,5 +148,19 @@ struct QQMemoryBookTests {
                        batch: [correction], candidateIDs: [old.id], now: now.addingTimeInterval(20))
         let index = QQMemoryIndex(book.items)
         #expect(index.context("晚饭", subject: "PEER", characters: 500, now: now.addingTimeInterval(21)).contains("不喜欢"))
+    }
+
+    @Test func removePendingOnlyDropsCommittedIDsAndKeepsOthers() throws {
+        var book = QQMemoryBook()
+        let a = QQMemoryEvent(id: "a", subject: "PEER", text: "第一条", at: now)
+        let b = QQMemoryEvent(id: "b", subject: "PEER", text: "第二条", at: now.addingTimeInterval(1))
+        let appendedA = book.append(a)
+        let appendedB = book.append(b)
+        #expect(appendedA)
+        #expect(appendedB)
+        book.removePending(ids: ["a"])
+        #expect(book.pending.map(\.id) == ["b"])
+        #expect(book.queueCount == 1)
+        #expect(book.knownIDs.contains("a"))
     }
 }

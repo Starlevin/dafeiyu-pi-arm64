@@ -1,0 +1,4 @@
+.build/
+.test-output*
+backup-*/
+Tests/fixtures/qq-state-synthetic.json

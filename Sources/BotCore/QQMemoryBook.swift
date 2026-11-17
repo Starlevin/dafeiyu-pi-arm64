@@ -25,7 +25,7 @@ public struct QQMemoryEvent: Codable, Equatable, Sendable {
     public let text: String
     public let at: Date
     public init(id: String, subject: String, text: String, at: Date) {
-        self.id = id; self.subject = subject; self.text = String(QQMemoryBook.redact(text).prefix(1200)); self.at = at
+        self.id = id; self.subject = subject; self.text = String(QQMemoryRedactor.redact(text).prefix(1200)); self.at = at
     }
 }
 
@@ -39,6 +39,13 @@ public struct QQMemoryItem: Codable, Equatable, Sendable, Identifiable {
     public let sourceIDs: [String]
     public let updatedAt: Date
     public let expiresAt: Date
+    public init(id: String = UUID().uuidString, subject: String, kind: String, text: String,
+                keywords: [String] = [], importance: Int = 2, sourceIDs: [String] = [],
+                updatedAt: Date, expiresAt: Date, invalidatedAt: Date? = nil) {
+        self.id = id; self.subject = subject; self.kind = kind; self.text = text
+        self.keywords = keywords; self.importance = importance; self.sourceIDs = sourceIDs
+        self.updatedAt = updatedAt; self.expiresAt = expiresAt; self.invalidatedAt = invalidatedAt
+    }
     public var invalidatedAt: Date?
     public func current(_ now: Date) -> Bool { invalidatedAt == nil && expiresAt > now }
 }
@@ -188,6 +195,17 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
             archivedPending = archive
         }
     }
+    /// Authoritative reliable-store mode may remove already-committed excerpts from the
+    /// legacy mirror after the new store has durably applied them. Shadow mode never calls this.
+    public mutating func removePending(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        pending.removeAll { ids.contains($0.id) }
+        if var archive = archivedPending {
+            archive.removeAll { ids.contains($0.id) }
+            archivedPending = archive
+        }
+    }
+
     public mutating func importLegacy(text: String, subject: String, at: Date) {
         let characters = Array(Self.redact(text).prefix(2000))
         for offset in stride(from: 0, to: characters.count, by: 600) {

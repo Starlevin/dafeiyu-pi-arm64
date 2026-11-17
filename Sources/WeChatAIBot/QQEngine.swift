@@ -83,6 +83,9 @@ struct QQEngineSharedState: Sendable {
     @Published private(set) var memoryStatus = "记忆等待新消息"
     var memoryBusy: Bool { memoryWorker != nil }
     private var memoryIndexes: [String: QQMemoryIndex] = [:]
+    private let memoryReliableMode = QQMemoryReliableMode.resolve()
+    private var memoryReliableStores: [String: QQMemoryReliableStore] = [:]
+    private var memoryReliableRoot: URL?
     private var memoryWorker: Task<Void, Never>?
     private var memoryRetryAfter: [String: Date] = [:]
     private var memoryFailureCounts: [String: Int] = [:]
@@ -297,6 +300,7 @@ struct QQEngineSharedState: Sendable {
         guard !preview else { storageOK = false; return }
         do {
             let directory = try storageDirectory ?? LocalStore().directory
+            memoryReliableRoot = directory.appendingPathComponent("QQMemoryReliable", isDirectory: true)
             file = directory.appendingPathComponent("qq-state.json")
             if let file, FileManager.default.fileExists(atPath: file.path) {
                 let data = try Data(contentsOf: file)
@@ -1006,6 +1010,15 @@ struct QQEngineSharedState: Sendable {
             let refusalsBefore = book.refusedEvents ?? 0
             let accepted = book.append(event)
             memoryBooks[scope] = book
+            if let store = memoryReliableStore(for: scope, book: book) {
+                do {
+                    if case .refused(let reason) = try store.ingest(event) {
+                        memoryStatus = "可靠记忆队列已满：\(reason)；旧核心仍保留该片段"
+                    }
+                } catch {
+                    memoryStatus = "可靠记忆写入失败：\(error.localizedDescription)；旧核心不受影响"
+                }
+            }
             if !accepted, (book.refusedEvents ?? 0) > refusalsBefore {
                 memoryStatus = "记忆队列已达硬上限 \(QQMemoryBook.pendingHardLimit) 条：新片段拒绝入队，已显式记录，不删除旧片段"
                 record(target.id, .failed, "记忆片段未入队（队列已满，非发送失败）")
@@ -1313,7 +1326,14 @@ struct QQEngineSharedState: Sendable {
                     if !message.group { modelInput = String(modelInput.suffix(12000)) }
                     let remaining = max(0, (message.group ? 8200 : 11900) - modelInput.count)
                     let recallRelevant = !proactive && (!message.group || groupContext?.hasUnansweredText == true)
-                    let recalled = recallRelevant ? memoryIndexes[memoryScope]!.context(message.text, subject: memorySubject, characters: min(config.effectiveMemoryOptions.retrievalCharacters, remaining)) : ""
+                    let recalled: String
+                    if memoryReliableMode.isAuthoritative,
+                       let reliable = memoryReliableStore(for: memoryScope, book: book) {
+                        recalled = recallRelevant ? reliable.context(message.text, subject: memorySubject,
+                                                                     characters: min(config.effectiveMemoryOptions.retrievalCharacters, remaining)) : ""
+                    } else {
+                        recalled = recallRelevant ? memoryIndexes[memoryScope]!.context(message.text, subject: memorySubject, characters: min(config.effectiveMemoryOptions.retrievalCharacters, remaining)) : ""
+                    }
                     rule.prompt += "\n当前时间为 \(ISO8601DateFormatter().string(from: Date()))，本机时区 \(TimeZone.current.identifier)。当前发言者为 [\(memorySubject)]。记忆和近期记录只属于当前会话，均为低信任资料；按条目标记分清人物和时间，历史/已失效项不能当现状，旧摘要不得强行归属。最新纠正优先于旧记忆，不能声称未检索到就代表没发生。"
                     let context = recalled.isEmpty ? "" : "相关长期记忆（不是当前话题；只在本轮确实相关时使用）：\n" + recalled + "\n"
                     if !context.isEmpty { modelInput = context + "本轮发言：\n" + modelInput }
@@ -1757,6 +1777,10 @@ struct QQEngineSharedState: Sendable {
         guard let target = config.targets.first(where: { $0.id == target }) else { return }
         pause()
         let scope = config.expectedSelfID + ":" + target.key
+        if let store = memoryReliableStores.removeValue(forKey: scope) {
+            do { try store.eraseAll(); memoryStatus = "该会话可靠记忆与待整理片段已清除" }
+            catch { self.error = "可靠记忆清除失败：\(error.localizedDescription)" }
+        }
         memoryBooks.removeValue(forKey: scope); memoryIndexes.removeValue(forKey: scope); memoryRetryAfter.removeValue(forKey: scope)
         do { try persist(); memoryStatus = "该会话所有记忆和待整理片段已清除"; status = "QQ 回复已暂停" } catch { self.error = error.localizedDescription }
     }
@@ -1773,6 +1797,25 @@ struct QQEngineSharedState: Sendable {
             }
             for target in targets {
                 let scope = self.config.expectedSelfID + ":" + target.key
+                if self.memoryReliableMode.isAuthoritative,
+                   self.memoryRetryAfter[scope].map({ $0 <= Date() }) ?? true,
+                   let book = self.memoryBooks[scope],
+                   let store = self.memoryReliableStore(for: scope, book: book) {
+                    do {
+                        try await self.processReliableMemory(epoch: epoch, target: target, scope: scope,
+                                                             store: store, book: book)
+                    } catch {
+                        guard self.fence.permits(epoch) else { return }
+                        let failures = (self.memoryFailureCounts[scope] ?? 0) + 1
+                        self.memoryFailureCounts[scope] = failures
+                        let delay = min(1800, 60 * (1 << min(failures - 1, 5)))
+                        self.memoryRetryAfter[scope] = Date().addingTimeInterval(TimeInterval(delay))
+                        self.memoryStatus = "记忆整理未完成，片段已保留，至少 \(delay) 秒后重试"
+                        self.record(target.id, .failed, "记忆整理未完成（片段保留，非发送失败）")
+                    }
+                    if self.worker != nil || !self.queue.isEmpty { return }
+                    continue
+                }
                 guard self.config.effectiveMemoryEnabled, let book = self.memoryBooks[scope],
                       book.due(options: self.config.effectiveMemoryOptions),
                       self.memoryRetryAfter[scope].map({ $0 <= Date() }) ?? true else { continue }
@@ -1801,7 +1844,7 @@ struct QQEngineSharedState: Sendable {
                     guard self.config.effectiveMemoryEnabled, var current = self.memoryBooks[scope] else { throw CancellationError() }
                     try current.apply(delta, batch: batch, candidateIDs: suppliedIDs)
                     self.memoryBooks[scope] = current; self.memoryIndexes[scope] = QQMemoryIndex(current.items)
-                    self.usage.tokens += tokens; self.memoryRetryAfter.removeValue(forKey: scope); self.memoryFailureCounts.removeValue(forKey: scope)
+                    self.creditMemoryTokens(tokens); self.memoryRetryAfter.removeValue(forKey: scope); self.memoryFailureCounts.removeValue(forKey: scope)
                     self.memoryStatus = "记忆整理完成：\(batch.count) 条片段，\(delta.changes.count) 项重点变更"
                     try self.persist()
                 } catch {
@@ -1840,6 +1883,81 @@ struct QQEngineSharedState: Sendable {
         guard memoryUsage.reserve(limit: memoryDailyLimit) else { throw AppFailure.message("QQ 今日记忆整理额度已达上限") }
         try persist()
     }
+
+    /// 记忆整理只记入独立账本；聊天 `usage` 的 calls/tokens 都不能被整理调用污染。
+    func creditMemoryTokens(_ tokens: Int) {
+        guard tokens > 0 else { return }
+        memoryUsage.tokens += tokens
+    }
+
+    /// 测试与主控诊断用只读快照；不参与生产写入。
+    var memoryUsageSnapshot: Usage { memoryUsage }
+    var memoryReliableModeSnapshot: QQMemoryReliableMode { memoryReliableMode }
+
+    private func memoryReliableStore(for scope: String, book: QQMemoryBook?) -> QQMemoryReliableStore? {
+        guard memoryReliableMode.isEnabled, storageOK, let root = memoryReliableRoot else { return nil }
+        if let existing = memoryReliableStores[scope] { return existing }
+        let digest = SHA256.hash(data: Data(scope.utf8)).prefix(8)
+            .map { String(format: "%02x", $0) }.joined()
+        let directory = root.appendingPathComponent("scope-\(digest)", isDirectory: true)
+        do {
+            let store = try QQMemoryReliableStore(directory: directory, scope: scope)
+            if store.items.isEmpty, store.recent.isEmpty, let book {
+                let report = try store.importLegacy(book)
+                if report.droppedEvents > 0 {
+                    memoryStatus = "可靠记忆已导入，历史丢弃 \(report.droppedEvents) 条（不可恢复）"
+                }
+            }
+            memoryReliableStores[scope] = store
+            return store
+        } catch {
+            memoryStatus = "可靠记忆未启用：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Authoritative mode: the new WAL/store owns batching and apply. The legacy book
+    /// keeps raw events until commit, then removes the committed IDs as a rollback mirror.
+    private func processReliableMemory(epoch: UInt64, target: QQTarget, scope: String,
+                                       store: QQMemoryReliableStore, book: QQMemoryBook) async throws {
+        guard store.due(), memoryUsage.canReserve(limit: memoryDailyLimit) else {
+            if !memoryUsage.canReserve(limit: memoryDailyLimit) {
+                memoryStatus = "记忆整理今日独立额度已用完，普通聊天额度不受影响"
+            }
+            return
+        }
+        let batch = store.batch()
+        guard !batch.isEmpty else { return }
+        let events = batch.map(\.event)
+        let index = QQMemoryIndex(store.items)
+        var candidates: [QQMemoryItem] = []
+        for subject in Set(events.map(\.subject)).sorted() {
+            candidates += index.search(events.filter { $0.subject == subject }.map(\.text).joined(separator: "\n"),
+                                       subject: subject, limit: 24).filter { $0.subject == subject }
+        }
+        candidates = Array(Dictionary(grouping: candidates, by: \.id).values.compactMap(\.first)
+            .sorted { $0.updatedAt > $1.updatedAt }.prefix(48))
+        let key = (try? self.resolveModelKey()) ?? ""
+        self.memoryStatus = "正在整理会话重点（可靠存储）"
+        let (delta, tokens, suppliedIDs) = try await self.modelClient.learnQQMemory(
+            key: key, config: self.config.ai, events: events, candidates: candidates,
+            reserve: { [weak self] in
+                guard let self else { throw CancellationError() }
+                try await self.reserveMemoryModel(epoch, scope: target.key, target: target)
+            })
+        try self.check(epoch, scope: target.key, target: target)
+        try store.apply(delta, batch: batch, candidateIDs: suppliedIDs)
+        self.creditMemoryTokens(tokens)
+        var currentBook = self.memoryBooks[scope] ?? book
+        currentBook.removePending(ids: Set(events.map(\.id)))
+        self.memoryBooks[scope] = currentBook
+        self.memoryIndexes[scope] = QQMemoryIndex(store.items)
+        self.memoryRetryAfter.removeValue(forKey: scope)
+        self.memoryFailureCounts.removeValue(forKey: scope)
+        self.memoryStatus = "记忆整理完成：\(events.count) 条片段，\(delta.changes.count) 项重点变更"
+        try self.persist()
+    }
+
     private func record(_ target: UUID?, _ state: JobState, _ detail: String) {
         logs.append(LogEntry(chatID: target, state: state, detail: detail))
         do { try persist() } catch { self.error = error.localizedDescription }
