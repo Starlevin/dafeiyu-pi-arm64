@@ -16,5 +16,7 @@ jobs:
         run: bash scripts/test.sh
       - name: Build app
         run: bash scripts/build.sh
+      - name: Social runtime dependencies
+        run: bash scripts/setup-social.sh
       - name: Real HTTP control boundary
         run: python3 scripts/test-control-panel.py 'dist/WeChat AI Bot.app/Contents/MacOS/WeChatAIBot'

@@ -32,6 +32,8 @@ jobs:
         run: python3 scripts/test-linux-images.py
       - name: Build headless app
         run: bash scripts/build-linux.sh
+      - name: Social runtime dependencies
+        run: bash scripts/setup-social.sh
       - name: Launcher and real HTTP control boundary
         run: python3 scripts/test-control-panel.py scripts/start-linux.sh --shell-launcher
       - name: Real synthetic OneBot WebSocket transport
