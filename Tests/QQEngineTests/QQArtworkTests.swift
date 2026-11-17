@@ -161,7 +161,8 @@ final class ArtworkFixtureProtocol: URLProtocol, @unchecked Sendable {
         #expect(ArtworkFixtureProtocol.calls.contains { $0.contains("/ajax/search/illustrations/") })
         #expect(ArtworkFixtureProtocol.calls.filter { $0.contains("/ajax/illust/") }.count == 1)
         #expect(!ArtworkFixtureProtocol.calls.contains { $0.contains("/ajax/user/") || $0.contains("ranking.php") })
-        ledger.reserve(ticket: UUID(), scope: "A", id: first.id!, hash: nil, request: first.request)
+        let firstID = try #require(first.id, "fixture 应返回作品 ID；失败时保留断言而不是 force unwrap 崩溃")
+        ledger.reserve(ticket: UUID(), scope: "A", id: firstID, hash: nil, request: first.request)
         let next = try await library.prepare(.init(mode: "next"), config: config, scope: "A", ledger: ledger, beforeFetch: { count += 1 })
         #expect(next.id == "pixiv:301"); #expect(count == 5) // Cached result page, only next detail + image.
         #expect(next.request.query == "白发 猫耳")

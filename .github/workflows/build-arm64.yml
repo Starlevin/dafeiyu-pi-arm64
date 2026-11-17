@@ -22,6 +22,11 @@ permissions:
 jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
+    env:
+      # Linux 端的图片处理需要 Resources/Linux/image-helper.py + Pillow；
+      # 不设这个变量时 QQArtworkIntegrationTests 会在 ARM64 上失败。
+      DAFEIYU_RESOURCES: ${{ github.workspace }}/Resources
+      DAFEIYU_BUILD_JOBS: 2
     container:
       image: swift:6.1-noble
     defaults:
