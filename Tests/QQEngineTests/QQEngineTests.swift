@@ -486,7 +486,7 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         let completed = Date().addingTimeInterval(3)
         while ["capture", "timed"].contains(mode), engine.memoryBooks["12345:group:99999"]?.pending.isEmpty != true, Date() < completed { try await Task.sleep(nanoseconds: 20_000_000) }
         try await Task.sleep(nanoseconds: 50_000_000)
-        #expect(engine.sends.attempts == 0); #expect(engine.groupMessageCounts.isEmpty); #expect(engine.usage.calls == 1)
+        #expect(engine.sends.attempts == 0); #expect(engine.groupMessageCounts.isEmpty); #expect(engine.usage.calls == 0); #expect(engine.memoryUsageSnapshot.calls == 1)
         engine.disconnect()
         let reloaded = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
         if mode == "pause" { #expect(reloaded.memoryBooks["12345:group:99999"]?.pending.count == 4) }
@@ -627,12 +627,12 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
             let state = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
             admitted = (state["seen"] as? [String: Any])?.count ?? 0
             let started = DelayedModelProtocol.counts.started
-            if started >= 1 && admitted == expectedMessages && engine.usage.calls == started { break }
+            if started >= 1 && admitted == expectedMessages && engine.usage.calls == (control == "memory" ? 1 : started) { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         try #require(control == "memory" ? (1...2).contains(DelayedModelProtocol.counts.started) : DelayedModelProtocol.counts.started == 1)
         try #require(admitted == expectedMessages)
-        #expect(engine.usage.calls == DelayedModelProtocol.counts.started)
+        #expect(engine.usage.calls == (control == "memory" ? 1 : DelayedModelProtocol.counts.started))
         #expect(engine.queuedCount == expectedMessages - 1)
         if control.hasPrefix("privateQuoted") {
             let body = try #require(DelayedModelProtocol.counts.bodies.first)
@@ -678,7 +678,8 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
                 try await Task.sleep(nanoseconds: 20_000_000)
             }
             #expect(engine.sends.confirmed == 9)
-            #expect(engine.usage.calls == 18 + DelayedModelProtocol.counts.bodies.filter { $0.contains("[QQ_MEMORY_V2]") }.count)
+            #expect(engine.usage.calls == 18)
+            #expect(engine.memoryUsageSnapshot.calls == DelayedModelProtocol.counts.bodies.filter { $0.contains("[QQ_MEMORY_V2]") }.count)
             #expect(Set(engine.memoryBooks.keys) == ["12345:private:54321"])
             engine.disconnect()
             let reloaded = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
