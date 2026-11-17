@@ -1,0 +1,2400 @@
+{
+  "schema_version": 1,
+  "compiled_at": "2026-11-10",
+  "license_note": "原创短小事实元数据与别名索引，不含 BWIKI 正文复制；source_url 仅作引用跳转，不镜像站点内容。",
+  "stale_after_days": 180,
+  "version_sensitive_note": "version_sensitive=true 的条目涉及版本/平衡/档期，回答时不得声称当前版本数值或最新状态。",
+  "game_signals": [
+    "第五人格",
+    "第五",
+    "d5",
+    "D5",
+    "监管者",
+    "求生者",
+    "密码机",
+    "狂欢之椅",
+    "庄园",
+    "对局",
+    "排位",
+    "匹配",
+    "溜鬼",
+    "遛鬼",
+    "上椅",
+    "地窖",
+    "BP",
+    "COA",
+    "IVL",
+    "精华",
+    "限定",
+    "赛季",
+    "天赋",
+    "地图",
+    "军工厂",
+    "红教堂",
+    "圣心医院",
+    "开门战",
+    "压机",
+    "救人",
+    "监管",
+    "求生",
+    "非对称"
+  ],
+  "entries": [
+    {
+      "id": "camp_hunter",
+      "canonical": "监管者",
+      "aliases": [
+        "屠夫"
+      ],
+      "type": "character",
+      "summary": "非对称对局中追逐求生者的一方，玩家口语也叫屠夫。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "阵营",
+        "对局"
+      ]
+    },
+    {
+      "id": "camp_survivor",
+      "canonical": "求生者",
+      "aliases": [
+        "逃生者",
+        "求生方"
+      ],
+      "type": "character",
+      "summary": "非对称对局中被追逐、以破译密码机求生的一方。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "阵营",
+        "对局"
+      ]
+    },
+    {
+      "id": "role_hunter_factory",
+      "canonical": "厂长",
+      "aliases": [
+        "傀儡"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家常以其傀儡道具代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指工厂负责人，单独出现易误解",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "clown",
+      "canonical": "小丑",
+      "aliases": [
+        "裘克"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名裘克指代。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指马戏团丑角或贬称，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "jack",
+      "canonical": "杰克",
+      "aliases": [
+        "开膛手"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家也用开膛手称呼。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "常见英文名，日常多指真人称呼",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "red_butterfly",
+      "canonical": "红蝶",
+      "aliases": [
+        "美智子"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常以本名美智子代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "字面指红色蝴蝶，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "umbrella_spirit",
+      "canonical": "宿伞之魂",
+      "aliases": [
+        "宿伞",
+        "黑白无常"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，口语简称宿伞，也叫黑白无常。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "字面像玄幻说法，日常易当作普通词组",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "yellow_cloth_lord",
+      "canonical": "黄衣之主",
+      "aliases": [
+        "黄衣",
+        "哈斯塔"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家简称黄衣或用本名哈斯塔。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "简称黄衣可指黄色衣服，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "role_photographer",
+      "canonical": "摄影师",
+      "aliases": [
+        "约瑟夫"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名约瑟夫指代。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指拍照职业，别名也是常见外文人名",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "dream_witch",
+      "canonical": "梦之女巫",
+      "aliases": [
+        "女巫"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家口语简称女巫。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常泛指女巫形象，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "red_lady",
+      "canonical": "红夫人",
+      "aliases": [
+        "玛丽"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名玛丽代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "字面像普通尊称，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "bonbon",
+      "canonical": "邦邦",
+      "aliases": [
+        "炸弹人"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家也叫炸弹人。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "像拟声或昵称，日常易误听",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "sculptor",
+      "canonical": "雕刻家",
+      "aliases": [
+        "伽拉泰亚"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名伽拉泰亚代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指雕刻从业者，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "breaking_wheel",
+      "canonical": "破轮",
+      "aliases": [
+        "轮子"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家口语也叫轮子。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "字面指破损轮子，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "fisherwoman",
+      "canonical": "渔女",
+      "aliases": [
+        "格蕾丝"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名格蕾丝代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常可指渔家女子，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "wax_artist",
+      "canonical": "蜡像师",
+      "aliases": [
+        "蜡像"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，玩家口语简称蜡像。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指制作蜡像的人，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "hermit",
+      "canonical": "隐士",
+      "aliases": [
+        "阿尔瓦"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名阿尔瓦代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指隐居的人，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "night_watch",
+      "canonical": "守夜人",
+      "aliases": [
+        "伊塔库亚"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名伊塔库亚代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指夜间值守者，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "spider",
+      "canonical": "蜘蛛",
+      "aliases": [
+        "瓦尔莱塔"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名瓦尔莱塔代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指节肢动物，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "deer_head",
+      "canonical": "鹿头",
+      "aliases": [
+        "班恩"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名班恩代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "字面可指鹿的头或装饰，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "lizard",
+      "canonical": "孽蜥",
+      "aliases": [
+        "卢基诺"
+      ],
+      "type": "character",
+      "summary": "监管者角色名，常用本名卢基诺代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "字面像普通爬虫称呼，需游戏语境",
+      "tags": [
+        "角色",
+        "监管者"
+      ]
+    },
+    {
+      "id": "role_doctor",
+      "canonical": "医生",
+      "aliases": [
+        "艾米丽"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名艾米丽代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指医务人员，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "lawyer",
+      "canonical": "律师",
+      "aliases": [
+        "弗雷迪"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名弗雷迪代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指法律从业者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "gardener",
+      "canonical": "园丁",
+      "aliases": [
+        "艾玛"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名艾玛代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指园艺工人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "philanthropist",
+      "canonical": "慈善家",
+      "aliases": [
+        "克利切"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名克利切代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指做慈善的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_magician",
+      "canonical": "魔术师",
+      "aliases": [
+        "瑟维"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名瑟维代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指表演魔术的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_coordinator",
+      "canonical": "空军",
+      "aliases": [
+        "玛尔塔"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名玛尔塔代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指军种，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "forward",
+      "canonical": "前锋",
+      "aliases": [
+        "威廉"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名威廉代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指球队前锋，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "blind_girl",
+      "canonical": "盲女",
+      "aliases": [
+        "海伦娜"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名海伦娜代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指失明的女子，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_mechanic",
+      "canonical": "机械师",
+      "aliases": [
+        "小特"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，玩家口语常叫小特。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指机械修理工，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_perfumer",
+      "canonical": "调香师",
+      "aliases": [
+        "薇拉"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名薇拉代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指调香职业，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_priestess",
+      "canonical": "祭司",
+      "aliases": [
+        "菲欧娜"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名菲欧娜代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指宗教神职，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "embalmer",
+      "canonical": "入殓师",
+      "aliases": [
+        "伊索"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名伊索代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指殡葬职业，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "seer",
+      "canonical": "先知",
+      "aliases": [
+        "伊莱"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名伊莱代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指预言者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "wildling",
+      "canonical": "野人",
+      "aliases": [
+        "穆罗"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名穆罗代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指未开化的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "painter",
+      "canonical": "画家",
+      "aliases": [
+        "埃德加"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名埃德加代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指绘画的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "antiquarian",
+      "canonical": "古董商",
+      "aliases": [
+        "戚十一"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名戚十一代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指经营古董的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "journalist",
+      "canonical": "记者",
+      "aliases": [
+        "爱丽丝"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名爱丽丝代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指新闻从业者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "prisoner",
+      "canonical": "囚徒",
+      "aliases": [
+        "卢卡"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名卢卡代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指被囚禁的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "postman",
+      "canonical": "邮差",
+      "aliases": [
+        "维克多"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名维克多代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指投递邮件的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_prospector",
+      "canonical": "勘探员",
+      "aliases": [
+        "诺顿",
+        "磁铁"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，玩家也用磁铁代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指勘探工作者，别名也是日常物品",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "role_mercenary",
+      "canonical": "佣兵",
+      "aliases": [
+        "奈布"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名奈布代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指受雇参战者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "batter",
+      "canonical": "击球手",
+      "aliases": [
+        "甘吉"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名甘吉代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指球类击球者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "little_girl",
+      "canonical": "小女孩",
+      "aliases": [
+        "小回忆"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，玩家口语也叫小回忆。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指年幼女孩，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "novelist",
+      "canonical": "小说家",
+      "aliases": [
+        "奥尔菲斯"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名奥尔菲斯代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指写小说的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "adventurer",
+      "canonical": "冒险家",
+      "aliases": [
+        "库特"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名库特代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指爱冒险的人，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "female_dancer",
+      "canonical": "舞女",
+      "aliases": [
+        "玛格丽莎"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名玛格丽莎代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指跳舞的女子，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "acrobat",
+      "canonical": "杂技演员",
+      "aliases": [
+        "麦克"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名麦克代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指杂技表演者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "grave_keeper",
+      "canonical": "守墓人",
+      "aliases": [
+        "安德鲁"
+      ],
+      "type": "character",
+      "summary": "求生者角色名，常用本名安德鲁代称。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常指看守墓地者，需游戏语境",
+      "tags": [
+        "角色",
+        "求生者"
+      ]
+    },
+    {
+      "id": "skill_flywheel",
+      "canonical": "飞轮效应",
+      "aliases": [
+        "飞轮"
+      ],
+      "type": "talent",
+      "summary": "常见天赋名，玩家简称飞轮，用于短时规避追击的说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_borrowed_time",
+      "canonical": "搏命",
+      "aliases": [
+        "化险为夷"
+      ],
+      "type": "talent",
+      "summary": "天赋化险为夷的玩家简称，常用于描述救援后的短时状态。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_tide_turner",
+      "canonical": "回光返照",
+      "aliases": [
+        "大心脏"
+      ],
+      "type": "talent",
+      "summary": "天赋名，玩家口语叫大心脏，多在对局后期语境提到。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_knee_jerk",
+      "canonical": "膝跳反射",
+      "aliases": [
+        "膝跳"
+      ],
+      "type": "talent",
+      "summary": "求生者天赋名，玩家口语简称膝跳。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_broken_windows",
+      "canonical": "破窗理论",
+      "aliases": [
+        "破窗"
+      ],
+      "type": "talent",
+      "summary": "求生者天赋名，玩家口语简称破窗。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "last_chance",
+      "canonical": "绝处逢生",
+      "aliases": [
+        "自起"
+      ],
+      "type": "talent",
+      "summary": "求生者天赋名，玩家也叫自起，描述倒地后的相关说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "unyielding",
+      "canonical": "不屈不挠",
+      "aliases": [
+        "不屈"
+      ],
+      "type": "talent",
+      "summary": "天赋名，玩家简称不屈，用于描述倒地相关状态的说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "giant_force",
+      "canonical": "巨力",
+      "aliases": [
+        "大力"
+      ],
+      "type": "talent",
+      "summary": "天赋名，玩家口语也叫大力，多与板窗交互说法并提。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "chill",
+      "canonical": "寒意",
+      "aliases": [],
+      "type": "talent",
+      "summary": "天赋名，用于描述监管者靠近时的提示类说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "tinnitus",
+      "canonical": "耳鸣",
+      "aliases": [],
+      "type": "talent",
+      "summary": "监管者天赋名，用于描述附近存在求生者的提示说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_detention",
+      "canonical": "挽留",
+      "aliases": [
+        "一刀斩"
+      ],
+      "type": "talent",
+      "summary": "监管者天赋名，玩家口语也叫一刀斩。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "trump_card",
+      "canonical": "底牌",
+      "aliases": [
+        "换特质"
+      ],
+      "type": "talent",
+      "summary": "天赋名，玩家也叫换特质，用于描述更换辅助特质的说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "天赋",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_teleport",
+      "canonical": "传送",
+      "aliases": [],
+      "type": "talent",
+      "summary": "监管者辅助特质名，用于描述远距离移动的说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": true,
+      "ambiguity": "日常泛指运送转移，需游戏语境",
+      "tags": [
+        "特质",
+        "技能"
+      ]
+    },
+    {
+      "id": "skill_blink",
+      "canonical": "闪现",
+      "aliases": [
+        "交闪"
+      ],
+      "type": "talent",
+      "summary": "监管者辅助特质名，玩家把使用行为叫交闪。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": true,
+      "ambiguity": "日常指突然出现或电光一闪，需游戏语境",
+      "tags": [
+        "特质",
+        "技能"
+      ]
+    },
+    {
+      "id": "peeper",
+      "canonical": "窥视者",
+      "aliases": [
+        "插眼"
+      ],
+      "type": "talent",
+      "summary": "监管者辅助特质名，玩家口语叫插眼。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "特质",
+        "技能"
+      ]
+    },
+    {
+      "id": "excitement",
+      "canonical": "兴奋",
+      "aliases": [],
+      "type": "talent",
+      "summary": "监管者辅助特质名，用于描述解除控制类状态的说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "特质",
+        "技能"
+      ]
+    },
+    {
+      "id": "abnormality",
+      "canonical": "失常",
+      "aliases": [],
+      "type": "talent",
+      "summary": "监管者辅助特质名，用于描述干扰破译进程的说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "特质",
+        "技能"
+      ]
+    },
+    {
+      "id": "term_cipher",
+      "canonical": "密码机",
+      "aliases": [
+        "电机"
+      ],
+      "type": "match_term",
+      "summary": "对局中求生者需要破译的装置，玩家口语也叫电机。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "术语"
+      ]
+    },
+    {
+      "id": "term_repair",
+      "canonical": "修机",
+      "aliases": [
+        "破译",
+        "修机子"
+      ],
+      "type": "match_term",
+      "summary": "破译密码机的玩家口语说法，也叫修机子。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": true,
+      "ambiguity": "日常可指修理手机或电器，需游戏语境",
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_prime",
+      "canonical": "压机",
+      "aliases": [
+        "压好",
+        "压最后一台"
+      ],
+      "type": "match_term",
+      "summary": "暂留最后一台密码机不破译完的对局口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_endgame",
+      "canonical": "开门战",
+      "aliases": [
+        "开大门"
+      ],
+      "type": "match_term",
+      "summary": "密码机全部破译后围绕逃生门展开的阶段说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "术语"
+      ]
+    },
+    {
+      "id": "term_cellars",
+      "canonical": "地窖",
+      "aliases": [],
+      "type": "match_term",
+      "summary": "对局中另一处逃生出口的称呼。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "术语"
+      ]
+    },
+    {
+      "id": "term_chair",
+      "canonical": "狂欢之椅",
+      "aliases": [
+        "上椅",
+        "火箭椅"
+      ],
+      "type": "match_term",
+      "summary": "监管者放置求生者的椅子，玩家说上椅或火箭椅。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "术语"
+      ]
+    },
+    {
+      "id": "term_fly",
+      "canonical": "挂飞",
+      "aliases": [
+        "放飞"
+      ],
+      "type": "match_term",
+      "summary": "求生者在狂欢之椅上被淘汰的玩家口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_camp",
+      "canonical": "守尸",
+      "aliases": [
+        "守椅"
+      ],
+      "type": "match_term",
+      "summary": "监管者守在狂欢之椅附近的打法口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_rescue",
+      "canonical": "救人",
+      "aliases": [
+        "救队友"
+      ],
+      "type": "match_term",
+      "summary": "把队友从狂欢之椅上救下的对局行为。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "术语"
+      ]
+    },
+    {
+      "id": "term_down",
+      "canonical": "秒倒",
+      "aliases": [],
+      "type": "match_term",
+      "summary": "求生者很快被击倒的玩家口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_double_down",
+      "canonical": "双倒",
+      "aliases": [],
+      "type": "match_term",
+      "summary": "短时间内两名求生者相继倒地的口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_terror_shock",
+      "canonical": "恐惧震慑",
+      "aliases": [
+        "震慑"
+      ],
+      "type": "match_term",
+      "summary": "交互中被攻击触发的特殊判定，玩家简称震慑。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "术语"
+      ]
+    },
+    {
+      "id": "term_transition",
+      "canonical": "转点",
+      "aliases": [
+        "换点"
+      ],
+      "type": "match_term",
+      "summary": "牵制中更换到另一处地形的对局口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "term_kite",
+      "canonical": "溜鬼",
+      "aliases": [
+        "遛鬼",
+        "牵制"
+      ],
+      "type": "match_term",
+      "summary": "求生者牵制监管者的口语，也写作遛鬼。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "block_vision",
+      "canonical": "卡视野",
+      "aliases": [
+        "卡视角"
+      ],
+      "type": "match_term",
+      "summary": "利用地形遮挡监管者视线的对局口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "pallet_area",
+      "canonical": "板区",
+      "aliases": [
+        "板子"
+      ],
+      "type": "match_term",
+      "summary": "以木板地形为主的区域，玩家也叫板子。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "地形"
+      ]
+    },
+    {
+      "id": "safe_room",
+      "canonical": "无敌房",
+      "aliases": [
+        "无敌点"
+      ],
+      "type": "match_term",
+      "summary": "便于长时间牵制的地形口语，也叫无敌点。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "地形"
+      ]
+    },
+    {
+      "id": "body_block",
+      "canonical": "卡位",
+      "aliases": [
+        "卡身位"
+      ],
+      "type": "match_term",
+      "summary": "用身体挡住路线或位置的干扰说法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "口语"
+      ]
+    },
+    {
+      "id": "rescuer_role",
+      "canonical": "救人位",
+      "aliases": [
+        "救援位"
+      ],
+      "type": "match_term",
+      "summary": "队伍中主要负责救援的分工口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "分工"
+      ]
+    },
+    {
+      "id": "decoder_role",
+      "canonical": "修机位",
+      "aliases": [],
+      "type": "match_term",
+      "summary": "队伍中主要负责破译密码机的分工口语。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "community",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "对局",
+        "分工"
+      ]
+    },
+    {
+      "id": "map_factory",
+      "canonical": "军工厂",
+      "aliases": [
+        "工厂"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称工厂。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "map_church",
+      "canonical": "红教堂",
+      "aliases": [
+        "教堂"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称教堂。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "map_hospital",
+      "canonical": "圣心医院",
+      "aliases": [
+        "医院"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称医院。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "lakeside_village",
+      "canonical": "湖景村",
+      "aliases": [
+        "湖景"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称湖景。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "moonlit_river_park",
+      "canonical": "月亮河公园",
+      "aliases": [
+        "月亮河"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称月亮河。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "leos_memory",
+      "canonical": "里奥的回忆",
+      "aliases": [
+        "里奥"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称里奥。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "eternal_sleep_town",
+      "canonical": "永眠镇",
+      "aliases": [
+        "永眠"
+      ],
+      "type": "map",
+      "summary": "对局地图名，玩家口语简称永眠。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "chinatown",
+      "canonical": "唐人街",
+      "aliases": [],
+      "type": "map",
+      "summary": "以街区为主题的对局地图名。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "地图",
+        "场景"
+      ]
+    },
+    {
+      "id": "cosmetic_essence",
+      "canonical": "精华",
+      "aliases": [],
+      "type": "cosmetic_event",
+      "summary": "与抽取外观相关的道具称呼，玩家常简称精华。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "活动"
+      ]
+    },
+    {
+      "id": "cosmetic_limited",
+      "canonical": "限定",
+      "aliases": [
+        "限定款"
+      ],
+      "type": "cosmetic_event",
+      "summary": "指特定条件或时段可获取的外观类别，也叫限定款。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "活动"
+      ]
+    },
+    {
+      "id": "cosmetic_s_gold",
+      "canonical": "稀世时装",
+      "aliases": [
+        "稀世",
+        "金皮"
+      ],
+      "type": "cosmetic_event",
+      "summary": "时装稀有度的高档叫法，简称稀世，玩家也叫金皮。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "稀有度"
+      ]
+    },
+    {
+      "id": "cosmetic_a_purple",
+      "canonical": "奇珍",
+      "aliases": [
+        "紫皮"
+      ],
+      "type": "cosmetic_event",
+      "summary": "时装稀有度的一档叫法，玩家口语叫紫皮。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "稀有度"
+      ]
+    },
+    {
+      "id": "r_outfit",
+      "canonical": "独特",
+      "aliases": [
+        "蓝皮"
+      ],
+      "type": "cosmetic_event",
+      "summary": "时装稀有度的一档叫法，玩家口语叫蓝皮。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "稀有度"
+      ]
+    },
+    {
+      "id": "outfit",
+      "canonical": "时装",
+      "aliases": [
+        "皮肤"
+      ],
+      "type": "cosmetic_event",
+      "summary": "角色外观装扮的统称，玩家口语也叫皮肤。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "装扮"
+      ]
+    },
+    {
+      "id": "cosmetic_collab",
+      "canonical": "联动",
+      "aliases": [
+        "联动活动"
+      ],
+      "type": "cosmetic_event",
+      "summary": "与其他作品合作推出内容的活动称呼。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "活动"
+      ]
+    },
+    {
+      "id": "cosmetic_rerun",
+      "canonical": "返场",
+      "aliases": [
+        "复刻"
+      ],
+      "type": "cosmetic_event",
+      "summary": "过往外观再次开放获取的说法，玩家也叫复刻。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "活动"
+      ]
+    },
+    {
+      "id": "cosmetic_memory_ball",
+      "canonical": "记忆珍宝",
+      "aliases": [
+        "珍宝"
+      ],
+      "type": "cosmetic_event",
+      "summary": "可抽取外观道具的称呼，玩家口语简称珍宝。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "系统"
+      ]
+    },
+    {
+      "id": "logic_path",
+      "canonical": "推理之径",
+      "aliases": [],
+      "type": "cosmetic_event",
+      "summary": "通过推进格子获取奖励的玩法称呼。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "系统"
+      ]
+    },
+    {
+      "id": "esports_season",
+      "canonical": "赛季",
+      "aliases": [],
+      "type": "cosmetic_event",
+      "summary": "用于划分游戏阶段与奖励周期的叫法。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "周期",
+        "系统"
+      ]
+    },
+    {
+      "id": "dice",
+      "canonical": "骰子",
+      "aliases": [
+        "四面骰"
+      ],
+      "type": "cosmetic_event",
+      "summary": "推理之径中决定前进步数的道具，也叫四面骰。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "系统",
+        "道具"
+      ]
+    },
+    {
+      "id": "manor_home",
+      "canonical": "归宿",
+      "aliases": [
+        "归宿大厅"
+      ],
+      "type": "cosmetic_event",
+      "summary": "玩家可布置展示的大厅系统，也叫归宿大厅。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "系统",
+        "装扮"
+      ]
+    },
+    {
+      "id": "companion",
+      "canonical": "随从",
+      "aliases": [
+        "宠物"
+      ],
+      "type": "cosmetic_event",
+      "summary": "跟随角色出场的小装饰，玩家口语叫宠物。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "外观",
+        "装饰"
+      ]
+    },
+    {
+      "id": "esports_bp",
+      "canonical": "BP",
+      "aliases": [
+        "搬选"
+      ],
+      "type": "esports",
+      "summary": "比赛中禁用与选用角色的环节，玩家也叫搬选。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "规则"
+      ]
+    },
+    {
+      "id": "esports_coa",
+      "canonical": "COA",
+      "aliases": [
+        "深渊的呼唤"
+      ],
+      "type": "esports",
+      "summary": "全球性赛事的英文缩写，中文也称深渊的呼唤。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "电竞"
+      ]
+    },
+    {
+      "id": "esports_ivl",
+      "canonical": "IVL",
+      "aliases": [
+        "职业联赛"
+      ],
+      "type": "esports",
+      "summary": "职业联赛的缩写名，玩家也叫职业联赛。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "电竞"
+      ]
+    },
+    {
+      "id": "ivs",
+      "canonical": "IVS",
+      "aliases": [],
+      "type": "esports",
+      "summary": "赛事相关缩写名，归类为电竞称呼，具体所指需结合语境核实。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "uncertain",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "电竞"
+      ]
+    },
+    {
+      "id": "summer_split",
+      "canonical": "夏季赛",
+      "aliases": [],
+      "type": "esports",
+      "summary": "按季节命名的赛事阶段称呼，用于赛事讨论。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "赛程"
+      ]
+    },
+    {
+      "id": "autumn_split",
+      "canonical": "秋季赛",
+      "aliases": [],
+      "type": "esports",
+      "summary": "按季节命名的赛事阶段称呼，用于赛事讨论。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "赛程"
+      ]
+    },
+    {
+      "id": "grand_final",
+      "canonical": "总决赛",
+      "aliases": [
+        "决赛"
+      ],
+      "type": "esports",
+      "summary": "赛事最终阶段的比赛称呼，口语简称决赛。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "赛程"
+      ]
+    },
+    {
+      "id": "esports_team",
+      "canonical": "战队",
+      "aliases": [
+        "俱乐部"
+      ],
+      "type": "esports",
+      "summary": "参加赛事的队伍称呼，也叫俱乐部。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "组织"
+      ]
+    },
+    {
+      "id": "pro_player",
+      "canonical": "选手",
+      "aliases": [
+        "职业选手"
+      ],
+      "type": "esports",
+      "summary": "参加比赛的玩家称呼，也叫职业选手。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": false,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "人员"
+      ]
+    },
+    {
+      "id": "game_version",
+      "canonical": "版本",
+      "aliases": [],
+      "type": "esports",
+      "summary": "讨论游戏环境与改动时使用的称呼，不指代具体数值。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "环境"
+      ]
+    },
+    {
+      "id": "esports_balance",
+      "canonical": "平衡性调整",
+      "aliases": [
+        "削弱",
+        "加强"
+      ],
+      "type": "esports",
+      "summary": "对角色或机制改动的总称，玩家也说削弱或加强。",
+      "source_url": "https://wiki.biligame.com/dwrg/首页",
+      "source_checked_at": "2026-11-10",
+      "game_patch_date": null,
+      "confidence": "fact",
+      "version_sensitive": true,
+      "context_required": false,
+      "ambiguity": null,
+      "tags": [
+        "赛事",
+        "平衡"
+      ]
+    }
+  ]
+}

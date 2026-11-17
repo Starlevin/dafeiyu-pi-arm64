@@ -2,7 +2,7 @@
 
 - 分支：`feat/main-adapter-r2-20261117`
 - 基线：C `dbec61d9be158795a45e73afb95f69390bc665ee`（`feat/social-expression-c-20261117`）
-- 隔离 worktree：`E:\个人\大肥鱼\开发工作区\2026-11-17-main-adapter-r2`
+- 隔离 worktree：`<project-root>\开发工作区\2026-11-17-main-adapter-r2`
 - 状态：`CODE PASS`（mock），`STAGED`（未合并、未接生产），真实 E2E `NOT_RUN`
 
 ## 交付
@@ -20,7 +20,7 @@
 ## 验证
 
 ```powershell
-cd "E:\个人\大肥鱼\开发工作区\2026-11-17-main-adapter-r2\integrations\social-expression"
+cd "<project-root>\开发工作区\2026-11-17-main-adapter-r2\integrations\social-expression"
 python -m unittest discover -s tests -v
 python -m unittest tests.test_main_adapter_e2e -v
 ```

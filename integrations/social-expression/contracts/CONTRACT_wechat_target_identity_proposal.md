@@ -1,7 +1,7 @@
 # 微信精确目标身份与回执适配提案（审计，不改生产）
 
 版本：`social-style-c1`  
-审计对象：`E:\个人\大肥鱼\开发工作区\2026-11-15-微信防错发-隔离复核\production_tx_guard.py`  
+审计对象：`<project-root>\开发工作区\2026-11-15-微信防错发-隔离复核\production_tx_guard.py`  
 状态：**只读审计 + 提案**。本会话未修改 `tx_guard`、`pi_bridge`、`pi_sticker_transport.py`，也未发送任何真实消息。
 
 ## 1. 现状

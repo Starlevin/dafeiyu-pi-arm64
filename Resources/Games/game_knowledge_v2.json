@@ -1,0 +1,326 @@
+{
+  "schema_version": 2,
+  "description": "原创结构化赛事和 FPS 事实快照；第三方站点仅公开链接接入，不自动抓取/不代表 API 授权。",
+  "entries": [
+    {
+      "id": "idv_ivl_overview",
+      "game": "identity_v",
+      "intent": "overview",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "职业联赛"
+      ],
+      "fact": "IVL 是《第五人格》中国大陆职业联赛。2026 年秋季赛于 10 月 2 日开赛；总决赛预定 2026 年 12 月 31 日至 2027 年 1 月 3 日举行。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "社区赛事资料",
+      "league": "ivl"
+    },
+    {
+      "id": "idv_ivl_format",
+      "game": "identity_v",
+      "intent": "format",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "秋季赛"
+      ],
+      "fact": "2026 IVL 秋季赛常规赛 BO3 双循环，前四直接晋级总决赛，五至八名通过 BO5 附加赛争夺两个名额；总决赛六队，赛制为 BO5 混合冒泡。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "社区赛制资料",
+      "league": "ivl"
+    },
+    {
+      "id": "idv_ivl_teams",
+      "game": "identity_v",
+      "intent": "teams",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "秋季赛"
+      ],
+      "fact": "2026 IVL 秋季赛共有 10 支队伍：ACT、ASC、DOU5、FPX.ZQ、成都 GG、Gr、MRC、TE 溯、北京 WBG、成都 Wolves。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "社区参赛名单",
+      "league": "ivl"
+    },
+    {
+      "id": "idv_ivl_nov14",
+      "game": "identity_v",
+      "intent": "schedule",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "秋季赛",
+        "11月14"
+      ],
+      "fact": "2026-11-14（北京时间）公开赛程：14:00 MRC 对 GR、16:00 Wolves 对 FPX.ZQ、18:00 DOU5 对 ACT；仅为赛前赛程，不能当作确认赛果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-14",
+      "source_kind": "社区赛程快照",
+      "league": "ivl"
+    },
+    {
+      "id": "idv_ijl_nov14",
+      "game": "identity_v",
+      "intent": "schedule",
+      "keywords": [
+        "IJL",
+        "日本赛区"
+      ],
+      "fact": "2026-11-14 IJL 秋季赛日本时间（UTC+9）12:00 AXIZ 对 DFM、14:00 ZETA 对 QTD、16:00 FL 对 RC、18:00 AWG 对 SZ；北京时间依次为 11:00、13:00、15:00、17:00。",
+      "source_url": "https://www.identityvgame.com/jp/news/update/20261111/35356_1319388.html",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-14",
+      "source_kind": "日本官方赛事公告",
+      "league": "ijl"
+    },
+    {
+      "id": "idv_ijl_overview",
+      "game": "identity_v",
+      "intent": "overview",
+      "keywords": [
+        "IJL",
+        "日本赛区"
+      ],
+      "fact": "IJL 是《第五人格》日本职业赛事。2026 秋季赛参赛的 8 支队伍为 AWG、AXIZ、DFM、FL、QTD、RC、SZ、ZETA。",
+      "source_url": "https://www.identityvgame.com/jp/news/update/20261111/35356_1319388.html",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "日本官方赛事公告",
+      "league": "ijl"
+    },
+    {
+      "id": "idv_coa_overview",
+      "game": "identity_v",
+      "intent": "overview",
+      "keywords": [
+        "COA",
+        "深渊的呼唤"
+      ],
+      "fact": "COA 是《第五人格》深渊的呼唤全球赛事系列的常用简称；不同届次的冠军、晋级路径和赛制不能混用。",
+      "source_url": "https://wiki.biligame.com/dwrg/赛事",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "社区赛事导航",
+      "league": "coa"
+    },
+    {
+      "id": "delta_overview",
+      "game": "delta_force",
+      "intent": "overview",
+      "keywords": [
+        "三角洲",
+        "kkrb",
+        "烽火地带"
+      ],
+      "fact": "《三角洲行动》是一款包含撤离玩法和大规模多人战场模式的 FPS；KK 一图流是第三方资料工具网页，不是已获授权的官方战绩 API。",
+      "source_url": "https://www.kkrb.net/?viewpage=view%2Foverview",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "公开网页元信息"
+    },
+    {
+      "id": "delta_kkrb_tools",
+      "game": "delta_force",
+      "intent": "tools",
+      "keywords": [
+        "三角洲",
+        "kkrb",
+        "一图流",
+        "kk日报"
+      ],
+      "fact": "KK 三角洲一图流公开介绍了游戏配方更新、材料指南、收益分析等功能；访问 https://www.kkrb.net/?viewpage=view%2Foverview 查看。没有核验开放 API，不提供动态物价数字。",
+      "source_url": "https://www.kkrb.net/?viewpage=view%2Foverview",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "网页描述，未确认开放 API"
+    },
+    {
+      "id": "valorant_overview",
+      "game": "valorant",
+      "intent": "overview",
+      "keywords": [
+        "无畏契约",
+        "valorant",
+        "VCT",
+        "瓦罗兰特"
+      ],
+      "fact": "《无畏契约》是 5v5 战术 FPS；VCT 为其职业赛事体系。实时赛程、版本数值和战绩需另行核验。",
+      "source_url": "https://playvalorant.com/",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "游戏官方资料"
+    },
+    {
+      "id": "cs2_overview",
+      "game": "counter_strike",
+      "intent": "overview",
+      "keywords": [
+        "CS2",
+        "CSGO",
+        "CS:GO",
+        "反恐精英"
+      ],
+      "fact": "《Counter-Strike 2》为团队战术 FPS，包含经济管理、投掷物、爆破与拆弹等核心元素。不能凭离线索引声称最新赛事赛果。",
+      "source_url": "https://www.counter-strike.net/cs2",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "游戏官方资料"
+    },
+    {
+      "id": "idv_ivl_nov13",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ivl",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-13 IVL 秋季赛公开赛程：14:00 MRC 对 ASC；16:00 ACT 对 Wolves；18:00 DOU5 对 WBG。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-13",
+      "source_kind": "社区赛程历史快照"
+    },
+    {
+      "id": "idv_ivl_nov15",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ivl",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-15 IVL 秋季赛公开赛程：14:00 WBG 对 GG；16:00 FPX.ZQ 对 GR；18:00 ASC 对 TE。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-15",
+      "source_kind": "社区赛程快照"
+    },
+    {
+      "id": "idv_ivl_nov20",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ivl",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-20 IVL 秋季赛公开赛程：14:00 FPX.ZQ 对 DOU5；16:00 GG 对 ASC；18:00 Wolves 对 TE。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-20",
+      "source_kind": "社区赛程快照"
+    },
+    {
+      "id": "idv_ivl_nov21",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ivl",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-21 IVL 秋季赛公开赛程：14:00 ASC 对 WBG；16:00 FPX.ZQ 对 TE；18:00 MRC 对 GG。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-21",
+      "source_kind": "社区赛程快照"
+    },
+    {
+      "id": "idv_ivl_nov22",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ivl",
+      "keywords": [
+        "IVL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-22 IVL 秋季赛公开赛程：14:00 ACT 对 WBG；16:00 DOU5 对 GR；18:00 Wolves 对 MRC。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IVL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-22",
+      "source_kind": "社区赛程快照"
+    },
+    {
+      "id": "idv_ijl_nov15",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ijl",
+      "keywords": [
+        "IJL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-15 IJL 秋季赛公开赛程：12:00 RC 对 FL、14:00 QTD 对 ZETA、16:00 SZ 对 AWG、18:00 DFM 对 AXIZ（日本时间 UTC+9；北京时间为前述时刻减 1 小时）。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://www.identityvgame.com/jp/news/update/20261111/35356_1319388.html",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-15",
+      "source_kind": "日本官方赛程"
+    },
+    {
+      "id": "idv_ijl_nov21",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ijl",
+      "keywords": [
+        "IJL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-21 IJL 秋季赛公开赛程：12:00 SZ 对 FL、14:00 AXIZ 对 RC、16:00 DFM 对 ZETA、18:00 AWG 对 QTD（日本时间 UTC+9）。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IJL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-21",
+      "source_kind": "社区赛程快照"
+    },
+    {
+      "id": "idv_ijl_nov22",
+      "game": "identity_v",
+      "intent": "schedule",
+      "league": "ijl",
+      "keywords": [
+        "IJL",
+        "第五人格",
+        "赛事"
+      ],
+      "fact": "2026-11-22 IJL 秋季赛公开赛程：12:00 DFM 对 FL、14:00 AXIZ 对 QTD、16:00 SZ 对 ZETA、18:00 AWG 对 RC（日本时间 UTC+9）。这只是赛程，不代表比赛已结束或已经核验结果。",
+      "source_url": "https://wiki.biligame.com/dwrg/2026_IJL_秋季赛",
+      "verified_at": "2026-11-14",
+      "valid_through": "2026-11-22",
+      "source_kind": "社区赛程快照"
+    },
+    {
+      "id": "idv_coa9_2026_champion",
+      "game": "identity_v",
+      "intent": "results",
+      "league": "coa",
+      "keywords": [
+        "COA9",
+        "COAIX",
+        "COAⅨ",
+        "COA IX",
+        "深渊的呼唤九",
+        "深渊的呼唤IX"
+      ],
+      "fact": "2026 年深渊的呼唤 IX（COA9）全球总冠军是 MRC，亚军是 TE；总决赛 FMVP 是 MRC_Nanako。该届赛事已结束，这不是 2027 年 COA10 的赛果。",
+      "source_url": "https://www.sina.cn/news/detail/5298535639023857.html",
+      "verified_at": "2026-11-14",
+      "valid_through": null,
+      "source_kind": "第五人格赛事官方认证微博公开冠军战报"
+    }
+  ]
+}

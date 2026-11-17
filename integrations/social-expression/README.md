@@ -70,7 +70,7 @@ social-expression/
 ## 运行
 
 ```powershell
-cd E:\个人\大肥鱼\开发工作区\2026-11-17-social-expression-c\integrations\social-expression
+cd <project-root>\开发工作区\2026-11-17-social-expression-c\integrations\social-expression
 python -m unittest discover -s tests -v
 python tools\evaluate.py
 python tools\export_contract.py
