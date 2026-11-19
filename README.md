@@ -6,7 +6,7 @@
 
 **这是我自己养的大肥鱼：陪我聊 QQ，也带着自己的设定去逛小红书。**
 
-QQ 可用 · 社交平台测试中（小红书 / B站）· 微信测试中 · macOS 原生 / Windows WSL2 本机 Web 面板
+QQ：最近一次连接核对为 2026-11-18，真实回复仍待 E2E 验收 · 社交平台测试中（小红书 / B站）· 微信测试中 · macOS 原生 / Windows WSL2 本机 Web 面板
 
 [Mac 快速开始](docs/QUICKSTART.md) · [Windows 安装](docs/WINDOWS.md) · [界面预览](#界面预览) · [在线表情库](https://photos.lifanhu.me/) · [真实案例](docs/CASES.md) · [操作指南](docs/USER_GUIDE.md) · [全部命令](docs/COMMANDS.md) · [架构与开发](docs/ARCHITECTURE.md) · [问题反馈](https://github.com/SAKURAfan1023/dafeiyu-bot/issues)
 
@@ -16,9 +16,9 @@ QQ 可用 · 社交平台测试中（小红书 / B站）· 微信测试中 · ma
 
 在 **QQ**，她用短句和表情包接话，认主人、看引用、记住各自聊过的事，也能帮你搜图、生图、分享插画。在 **小红书**，你给她一个人设和想逛的话题，她就能在绑定的账号下搜笔记、读文字和已加载评论，决定要不要加入讨论。每个平台有自己的账号、路由、记忆与记录；我会把树莓派上实际运行的配置和公开仓库里的代码分别标清楚。
 
-> **项目状态：持续开发，按渠道验收。** 截至 2026-11-16 的树莓派快照中，QQ、微信核心/桥接、模型路由、Gemini 网关和管理面板的服务均由 systemd 报告为运行状态；这不等于每项功能都通过真实对话验收。该快照里，QQ 指向 `gemini-web`（Gemini 4 Hydrogen）；微信文字和读图配置仍指向 `workbuddy-deepseek`，微信性格预设为“傲娇”。微信真实读图、管理员调节回复程度等仍需单独验收。macOS 提供原生界面，Windows 提供 WSL2 + 本机 Web 面板部署方式（Linux 自动化验证通过，Windows 实机待验收，见验证记录）；QQ 桥接可在独立 Linux 环境运行。当前没有 Windows 原生 exe 安装包。
+> **项目状态：持续开发，按渠道验收。** 最新可引用的 Pi 只读记录截至 2026-11-18 10:54 CST：QQ 当时恢复连接且修复版本已部署，但真实 QQ 回复仍未完成 E2E 验收；Gemini 4 Hydrogen 曾返回模型不可用错误，QQ 路由随后改用 Flash Lite，不能据此宣称全渠道都在使用 Gemini 4。微信核心当时健康检查成功；模型与人设未在 11 月 18 日重新核对，最新完整读数仍不符合 Gemini 目标。微信真实读图和管理员调节回复程度仍待验收。2026-11-19 未取得新的 Pi 现场读数；请查看[大肥鱼开发与树莓派实装进度（2026-11-19）](docs/DEVELOPMENT_STATUS_2026-11-19.md)。macOS 提供原生界面，Windows 提供 WSL2 + 本机 Web 面板部署方式（Linux 自动化验证通过，Windows 实机待验收，见验证记录）；QQ 桥接可在独立 Linux 环境运行。当前没有 Windows 原生 exe 安装包。
 
-树莓派实装状态、当前模型路由和开发待办见[大肥鱼开发与树莓派实装进度（2026-11-16）](docs/DEVELOPMENT_STATUS_2026-11-16.md)；前一版进度记录见[2026-11-15 公开源码进度](docs/DEVELOPMENT_STATUS_2026-11-15.md)。代码许可和第三方来源边界见[公开代码范围](docs/OPEN_SOURCE_SCOPE.md)。Pi 树莓派实验控制台源码见[Pi 统一控制台说明](integrations/pi-console/README.md)。
+树莓派实装状态、模型路由和开发待办见[最新进度页](docs/DEVELOPMENT_STATUS_2026-11-19.md)；此前快照见[2026-11-16 进度](docs/DEVELOPMENT_STATUS_2026-11-16.md)与[2026-11-15 公开源码进度](docs/DEVELOPMENT_STATUS_2026-11-15.md)。代码许可和第三方来源边界见[公开代码范围](docs/OPEN_SOURCE_SCOPE.md)。Pi 树莓派实验控制台源码见[Pi 统一控制台说明](integrations/pi-console/README.md)。
 
 ## 近期更新 · 2026 年 10 月
 
