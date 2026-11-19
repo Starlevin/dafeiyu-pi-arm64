@@ -1,0 +1,109 @@
+'use strict';
+
+const crypto = require('node:crypto');
+
+/**
+ * 请求安全闸：
+ *   1) CSRF：浏览器跨站写请求一律拒绝（同源写操作还必须是 JSON）
+ *   2) 远程 API：默认只许本机；开 allowRemote + x-bot-token 才放行
+ *   3) 安全响应头：nosniff / 禁 referrer / 禁外部脚本
+ */
+
+/** 恒定时间字符串比较：避免靠响应时间猜 token */
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a == null ? '' : a), 'utf8');
+  const bb = Buffer.from(String(b == null ? '' : b), 'utf8');
+  if (ba.length !== bb.length) return false;
+  try {
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 给每个响应挂安全头。
+ *
+ * CSP 不放开 'unsafe-inline'：已无网页界面，脚本只来自 API 调用方
+ * （返回的是 JSON，浏览器不会把它当脚本执行）。外部脚本同样加载不了
+ * （default-src 'self'），这对「本机 API」这个威胁模型够了。
+ */
+function applySecurityHeaders(res) {
+  try {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self'; style-src 'self'; " +
+        "img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; " +
+        "object-src 'none'; base-uri 'none'; form-action 'self'"
+    );
+  } catch { /* 头写不进去不影响响应体 */ }
+}
+
+function isLoopbackRequest(req) {
+  const ip = String((req.socket && req.socket.remoteAddress) || '');
+  return ip === '' || ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+/** 远程写操作：必须显式打开 allowRemote，并且带一个非默认的 x-bot-token */
+function remoteAuthorized(req, runtime) {
+  const allow = runtime.config.server && runtime.config.server.allowRemote === true;
+  if (!allow) return false;
+  const token = String(
+    (runtime.config.gateway && runtime.config.gateway.wechat && runtime.config.gateway.wechat.inboundToken) || ''
+  ).trim();
+  if (!token || token === 'change-me-wechat') return false;
+  return safeEqual(String(req.headers['x-bot-token'] || '').trim(), token);
+}
+
+/**
+ * 返回 null 表示放行；返回 { status, error } 表示拒绝。
+ * @param {object} runtime
+ * @param {import('node:http').IncomingMessage} req
+ * @param {{pathname:string, method:string}} info
+ */
+function checkRequest(runtime, req, { pathname, method }) {
+  const { logger } = runtime;
+
+  // CSRF 闸：浏览器发起的跨站写请求一律拒绝。
+  // 以前没这道：任何网页都能 POST 到 127.0.0.1:8787 改设置（实测 text/plain 也能过，不需要预检）。
+  const reqOrigin = String(req.headers.origin || '');
+  if (reqOrigin) {
+    let sameOrigin = false;
+    try {
+      const origin = new URL(reqOrigin);
+      const target = new URL(`${req.socket && req.socket.encrypted ? 'https' : 'http'}://${req.headers.host}`);
+      sameOrigin = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(reqOrigin)
+        && origin.origin === target.origin;
+    } catch { /* malformed/missing origin or Host fails closed */ }
+    const isWrite = method !== 'GET' && method !== 'HEAD';
+    if (!sameOrigin && isWrite) {
+      logger.warn(`拒绝跨站请求：${method} ${pathname} Origin=${reqOrigin}`);
+      return { status: 403, error: '拒绝跨站请求：只允许在本机页面里操作' };
+    }
+    // 同源写操作也必须是 JSON：挡住「html 表单提交」这类不需要预检的请求
+    if (isWrite && pathname.startsWith('/api/')) {
+      const ctype = String(req.headers['content-type'] || '').toLowerCase();
+      if (!ctype.includes('application/json')) {
+        return { status: 415, error: '写操作必须是 application/json' };
+      }
+    }
+  }
+
+  // 安全闸：API 也能读取记忆、导出密钥；读写都必须验证远程身份。
+  // 真要放到局域网（server.allowRemote=true）也必须带对的 x-bot-token，否则一律 403。
+  if (pathname.startsWith('/api/') && !isLoopbackRequest(req) && !remoteAuthorized(req, runtime)) {
+    logger.warn(`拒绝远程访问：${method} ${pathname} from ${req.socket && req.socket.remoteAddress}`);
+    return {
+      status: 403,
+      error: '远程调用被拒绝：请在运行本程序的电脑上操作，或设 server.allowRemote=true 并在请求头带 x-bot-token',
+    };
+  }
+
+  return null;
+}
+
+module.exports = { isLoopbackRequest, remoteAuthorized, checkRequest, applySecurityHeaders, safeEqual };

@@ -22,6 +22,11 @@ permissions:
 jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
+    env:
+      # Linux 端的图片处理需要 Resources/Linux/image-helper.py + Pillow；
+      # 不设这个变量时 QQArtworkIntegrationTests 会在 ARM64 上失败。
+      DAFEIYU_RESOURCES: ${{ github.workspace }}/Resources
+      DAFEIYU_BUILD_JOBS: 2
     container:
       image: swift:6.1-noble
     defaults:
@@ -127,8 +132,34 @@ jobs:
           set -o pipefail
           swift test --filter LLMProviderTests 2>&1 | tail -40
 
-      - name: 完整测试套件（结果记录，但不阻断产物产出）
+      - name: 完整测试套件（有界运行，结果记录，不阻断产物产出）
         continue-on-error: true
+        timeout-minutes: 20
         run: |
-          set -o pipefail
-          swift test 2>&1 | tail -60 || true
+          set +e
+          LOG=/tmp/arm64-swift-test.log
+          echo "SWIFT_TEST_START=$(date -Is)"
+          # 2026-11-17：默认并行 swift test 在 ARM64 上超过 1 小时无输出（疑似测试间
+          # 共享状态/端口死锁）。改为串行 + 15 分钟硬超时，保证日志可落盘、作业能结束；
+          # 超时/失败不阻断已上传的产物，只记录 SWIFT_TEST_EXIT。
+          timeout --signal=TERM 900 swift test --no-parallel 2>&1 | tee "$LOG" | tail -80
+          STATUS=${PIPESTATUS[0]}
+          echo "SWIFT_TEST_EXIT=$STATUS"
+          echo "SWIFT_TEST_END=$(date -Is)"
+          if [ "$STATUS" = "124" ]; then
+            echo "SWIFT_TEST_RESULT=TIMEOUT_900S"
+          elif [ "$STATUS" = "0" ]; then
+            echo "SWIFT_TEST_RESULT=PASS"
+          else
+            echo "SWIFT_TEST_RESULT=FAIL_EXIT_$STATUS"
+          fi
+          exit 0
+
+      - name: 上传 ARM64 测试日志（无论成败）
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm64-swift-test-log
+          path: /tmp/arm64-swift-test.log
+          retention-days: 14

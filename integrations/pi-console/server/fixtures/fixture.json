@@ -1,0 +1,84 @@
+{
+  "qq": {
+    "/api/panel": {
+      "connected": true,
+      "running": true,
+      "busy": false,
+      "model": "fixture-qq-model",
+      "targets": [
+        {"key": "group:10001", "number": "10001", "group": true,  "name": "测试群甲", "enabled": true,  "personaStyle": "gentle"},
+        {"key": "group:10002", "number": "10002", "group": true,  "name": "测试群乙", "enabled": true,  "personaStyle": null},
+        {"key": "private:20001", "number": "20001", "group": false, "name": "测试私聊", "enabled": false, "personaStyle": "teasing"}
+      ],
+      "contacts": []
+    },
+    "/api/status": {
+      "profiles": [
+        {"id": "fixture-qq-model", "name": "夹具QQ模型", "model": "fixture-qq-model"},
+        {"id": "fixture-qq-alt",   "name": "夹具QQ备用", "model": "fixture-qq-alt"}
+      ],
+      "engine": {"connected": true, "running": true, "model": "fixture-qq-model"},
+      "route": {"active": "fixture-qq-model", "profiles": []}
+    },
+    "/api/limits": {
+      "default": 100, "ceiling": 10000, "total": 0, "calls": 200, "used": 7,
+      "sessions": [
+        {"key": "group:10001", "number": "10001", "name": "测试群甲", "used": 3, "limit": 100, "inherited": true,  "enabled": true},
+        {"key": "group:10002", "number": "10002", "name": "测试群乙", "used": 4, "limit": 0,   "inherited": false, "enabled": true},
+        {"key": "private:20001", "number": "20001", "name": "测试私聊", "used": 0, "limit": 50,  "inherited": false, "enabled": false}
+      ]
+    },
+    "proactive": "10001=quiet,10002=natural",
+    "post:/api/scope": {"ok": true},
+    "post:/api/limits": {"ok": true},
+    "post:/api/profiles/activate": {"ok": true}
+  },
+  "wechat": {
+    "/api/status": {
+      "model": "fixture-wx-model", "provider": "custom",
+      "gateways": [
+        {"platform": "wechat", "enabled": true, "outboundConfigured": false,
+         "bridge": {"online": true, "lastSeenSec": 2, "uia": true, "listener": true,
+                    "account": "wxid_fixture", "accountNick": "夹具账号",
+                    "accountOk": true, "accountWhy": "", "accountGuard": true},
+         "received": 0, "replied": 0, "sent": 0, "failed": 0, "lastError": ""}
+      ],
+      "bridgeDiagnostics": {
+        "client": {"time": 1794400000, "phase": "window_available", "reason": "window_available"},
+        "last_event": {"time": 1794400000, "phase": "receive", "reason": "message"},
+        "fresh": true
+      },
+      "group": {"requireAt": true, "freeChat": true, "freeChatChance": 0.25, "cooldownSec": 3}
+    },
+    "/api/settings": {
+      "model": "fixture-wx-model", "provider": "custom",
+      "providers": {
+        "custom": {"label": "夹具", "model": "fixture-wx-model",
+                   "needsKey": false, "models": ["fixture-wx-model", "fixture-wx-alt"],
+                   "visionModels": []}
+      },
+      "group": {"requireAt": true, "freeChat": true, "freeChatChance": 0.25, "cooldownSec": 3}
+    },
+    "/api/config": {
+      "ok": true,
+      "config": {"group": {"requireAt": true, "freeChat": true, "freeChatChance": 0.25, "cooldownSec": 3}},
+      "secrets": {}
+    },
+    "/api/persona": {"ok": true, "persona": {"sourcePreset": "persona-dafeiyu"}},
+    "/api/persona/presets": {
+      "ok": true,
+      "presets": [
+        {"id": "persona-standard", "name": "鲸鲸标准版"},
+        {"id": "persona-dafeiyu", "name": "大肥鱼（串子 + 锐评）"},
+        {"id": "persona-tieba", "name": "贴吧老油子"}
+      ]
+    },
+    "titles": [
+      {"name": "夹具群甲", "group": true},
+      {"name": "夹具群乙", "group": true},
+      {"name": "夹具私聊", "group": false}
+    ],
+    "post:/api/settings": {"ok": true},
+    "post:/api/persona/preset": {"ok": true}
+  }
+}

@@ -1,0 +1,258 @@
+'use strict';
+
+/**
+ * 表情包（实验性）路由。
+ *
+ * 三个安全边界（和 server.js 里的原实现一致）：
+ *   1. 总开关关着 → 整个前缀 404（不读盘、不列目录、不给 UI 用）；
+ *   2. 管理接口只允许本机访问（远程写已经在 security.js 拦过一层，这里再收紧）；
+ *   3. 桥接用的 pending / claim / ack 必须带对的 gateway token
+ *      —— 否则同机的其它程序能把别人待发的表情包领走。
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const stickers = require('../../adapters/stickers');
+const { json, readBody, MIME } = require('../protocol');
+const { isLoopbackRequest } = require('../security');
+
+const BRIDGE_ONLY = new Set(['/api/stickers/gate', '/api/stickers/pending', '/api/stickers/claim', '/api/stickers/ack']);
+
+function stickerPath(config, emotion, name) {
+  const dir = stickers.stickerDir(config, config.root);
+  // 相对路径身份：新结构下子目录也算，不能再拼 EMOTIONS[emotion]/name
+  const file = stickers.resolveImage(dir, stickers.normalizeEmotion(emotion), String(name || ''));
+  return file ? { dir, file } : null;
+}
+
+module.exports = function register(router) {
+  router.pattern(/^\/api\/stickers(?:\/.*)?$/, (runtime, req, res, info) => {
+    const { config, logger } = runtime;
+    const service = runtime.stickerService;
+    if (!service) return json(res, 404, { ok: false, error: '表情包功能未开启' });
+    // 关着就当作这个接口不存在：不读盘、不列目录、不给 UI 用
+    service.requireEnabled();
+    const generation = service.generation;
+    const pathname = info.pathname;
+    const method = req.method || 'GET';
+
+    if (!isLoopbackRequest(req)) {
+      return json(res, 403, { ok: false, error: '表情包管理仅允许本机访问' });
+    }
+    if (BRIDGE_ONLY.has(pathname)) {
+      const gw = runtime.gateways && runtime.gateways.get && runtime.gateways.get('wechat');
+      if (!gw || !gw.verifyToken(req, null)) {
+        return json(res, 403, { ok: false, error: '桥接 token 不正确' });
+      }
+    }
+
+    if (pathname === '/api/stickers/gate' && method === 'GET') {
+      return json(res, 200, service.gate(info.url.searchParams.get('id') || ''));
+    }
+
+    if (pathname === '/api/stickers/status' && method === 'GET') {
+      // 异步扫描 + 1.5s 结果缓存：启动器 2s 拉一次，别每次都全量同步扫库
+      return service.statusAsync(info.url.searchParams.get('queueOnly') === '1')
+        .then((payload) => json(res, 200, payload))
+        .catch((err) => json(res, err && err.statusCode ? err.statusCode : 500,
+          { ok: false, error: (err && err.message) || '读取表情包状态失败' }));
+    }
+
+    if (pathname === '/api/stickers/import-presets' && method === 'POST') {
+      return service.importPresets({ manual: true })
+        .then((copied) => json(res, 200, { ok: true, copied }));
+    }
+
+    // 控制台缩略图：只回传表情包目录里的真图，不能读任意文件
+    if (pathname === '/api/stickers/image' && method === 'GET') {
+      const url = new URL(req.url, 'http://localhost');
+      const hit = stickerPath(config, url.searchParams.get('emotion'), url.searchParams.get('name'));
+      if (!hit) return json(res, 404, { ok: false, error: '找不到这张表情包' });
+      const type = MIME[path.extname(hit.file).toLowerCase()] || 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'no-store' });
+      const stream = fs.createReadStream(hit.file);
+      stream.on('error', () => { if (!res.destroyed) res.destroy(); });
+      return stream.pipe(res);
+    }
+
+    if (pathname === '/api/stickers/delete' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req);
+        // 删盘期间开关可能被关掉
+        service.requireEnabled();
+        if (generation !== service.generation) return json(res, 409, { ok: false, error: '开关已变化，请重新删除' });
+        const hit = stickerPath(config, body && body.emotion, body && body.name);
+        if (!hit) return json(res, 404, { ok: false, error: '找不到这张表情包（可能已经删掉了）' });
+        try {
+          fs.unlinkSync(hit.file);
+        } catch (err) {
+          return json(res, 500, { ok: false, error: '删除失败：' + ((err && err.message) || err) });
+        }
+        // 删完马上就读 status 列表，别等目录 mtime 生效。
+        stickers.invalidateScan(path.dirname(hit.file));
+        service.invalidateStatus();   // 1.5s 结果缓存也要一起丢，否则这张会被吐回来
+        logger.info(`表情包已删除：${path.basename(path.dirname(hit.file))}/${path.basename(hit.file)}`);
+        return json(res, 200, { ok: true, emotions: service.status().emotions });
+      })();
+    }
+
+    // 在本机资源管理器里打开目标目录（库根 / 某个分类 / 定位到某一张图）
+    if (pathname === '/api/stickers/open-folder' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req);
+        const dir = stickers.stickerDir(config, config.root);
+        stickers.safeDirectory(dir);
+        const target = stickers.targetForOpen(dir, body && body.emotion, body && body.name);
+        if (!target) {
+          return json(res, 404, { ok: false,
+            error: body && body.name ? '找不到这张表情包' : '没有这个分类（或分类目录还没建出来）' });
+        }
+        const noShell = ((config.env && config.env.WHALE_TEST_NO_SHELL) || process.env.WHALE_TEST_NO_SHELL) === '1';
+        // 启动器会把 open 传成 false：它只要内核把路径解析好、校验好，弹窗由它自己用
+        // ShellExecute 做（内核常常是提权进程，从提权进程拉 explorer 在 Windows 上会静默失败）
+        const wantOpen = !(body && body.open === false);
+        if (wantOpen && process.platform === 'win32' && !noShell) {
+          // 不拼 shell：参数走 argv，路径里的 & % 不会被解释
+          // 定位单张图用 explorer 的 /select,<path>，其余直接开目录。
+          // explorer 用绝对路径（内核是启动器拉起来的，PATH 可能被裁过），并 detached：
+          // 它是常驻进程，不能让它的退出/拉起反过来影响内核。
+          const args = target.mode === 'select' ? [`/select,${target.dir}`] : [target.dir];
+          const exe = path.join(process.env.SystemRoot || 'C:\\Windows', 'explorer.exe');
+          // 注意：**不能**带 windowsHide —— 它会以 SW_HIDE 启动 explorer，
+          // 资源管理器进程起来了、接口也返回 200，但窗口根本看不见（实测 v1 不弹窗，v2/v3/v4 都弹）。
+          const launch = (file) => new Promise((resolve, reject) => {
+            const child = spawn(file, args, { shell: false, detached: true, stdio: 'ignore' });
+            child.once('spawn', () => {
+              try { child.unref(); } catch { /* ignore */ }
+              logger.info(`[probe] open-folder spawn ${path.basename(file)} pid=${child.pid} mode=${target.mode} dir=${target.dir}`);
+              resolve();
+            });
+            child.once('error', (err) => {
+              logger.warn(`[probe] open-folder spawn 失败 ${file}：${err.message}`);
+              reject(err);
+            });
+          });
+          try {
+            try { await launch(exe); } catch (err) { await launch('explorer.exe'); }
+          } catch (err) {
+            return json(res, 500, { ok: false, dir: target.dir, mode: target.mode,
+              error: '打开文件夹失败：' + ((err && err.message) || err) });
+          }
+        }
+        return json(res, 200, { ok: true, dir: target.dir, mode: target.mode });
+      })();
+    }
+
+
+    // ---- 自定义分类：加 / 改名 / 删（内置三类不能动）----
+    if (pathname === '/api/stickers/category' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req);
+        service.requireEnabled();
+        const action = String((body && body.action) || 'add').toLowerCase();
+        const label = stickers.cleanCategoryLabel(body && body.label);
+        if (!label) return json(res, 400, { ok: false, error: '分类名不能为空，也不能带 / \\ : * ? " < > |' });
+        if (Object.values(stickers.EMOTIONS).includes(label)) {
+          if (action === 'remove') {
+            return json(res, 400, { ok: false, error: '内置分类「' + label + '」不能删除；文件夹被删了会自动补回来' });
+          }
+          return json(res, 400, { ok: false, error: '内置分类已经有「' + label + '」了' });
+        }
+        const extra = stickers.readExtraCategories(config, config.root);
+        const dir = stickers.stickerDir(config, config.root);
+        const at = extra.findIndex((c) => c && stickers.cleanCategoryLabel(c.label) === label);
+        const nextLabel = stickers.cleanCategoryLabel(body && body.newLabel);
+
+        if (action === 'add') {
+          if (at >= 0) return json(res, 400, { ok: false, error: '已经有这个分类了' });
+          stickers.safeDirectory(path.join(dir, label));
+          extra.push({ label, chance: 0.25 });
+          stickers.writeExtraCategories(config, config.root, extra);
+          service.invalidateStatus();
+          logger.info('表情包新增分类：' + label);
+          return json(res, 200, { ok: true, label, emotions: service.status().emotions });
+        }
+        if (action === 'remove') {
+          if (at < 0) return json(res, 404, { ok: false, error: '没有这个分类' });
+          extra.splice(at, 1);
+          stickers.writeExtraCategories(config, config.root, extra);
+          service.invalidateStatus();
+          logger.info('表情包删除分类：' + label + '（文件夹保留，图片没删）');
+          return json(res, 200, { ok: true, emotions: service.status().emotions });
+        }
+        if (action === 'rename') {
+          if (at < 0) return json(res, 404, { ok: false, error: '没有这个分类' });
+          if (!nextLabel || nextLabel === label) return json(res, 400, { ok: false, error: '新名字不合法' });
+          if (extra.some((c) => c && stickers.cleanCategoryLabel(c.label) === nextLabel)
+              || Object.values(stickers.EMOTIONS).includes(nextLabel)) {
+            return json(res, 400, { ok: false, error: '已经有这个分类了' });
+          }
+          try {
+            const from = path.join(dir, label);
+            const to = path.join(dir, nextLabel);
+            if (fs.existsSync(from) && !fs.existsSync(to)) fs.renameSync(from, to);
+          } catch (err) {
+            return json(res, 500, { ok: false, error: '改文件夹名失败：' + ((err && err.message) || err) });
+          }
+          extra[at] = { ...extra[at], label: nextLabel };
+          stickers.writeExtraCategories(config, config.root, extra);
+          service.invalidateStatus();
+          logger.info('表情包分类改名：' + label + ' → ' + nextLabel);
+          return json(res, 200, { ok: true, emotions: service.status().emotions });
+        }
+        return json(res, 400, { ok: false, error: '不认识的 action：' + action });
+      })();
+    }
+
+    if (pathname === '/api/stickers/upload' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req, Math.ceil(stickers.MAX_FILE_BYTES * 4 / 3) + 1024 * 1024);
+        // 上传大文件期间开关可能被关掉
+        service.requireEnabled();
+        if (generation !== service.generation) {
+          return json(res, 409, { ok: false, error: '开关已变化，请重新上传' });
+        }
+        const uploaded = stickers.upload(config, config.root, body && body.emotion, body && body.files);
+        service.invalidateStatus();   // 传完立刻可见，别等 1.5s 缓存过期
+        return json(res, 200, { ok: true, uploaded });
+      })();
+    }
+
+    if (pathname === '/api/stickers/test' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req);
+        service.requireEnabled();
+        if (generation !== service.generation) {
+          return json(res, 409, { ok: false, error: '开关已变化，请重新排队' });
+        }
+        const queued = service.enqueue(
+          (body && body.emotion) || 'other',
+          body && body.chat !== undefined ? body.chat : (config.sticker && config.sticker.testChat) || '文件传输助手'
+        );
+        return json(res, 200, { ok: true, queued });
+      })();
+    }
+
+    if (pathname === '/api/stickers/pending' && method === 'GET') {
+      return json(res, 200, { ok: true, items: service.pending() });
+    }
+
+    if (pathname === '/api/stickers/claim' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req);
+        return json(res, 200, { ok: true, item: service.claim(body && body.id) });
+      })();
+    }
+
+    if (pathname === '/api/stickers/ack' && method === 'POST') {
+      return (async () => {
+        const body = await readBody(req);
+        return json(res, 200, { ok: true, item: service.ack(body && body.id, body && body.status, body && body.error) });
+      })();
+    }
+
+    return json(res, 404, { ok: false, error: 'not found' });
+  });
+};

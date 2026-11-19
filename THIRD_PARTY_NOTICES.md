@@ -4,6 +4,10 @@
 - Swift / Apple 系统框架由相应平台提供。NapCat、Lima、Docker、QQ 不打包进本仓库，其代码、镜像、客户端与服务分别遵循上游许可/条款。
 - NapCat 项目：https://github.com/NapNeko/NapCatQQ
 - NapCat Docker：https://github.com/NapNeko/NapCat-Docker
+- `integrations/wechat-pi/core/` 是单独许可的 AGPL-3.0-only 子项目，基于鲸鲸 / Whale Girl v4.1.0；请同时保留该目录内的 `LICENSE` 与 `docs/NOTICE.md`，并按上游署名及修改说明要求分发。桥接与运行模板位于 `integrations/wechat-pi/transport/`，适用本仓库 MIT 许可。
+- 微信集成的来源、部署开关和排除范围见 [`公开代码范围`](docs/OPEN_SOURCE_SCOPE.md) 与[集成说明](integrations/wechat-pi/README.md)。
+- `integrations/pi-console/server/qrcodegen.py` 包含 Project Nayuki 的 Python QR Code generator 实现，按上游 MIT License 提供；源码保留完整许可证与版权声明。上游说明与来源：[QR Code generator library](https://www.nayuki.io/page/qr-code-generator-library)。
+- Pi 控制台、源代码清单、许可边界和未纳入的生产文件见 [`Pi 统一控制台说明`](integrations/pi-console/README.md) 与[公开代码范围](docs/OPEN_SOURCE_SCOPE.md)。
 - Lima：https://github.com/lima-vm/lima
 - OneBot 11：https://github.com/botuniverse/onebot-11
 - 社交平台本机执行器使用 Playwright（Microsoft，Apache-2.0），由 npm 按锁文件安装，不打包登录资料。页面结构与选择器参考 `xpzouying/xiaohongshu-mcp` 固定版本；实现与来源说明见 [NOTICE](Resources/SocialBrowser/NOTICE)。

@@ -28,3 +28,6 @@ artifacts/
 # Developer-specific files
 .vscode/
 .idea/
+integrations/pi-console/server/state/
+integrations/pi-console/server/config.json
+integrations/pi-console/server/config.local.json
