@@ -31,6 +31,14 @@ struct QQReplyDecisionSettings: Sendable {
     var enforces: Bool { mode == .enforce }
 }
 
+/// Single source of truth for the receive() return condition.
+/// Legacy enforce already owns the enqueue; v2 enforce owns it too, so returning here
+/// prevents the legacy shadow path and v2 from enqueueing the same work twice.
+func suppressesLegacyEnqueue(legacyMode: QQDecisionSettings.Mode,
+                              reply: QQReplyDecisionSettings) -> Bool {
+    legacyMode == .enforce || reply.enforces
+}
+
 struct QQReplyDecisionTrace: Sendable {
     let input: ReplyDecisionInput
     let result: ReplyDecisionResult
@@ -179,9 +187,10 @@ enum QQReplyDecisionInputBuilder {
 }
 
 enum QQPersonaRuntimeGuard {
-    /// Detection only. `hasMemoryEvidence` stays false for proactive replies in the POC:
-    /// the bot must not claim shared history just because some memory book exists.
-    static func check(reply text: String, message: QQIncoming, persona: QQPersona) -> PersonaCheckResult {
+    /// Detection only. `memoryEvidence` must be the text actually recalled for this turn;
+    /// the guard requires bigram overlap, so unrelated memory cannot license a shared-history claim.
+    static func check(reply text: String, message: QQIncoming, persona: QQPersona,
+                      memoryEvidence: String = "") -> PersonaCheckResult {
         var profile = PersonaProfile(displayName: persona.customName ?? "大肥鱼",
                                      relationship: message.isOwner ? .owner : .peer,
                                      maxCharacters: persona.maxCharacters,
@@ -203,7 +212,8 @@ enum QQPersonaRuntimeGuard {
         } else {
             scenario = .casual
         }
+        let hasEvidence = PersonaGuard.hasSupportingMemoryEvidence(text, memory: memoryEvidence)
         return PersonaGuard.check(text, profile: profile, scenario: scenario,
-                                  context: PersonaCheckContext(hasMemoryEvidence: false, recentReplies: []))
+                                  context: PersonaCheckContext(hasMemoryEvidence: hasEvidence, recentReplies: []))
     }
 }

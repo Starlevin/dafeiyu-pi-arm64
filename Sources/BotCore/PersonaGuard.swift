@@ -249,6 +249,17 @@ public enum PersonaGuard {
         return PersonaCheckResult(text: text, hits: hits)
     }
 
+    /// 只有回复与「实际召回的记忆文本」有足够多归一化 bigram 重合时，才承认共同经历。
+    /// 这样既不会因 `hasMemoryEvidence=false` 误杀有依据的回忆，也不会让无关记忆
+    /// 为“我记得我们上次……”这类虚构背书。
+    public static func hasSupportingMemoryEvidence(_ reply: String, memory: String,
+                                                  minimumBigrams: Int = 2) -> Bool {
+        let replyBigrams = normalizedBigrams(reply)
+        let memoryBigrams = normalizedBigrams(memory)
+        guard !replyBigrams.isEmpty, !memoryBigrams.isEmpty else { return false }
+        return replyBigrams.intersection(memoryBigrams).count >= max(1, minimumBigrams)
+    }
+
     /// 只做确定性截断：超出字数时在最后一个句读前收口；不改变其他语义。
     public static func trim(_ text: String, to maxCharacters: Int) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -260,6 +271,16 @@ public enum PersonaGuard {
             if !keep.isEmpty { return keep + "。" }
         }
         return cut + "…"
+    }
+
+    private static func normalizedBigrams(_ text: String) -> Set<String> {
+        let chars = Array(ReplyDecisionText.normalize(text))
+        guard chars.count >= 2 else { return [] }
+        var result = Set<String>()
+        for index in 0..<(chars.count - 1) {
+            result.insert(String(chars[index...index + 1]))
+        }
+        return result
     }
 
     private static func firstMatch(_ pattern: String, in text: String) -> String? {

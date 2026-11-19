@@ -36,6 +36,18 @@ private let peer = PersonaProfile(displayName: "大肥鱼", relationship: .peer,
         let with = PersonaGuard.check("上次你说的那个阵容，我记下了。", profile: peer, scenario: .casual,
                                       context: PersonaCheckContext(hasMemoryEvidence: true))
         #expect(!with.blocking)
+        // The runtime must derive evidence from the actual recalled text, not from the
+        // existence of a memory book: overlapping content licenses the recall, unrelated
+        // memory must not license "we played ranked together last time".
+        #expect(PersonaGuard.hasSupportingMemoryEvidence(
+            "上次你说的那个阵容，我记下了。",
+            memory: "上次你说想试双辅助阵容"))
+        #expect(!PersonaGuard.hasSupportingMemoryEvidence(
+            "我记得我们上次一起打排位。",
+            memory: "上次你说想试双辅助阵容"))
+        #expect(!PersonaGuard.hasSupportingMemoryEvidence(
+            "我记得我们上次一起打排位。",
+            memory: ""))
     }
 
     @Test func romanticClaimsAndOwnerAddressAreBlockedForPeers() {

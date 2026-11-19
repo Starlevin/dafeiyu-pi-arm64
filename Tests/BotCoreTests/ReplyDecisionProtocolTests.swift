@@ -51,8 +51,9 @@ private func base() -> ReplyDecisionInput {
     #expect((await engine.decide(quiet, state: state(now: now), now: now)).0.reason == .quietHours)
     var budget = base(); budget.dailyRemaining = 0
     #expect((await engine.decide(budget, state: state(now: now), now: now)).0.reason == .dailyBudget)
-    var other = base(); other.addressedToOther = true
+    var other = base(); other.addressedToOther = true; other.mention = .other
     #expect((await engine.decide(other, state: state(now: now), now: now)).0.reason == .addressedToOther)
+    #expect(!other.isMustAnswer)
     var recent = base(); recent.unansweredQuestion = false; recent.botSpokeRecently = true; recent.secondsSinceBotReply = 30
     #expect((await engine.decide(recent, state: state(now: now), now: now)).0.reason == .recentlySpoke)
     var repeatTopic = base(); repeatTopic.repeatedTopic = true; repeatTopic.botSpokeRecently = true
@@ -81,6 +82,11 @@ private func base() -> ReplyDecisionInput {
     #expect(nilResult.source == .failClosed)
     let (rangeResult, _) = await engine.decide(base(), state: state(now: now), now: now, scorer: FixedScorer(value: 1.7))
     #expect(rangeResult.reason == .scorerUnavailable)
+    let (nanResult, _) = await engine.decide(base(), state: state(now: now), now: now, scorer: FixedScorer(value: .nan))
+    #expect(nanResult.reason == .scorerUnavailable)
+    #expect(nanResult.source == .failClosed)
+    let (negativeResult, _) = await engine.decide(base(), state: state(now: now), now: now, scorer: FixedScorer(value: -0.1))
+    #expect(negativeResult.reason == .scorerUnavailable)
 }
 
 @Test func scorerPassAndHold() async {
@@ -92,6 +98,14 @@ private func base() -> ReplyDecisionInput {
     #expect(hold.action == .wait)
     #expect(hold.reason == .belowThreshold)
     #expect(hold.ttlSeconds == 45)
+    // Wire contract: uppercase action, camelCase ttlSeconds; no ttl/action aliases.
+    let data = try! JSONEncoder().encode(pass)
+    let wire = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+    #expect(wire["action"] as? String == "SPEAK")
+    #expect(wire["ttlSeconds"] as? Int == 0)
+    #expect(wire["ttl"] == nil)
+    #expect(wire["addressed"] == nil)
+    #expect(wire["relevance"] == nil)
 }
 
 @Test func heuristicOnlyModeSpeaksAboveThreshold() async {

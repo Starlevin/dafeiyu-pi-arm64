@@ -75,12 +75,22 @@ test('scorer failure fails closed', async () => {
 test('out-of-range scorer value fails closed', async () => {
   const { result } = await decide(base, emptyState, 1_700_000_000, async () => 1.7);
   assert.equal(result.reason, 'scorer_unavailable');
+  const { result: nan } = await decide(base, emptyState, 1_700_000_000, async () => NaN);
+  assert.equal(nan.reason, 'scorer_unavailable');
+  assert.equal(nan.source, 'fail_closed');
+  const { result: negative } = await decide(base, emptyState, 1_700_000_000, async () => -0.1);
+  assert.equal(negative.reason, 'scorer_unavailable');
 });
 
 test('scorer above/below threshold speaks or waits', async () => {
   const { result: pass } = await decide(base, emptyState, 1_700_000_000, async () => 0.82);
   assert.equal(pass.action, 'SPEAK');
   assert.equal(pass.reason, 'model_pass');
+  assert.equal(pass.ttlSeconds, 0);
+  // Canonical wire keys: uppercase action, camelCase ttlSeconds; no aliases.
+  assert.deepEqual(Object.keys(pass).sort(), [
+    'action', 'heuristicScore', 'reason', 'score', 'scorerCalled', 'source', 'ttlSeconds',
+  ]);
   const { result: hold } = await decide(base, emptyState, 1_700_000_000, async () => 0.61);
   assert.equal(hold.action, 'WAIT');
   assert.equal(hold.reason, 'below_threshold');

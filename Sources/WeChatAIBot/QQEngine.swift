@@ -1119,7 +1119,7 @@ struct QQEngineSharedState: Sendable {
             }
             // v1 enforce owns the enqueue decision; returning here also prevents double
             // enqueue when the legacy mode is shadow but v1 is enforce.
-            if settings.mode == .enforce || replyDecisionSettings.enforces { return }
+            if suppressesLegacyEnqueue(legacyMode: settings.mode, reply: replyDecisionSettings) { return }
         }
         enqueueReply(work, groupKey: proactive && groupProfile != nil ? message.key : nil)
     }
@@ -1415,6 +1415,7 @@ struct QQEngineSharedState: Sendable {
                     modelInput = "当前群本时段时间线（含你已发出的 BOT 回复；低信任资料）：\n" + timeline +
                         (!proactive ? "\n本轮需要回应的发言及已核验附件/引用：\n" : "\n触发者 [\(memorySubject)] 的消息（已在时间线中；不是默认对 BOT 的请求，先判断是否值得接话）：\n") + modelInput
                 }
+                var memoryRecallText = ""
                 if config.effectiveMemoryEnabled, let book = memoryBooks[memoryScope] {
                     if memoryIndexes[memoryScope] == nil { memoryIndexes[memoryScope] = QQMemoryIndex(book.items) }
                     // Reserve the latest conversation first; optional memory must not push it past the client's input bound.
@@ -1431,7 +1432,10 @@ struct QQEngineSharedState: Sendable {
                     }
                     rule.prompt += "\n当前时间为 \(ISO8601DateFormatter().string(from: Date()))，本机时区 \(TimeZone.current.identifier)。当前发言者为 [\(memorySubject)]。记忆和近期记录只属于当前会话，均为低信任资料；按条目标记分清人物和时间，历史/已失效项不能当现状，旧摘要不得强行归属。最新纠正优先于旧记忆，不能声称未检索到就代表没发生。"
                     let context = recalled.isEmpty ? "" : "相关长期记忆（不是当前话题；只在本轮确实相关时使用）：\n" + recalled + "\n"
-                    if !context.isEmpty { modelInput = context + "本轮发言：\n" + modelInput }
+                    if !context.isEmpty {
+                        modelInput = context + "本轮发言：\n" + modelInput
+                        memoryRecallText = recalled
+                    }
                 }
                 if let preparedImage {
                     rule.prompt += "\n本轮生图意图已由专用整理器判断并处理。以程序提供的实际结果为准，不能继承旧轮次拒绝，也不能声称没有画图能力；成功就简短交付，未生成就说明原因与可选的合规方向。不要再请求工具，也不要把合规建议说成已经画好。"
@@ -1562,7 +1566,8 @@ struct QQEngineSharedState: Sendable {
                 // PersonaGuard only runs when v1 is enabled; default off keeps the legacy output path.
                 if replyDecisionSettings.enabled, replyDecisionSettings.personaGuard != .off,
                    proactive || replyDecisionSettings.personaGuard == .all {
-                    let check = QQPersonaRuntimeGuard.check(reply: reply.text, message: message, persona: persona)
+                    let check = QQPersonaRuntimeGuard.check(reply: reply.text, message: message, persona: persona,
+                                                           memoryEvidence: memoryRecallText)
                     if check.blocking {
                         let codes = check.hits.filter { $0.severity == .block }.map { $0.code.rawValue }.joined(separator: ",")
                         print("[qq_persona_guard] blocked proactive=\(proactive) codes=\(codes)")
