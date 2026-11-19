@@ -236,7 +236,8 @@ public final class QQMemoryJournal {
         stats.oldestPendingAt = entries.first?.event.at
         stats.prunedSegments = prunedSegments
         let countLimit = Double(options.maxPendingEvents) * options.highWatermarkRatio
-        stats.highWatermark = Double(entries.count) >= countLimit
+        let byteLimit = Double(options.maxPendingBytes) * options.highWatermarkRatio
+        stats.highWatermark = Double(entries.count) >= countLimit || Double(stats.pendingBytes) >= byteLimit
         return stats
     }
 

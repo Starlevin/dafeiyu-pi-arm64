@@ -221,6 +221,51 @@ struct QQMemoryReliableStoreTests {
         reopened.close()
     }
 
+    @Test func forgottenItemIsNotResurrectedByLegacyImportOrLostState() throws {
+        let dir = try tempDir()
+        var book = QQMemoryBook()
+        let source = event("forget-legacy", "我喜欢老式甜点")
+        book.append(source)
+        try book.apply(try delta(source: source), batch: [source], candidateIDs: [], now: now)
+        let bookItem = try #require(book.items.first)
+
+        let store = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        let imported = try store.importLegacy(book, now: now)
+        #expect(imported.forgotten == 0)
+        #expect(imported.items == 1)
+        #expect(store.hasImportedLegacy)
+        #expect(try store.forget(subject: "PEER", ids: [bookItem.id], now: now.addingTimeInterval(5)) == 1)
+        #expect(store.items.isEmpty)
+        #expect(store.forgottenIDs.contains(bookItem.id))
+        store.close()
+
+        // State loss must not resurrect a forgotten item: the tombstone lives in
+        // archive.jsonl and is replayed on open.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("state.json"))
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("state.json.bak"))
+        let reopened = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        #expect(reopened.items.isEmpty)
+        #expect(reopened.forgottenIDs.contains(bookItem.id))
+        let second = try reopened.importLegacy(book, now: now.addingTimeInterval(10))
+        #expect(second.forgotten == 1)
+        #expect(reopened.items.isEmpty)
+        reopened.close()
+    }
+
+    @Test func legacyImportIsMarkedOnceAndPersists() throws {
+        let dir = try tempDir()
+        var book = QQMemoryBook()
+        book.importLegacy(text: "喜欢旧式甜点", subject: "PEER", at: now)
+        let store = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        #expect(!store.hasImportedLegacy)
+        _ = try store.importLegacy(book, now: now)
+        #expect(store.hasImportedLegacy)
+        store.close()
+        let reopened = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        #expect(reopened.hasImportedLegacy)
+        reopened.close()
+    }
+
     @Test func forgettingConversationRemovesItsEpisodeAndArchiveText() throws {
         let dir = try tempDir()
         let store = try QQMemoryReliableStore(directory: dir, scope: "group-a")
@@ -498,6 +543,23 @@ struct QQMemoryReliableStoreTests {
         #expect(reopened.batch().isEmpty)
         #expect(reopened.recent.contains { $0.id == "crash-after-state" })
         reopened.close()
+    }
+
+    @Test func byteHighWatermarkTriggersBeforeCountLimit() throws {
+        let dir = try tempDir()
+        var options = QQMemoryReliableOptions()
+        options.journal.maxPendingBytes = 64 * 1024
+        options.journal.highWatermarkRatio = 0.25
+        let store = try QQMemoryReliableStore(directory: dir, scope: "group-a", options: options)
+        let text = String(repeating: "x", count: 260)
+        for i in 0..<100 {
+            let id = "big-\(i)"
+            #expect(accepted(try store.ingest(event(id, text))))
+        }
+        #expect(store.stats.queuedCount == 100)
+        #expect(store.stats.queueBytes >= 20 * 1024)
+        #expect(store.stats.highWatermark)
+        store.close()
     }
 
     @Test func sixScopeDiskAndLatencyBudget() throws {

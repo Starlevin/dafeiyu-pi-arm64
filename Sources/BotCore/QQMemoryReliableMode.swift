@@ -5,6 +5,8 @@ import Foundation
 /// - `DAFEIYU_MEMORY_RELIABLE=off`（默认）：完全不创建新目录，旧 `QQMemoryBook` 行为不变。
 /// - `DAFEIYU_MEMORY_RELIABLE=shadow` 或 `DAFEIYU_MEMORY_RELIABLE_SHADOW=1`：
 ///   新 WAL 旁路写入，回复与整理仍走旧核心；用于对比、观察积压和恢复。
+///   影子默认不启用任何群/私聊，须显式设置 `DAFEIYU_MEMORY_SHADOW_SCOPES`
+///   （`*` 或精确 scope/后缀），并受 `DAFEIYU_MEMORY_SHADOW_TTL_SECONDS` 限时。
 /// - `DAFEIYU_MEMORY_RELIABLE=1|true|yes|on|authoritative`：
 ///   新 store 成为回复/整理的主路径；旧 book 仍接收原始事件作为回滚镜像。
 public enum QQMemoryReliableMode: String, Sendable, Equatable {

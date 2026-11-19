@@ -84,6 +84,9 @@ struct QQEngineSharedState: Sendable {
     var memoryBusy: Bool { memoryWorker != nil }
     private var memoryIndexes: [String: QQMemoryIndex] = [:]
     private let memoryReliableMode = QQMemoryReliableMode.resolve()
+    private let memoryShadowPolicy = QQMemoryShadowPolicy.resolve()
+    private var memoryShadowSession: QQMemoryShadowSession?
+    private var memoryShadowAlerted = false
     private var memoryReliableStores: [String: QQMemoryReliableStore] = [:]
     private var memoryReliableRoot: URL?
     private var memoryWorker: Task<Void, Never>?
@@ -304,6 +307,25 @@ struct QQEngineSharedState: Sendable {
         do {
             let directory = try storageDirectory ?? LocalStore().directory
             memoryReliableRoot = directory.appendingPathComponent("QQMemoryReliable", isDirectory: true)
+            if memoryReliableMode == .shadow {
+                if memoryShadowPolicy.isUsable, let root = memoryReliableRoot {
+                    do {
+                        memoryShadowSession = try QQMemoryShadowSession.loadOrCreate(
+                            root: root, policy: memoryShadowPolicy, now: Date(),
+                            reset: QQMemoryShadowPolicy.resetRequested())
+                        if let reason = memoryShadowSession?.stopReason {
+                            memoryStatus = "影子观察未启动：\(reason.rawValue)；旧回复不受影响"
+                        }
+                    } catch {
+                        memoryShadowSession = nil
+                        memoryStatus = "影子观察未启动：\(error.localizedDescription)"
+                    }
+                } else if memoryShadowPolicy.ttl <= 0 {
+                    memoryStatus = "影子观察未启动：TTL 配置无效，按关闭处理"
+                } else {
+                    memoryStatus = "影子观察未启动：白名单为空（默认不启用任何群/私聊）"
+                }
+            }
             file = directory.appendingPathComponent("qq-state.json")
             if let file, FileManager.default.fileExists(atPath: file.path) {
                 let data = try Data(contentsOf: file)
@@ -1015,9 +1037,11 @@ struct QQEngineSharedState: Sendable {
             memoryBooks[scope] = book
             if let store = memoryReliableStore(for: scope, book: book) {
                 do {
-                    if case .refused(let reason) = try store.ingest(event) {
+                    let ingest = try store.ingest(event)
+                    if case .refused(let reason) = ingest {
                         memoryStatus = "可靠记忆队列已满：\(reason)；旧核心仍保留该片段"
                     }
+                    observeShadow(scope: scope, store: store, target: target)
                 } catch {
                     memoryStatus = "可靠记忆写入失败：\(error.localizedDescription)；旧核心不受影响"
                 }
@@ -1978,22 +2002,100 @@ struct QQEngineSharedState: Sendable {
     /// 测试与主控诊断用只读快照；不参与生产写入。
     var memoryUsageSnapshot: Usage { memoryUsage }
     var memoryReliableModeSnapshot: QQMemoryReliableMode { memoryReliableMode }
+    var memoryShadowPolicySnapshot: QQMemoryShadowPolicy { memoryShadowPolicy }
+
+    /// Read-only, text-free shadow diagnostics. One entry per scope that has ever
+    /// opened an observation store in this process.
+    var memoryShadowSnapshots: [String: QQMemoryShadowStatus] {
+        memoryReliableStores.reduce(into: [:]) { result, entry in
+            result[entry.key] = memoryShadowSnapshot(for: entry.key)
+        }
+    }
+
+    func memoryShadowSnapshot(for scope: String) -> QQMemoryShadowStatus {
+        memoryShadowPolicy.status(scope: scope, session: memoryShadowSession,
+                                  stats: memoryReliableStores[scope]?.stats,
+                                  mode: memoryReliableMode, now: Date())
+    }
+
+    /// Internal seam for isolated tests; production callers stay on the private path.
+    func memoryReliableStoreForTesting(_ scope: String, book: QQMemoryBook? = nil) -> QQMemoryReliableStore? {
+        memoryReliableStore(for: scope, book: book)
+    }
+
+    private func observeShadow(scope: String, store: QQMemoryReliableStore, target: QQTarget?) {
+        guard memoryReliableMode == .shadow else { return }
+        let stats = store.stats
+        if stats.highWatermark, memoryShadowPolicy.stopOnHighWatermark {
+            stopShadow(.highWatermark, scope: scope, store: store, target: target)
+            return
+        }
+        guard !memoryShadowAlerted, stats.highWatermark || stats.refusedEvents > 0 else { return }
+        memoryShadowAlerted = true
+        if stats.highWatermark {
+            memoryStatus = "影子队列高水位：\(stats.queuedCount) 条/\(stats.queueBytes) 字节；已停止接收，旧回复不受影响"
+        } else {
+            memoryStatus = "影子队列已显式拒绝新片段（\(stats.refusedEvents) 条）；旧回复不受影响"
+        }
+        record(target?.id, .skipped, "可靠记忆影子阈值告警（非发送失败）")
+    }
+
+    private func stopShadow(_ reason: QQMemoryShadowStopReason, scope: String, store: QQMemoryReliableStore?,
+                            target: QQTarget?) {
+        guard var session = memoryShadowSession else { return }
+        session.stop(reason, now: Date())
+        memoryShadowSession = session
+        if let root = memoryReliableRoot { try? session.persist(to: root) }
+        store?.close()
+        guard !memoryShadowAlerted else { return }
+        memoryShadowAlerted = true
+        let detail: String
+        switch reason {
+        case .ttlExpired: detail = "已到限时，自动退出影子观察"
+        case .highWatermark: detail = "WAL 达到高水位，自动退出影子观察"
+        case .allowlistEmpty: detail = "影子白名单为空，未启用"
+        case .notAllowlisted: detail = "当前作用域不在影子白名单"
+        case .corruptSession: detail = "影子会话文件损坏，按停止处理"
+        case .disabled: detail = "影子模式未启用"
+        }
+        memoryStatus = "可靠记忆影子已停止：\(detail)；旧回复不受影响"
+        record(target?.id, .skipped, "可靠记忆影子停止（非发送失败）")
+    }
 
     private func memoryReliableStore(for scope: String, book: QQMemoryBook?) -> QQMemoryReliableStore? {
         guard memoryReliableMode.isEnabled, storageOK, let root = memoryReliableRoot else { return nil }
-        if let existing = memoryReliableStores[scope] { return existing }
+        if memoryReliableMode == .shadow {
+            guard let session = memoryShadowSession, memoryShadowPolicy.allows(scope: scope) else { return nil }
+            guard session.isActive(now: Date()) else {
+                stopShadow(.ttlExpired, scope: scope, store: nil, target: nil)
+                return nil
+            }
+        }
+        if let existing = memoryReliableStores[scope] {
+            if memoryReliableMode == .shadow, existing.stats.highWatermark {
+                stopShadow(.highWatermark, scope: scope, store: existing, target: nil)
+                return nil
+            }
+            return existing
+        }
         let digest = SHA256.hash(data: Data(scope.utf8)).prefix(8)
             .map { String(format: "%02x", $0) }.joined()
         let directory = root.appendingPathComponent("scope-\(digest)", isDirectory: true)
         do {
             let store = try QQMemoryReliableStore(directory: directory, scope: scope)
-            if store.items.isEmpty, store.recent.isEmpty, let book {
+            // Shadow is an observation path: never import or mutate the legacy
+            // book/archive. Import only when authoritative explicitly takes over.
+            if memoryReliableMode.isAuthoritative, let book, !store.hasImportedLegacy {
                 let report = try store.importLegacy(book)
                 if report.droppedEvents > 0 {
                     memoryStatus = "可靠记忆已导入，历史丢弃 \(report.droppedEvents) 条（不可恢复）"
                 }
             }
             memoryReliableStores[scope] = store
+            if memoryReliableMode == .shadow, store.stats.highWatermark {
+                stopShadow(.highWatermark, scope: scope, store: store, target: nil)
+                return nil
+            }
             return store
         } catch {
             memoryStatus = "可靠记忆未启用：\(error.localizedDescription)"

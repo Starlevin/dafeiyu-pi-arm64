@@ -79,6 +79,7 @@ public struct QQMemoryImportReport: Codable, Equatable, Sendable {
     public var duplicates = 0
     public var redacted = 0
     public var archived = 0
+    public var forgotten = 0
     public var droppedEvents = 0
     public var lossless = false
 }
@@ -113,6 +114,8 @@ public final class QQMemoryReliableStore {
         var recent: [QQMemoryEvent] = []
         var knownIDs: [String] = []
         var appliedIDs: [String] = []
+        var legacyImported: Bool?
+        var forgottenIDs: [String]?
         var episodes: [QQMemoryEpisode] = []
         var droppedEvents = 0
         var refusedEvents = 0
@@ -169,6 +172,7 @@ public final class QQMemoryReliableStore {
         self.state = try Self.loadState(stateURL: stateURL, backupURL: backupURL, scope: scope, decoder: decoder, encoder: encoder)
         self.journal = try QQMemoryJournal(directory: directory.appendingPathComponent("journal"), options: options.journal)
         self.archiveRecords = Self.countArchiveRecords(at: archiveURL, decoder: decoder)
+        try mergeArchiveTombstones()
         try recoverFromJournal()
     }
 
@@ -177,6 +181,8 @@ public final class QQMemoryReliableStore {
     public var items: [QQMemoryItem] { state.items }
     public var recent: [QQMemoryEvent] { state.recent }
     public var episodes: [QQMemoryEpisode] { state.episodes }
+    public var hasImportedLegacy: Bool { state.legacyImported ?? false }
+    public var forgottenIDs: [String] { state.forgottenIDs ?? [] }
 
     public var stats: QQMemoryReliableStats {
         let journalStats = journal.stats()
@@ -345,6 +351,7 @@ public final class QQMemoryReliableStore {
             }
         }
         let tombstone = ArchiveRecord(kind: "tombstone", item: nil, episode: nil, ids: Array(ids), at: now)
+        state.forgottenIDs = mergeIDs(state.forgottenIDs ?? [], Array(ids))
         try appendArchive([tombstone])
         try persistState()
         return removed
@@ -390,6 +397,7 @@ public final class QQMemoryReliableStore {
     public func reload() throws {
         state = try Self.loadState(stateURL: stateURL, backupURL: backupURL, scope: scope, decoder: decoder, encoder: encoder)
         archiveRecords = Self.countArchiveRecords(at: archiveURL, decoder: decoder)
+        try mergeArchiveTombstones()
         try recoverFromJournal()
     }
 
@@ -403,6 +411,10 @@ public final class QQMemoryReliableStore {
         var report = QQMemoryImportReport()
         var archiveBatch: [ArchiveRecord] = []
         for item in book.items {
+            if (state.forgottenIDs ?? []).contains(item.id) {
+                report.forgotten += 1
+                continue
+            }
             if state.items.contains(where: { $0.id == item.id }) {
                 report.duplicates += 1
                 continue
@@ -447,9 +459,10 @@ public final class QQMemoryReliableStore {
         state.knownIDs = mergeIDs(state.knownIDs, book.knownIDs)
         state.droppedEvents += book.droppedEvents
         state.refusedEvents += book.refusedEvents ?? 0
+        state.legacyImported = true
         try persistState()
         report.droppedEvents = book.droppedEvents
-        report.lossless = report.items + report.historical + report.duplicates >= book.items.count &&
+        report.lossless = report.items + report.historical + report.duplicates + report.forgotten >= book.items.count &&
             report.pending + report.duplicates >= legacyPending.count
         return report
     }
@@ -526,6 +539,27 @@ public final class QQMemoryReliableStore {
                                     sourceIDs: item.sourceIDs, validFrom: item.updatedAt,
                                     validTo: item.invalidatedAt ?? now, reason: reason)
         return ArchiveRecord(kind: "itemVersion", item: archived, episode: nil, ids: nil, at: now)
+    }
+
+    /// Tombstones are the durable delete authority even if state.json is lost or
+    /// restored from an older backup. Re-reading them on open prevents an old
+    /// legacy book/archive from resurrecting a forgotten item.
+    private func mergeArchiveTombstones() throws {
+        guard FileManager.default.fileExists(atPath: archiveURL.path),
+              let data = try? Data(contentsOf: archiveURL) else { return }
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        var ids: [String] = []
+        for line in lines {
+            guard let record = try? decoder.decode(ArchiveRecord.self, from: Data(line)),
+                  record.kind == "tombstone" else { continue }
+            ids.append(contentsOf: record.ids ?? [])
+        }
+        guard !ids.isEmpty else { return }
+        state.forgottenIDs = mergeIDs(state.forgottenIDs ?? [], ids)
+        let before = state.items.count + state.episodes.count
+        state.items.removeAll { ids.contains($0.id) }
+        state.episodes.removeAll { ids.contains($0.id) || !Set(ids).isDisjoint(with: $0.sourceIDs) }
+        if state.items.count + state.episodes.count != before { try persistState() }
     }
 
     private func appendArchive(_ records: [ArchiveRecord]) throws {
