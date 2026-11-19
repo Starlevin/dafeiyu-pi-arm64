@@ -2212,7 +2212,7 @@ struct QQEngineSharedState: Sendable {
         }
     }
 
-    static func rerankStickers(_ available: [QQStickerLibrary.Item], plan: QQSocialStylePlan?) -> [QQStickerLibrary.Item] {
+    nonisolated static func rerankStickers(_ available: [QQStickerLibrary.Item], plan: QQSocialStylePlan?) -> [QQStickerLibrary.Item] {
         guard let plan, !available.isEmpty else { return available }
         if plan.stickerIntent == .none { return [] }
         let preferred = QQSocialStyleDirector.preferredEmotionRawValues(for: plan.scene)

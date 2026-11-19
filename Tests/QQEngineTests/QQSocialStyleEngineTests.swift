@@ -10,6 +10,7 @@ import Testing
         .init(id: "s-joy", title: "开心", emotion: .joy, file: "c.png", sha256: "3", source: "local")
     ]
 
+    @MainActor
     @Test func rerankStickersPrioritizesJoyForCelebrationAndSuppressesSeriousHelp() {
         let celebration = QQSocialStyleDirector.plan(for: "面试通过了太棒", configuredMaxChars: 120)
         let ranked = QQEngine.rerankStickers(catalog, plan: celebration)
