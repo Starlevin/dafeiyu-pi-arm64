@@ -1,8 +1,10 @@
-# 契约 B→C：`QQMemoryItem` → `MemoryFact` 适配（轻量规范）
+# 契约 B→C：`QQMemoryItem` → `MemoryFact` 适配（已冻结）
 
-版本：`social-style-c1`  
-状态：提案 + 已实现 `adapters.py` 与降级测试。  
-生产改动：无。C 不读 B 的记忆库，不接触原始聊天、真实群号或成员账号。
+版本：`social-style-c1` / 适配器 `b2c-memory-v1`  
+冻结日期：`2026-11-17`  
+状态：已实现 `adapters.py` 与降级测试；生产接入未执行。  
+主控单页：`CONTRACT_c_integration_one_pager.md`。  
+C 不读 B 的记忆库，不接触原始聊天、真实群号或成员账号。
 
 ## 1. 真实结构（审计基线 `3675e58`）
 
@@ -31,6 +33,7 @@ public struct QQMemoryItem {
 
 ```json
 {
+  "contract_version": "b2c-memory-v1",
   "scope_key": "g_9f2c1a",
   "item": {
     "subject": "OWNER",
@@ -45,6 +48,8 @@ public struct QQMemoryItem {
   }
 }
 ```
+
+- `contract_version`：可省略；出现时必须等于 `b2c-memory-v1`，否则丢弃。
 
 - `scope_key`：B 用固定盐对 `account|target` 做不可逆摘要，<=64 字符；不得是真实群号、群名或账号。
 - `item`：Swift `QQMemoryItem` 的 JSON 投影；日期可用 ISO8601 字符串或 unix 秒。
@@ -79,6 +84,7 @@ public struct QQMemoryItem {
 
 | 情况 | 结果 | reason |
 | --- | --- | --- |
+| `contract_version` 不匹配 | `None` | `version_mismatch` |
 | 缺 `scope_key` / 与当前不一致 | `None` | `scope_mismatch` / `scope_key_missing` |
 | 缺 `subject` / 与当前发送者不一致 | `None` | `wrong_subject` |
 | 缺 `expiresAt` | `None` | `missing_expiry` |

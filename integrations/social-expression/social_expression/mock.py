@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from .channels import OutboundError, check_receipt, normalize_target
+
+_MESSAGE_ID = re.compile(r"[A-Za-z0-9:_-]{1,128}")
 
 
 @dataclass
@@ -13,15 +16,29 @@ class MockOneBot:
     expected_group_id: Optional[int] = None
     expected_user_id: Optional[int] = None
     sticker_visible: bool = True
+    fail_next: int = 0
     sent: List[Dict[str, object]] = field(default_factory=list)
+    recalled: List[Dict[str, object]] = field(default_factory=list)
     rejected: List[str] = field(default_factory=list)
 
     def deliver(self, payload: Dict[str, object]) -> Dict[str, object]:
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            self.rejected.append("transient_failure")
+            return {"ok": False, "reason": "transient_failure", "receipt": "failed", "delivered": False}
         try:
             action = payload.get("action")
             params = payload.get("params")
             if not isinstance(params, dict):
                 raise OutboundError("missing_params")
+            if action == "delete_msg":
+                message_id = str(params.get("message_id") or "").strip()
+                if not _MESSAGE_ID.fullmatch(message_id):
+                    raise OutboundError("invalid_message_id")
+                self.recalled.append(payload)
+                return {"ok": True, "reason": "accepted", "receipt": "confirmed",
+                        "message_id": message_id, "delivered": True, "sticker": False,
+                        "sticker_delivered": None}
             if action == "send_group_msg":
                 group_id = params.get("group_id")
                 if not isinstance(group_id, int) or isinstance(group_id, bool) or group_id <= 0:
@@ -79,10 +96,16 @@ class MockWeChatBridge:
 
     expected_chat: Optional[str] = None
     sticker_visible: bool = True
+    fail_next: int = 0
     sent: List[Dict[str, object]] = field(default_factory=list)
+    recalled: List[Dict[str, object]] = field(default_factory=list)
     rejected: List[str] = field(default_factory=list)
 
     def deliver(self, payload: Dict[str, object]) -> Dict[str, object]:
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            self.rejected.append("transient_failure")
+            return {"ok": False, "reason": "transient_failure", "receipt": "failed", "delivered": False}
         operations = payload.get("messages")
         if not isinstance(operations, list) or not operations:
             self.rejected.append("empty_operations")
@@ -102,6 +125,15 @@ class MockWeChatBridge:
                 self.rejected.append("wrong_chat")
                 return {"ok": False, "reason": "wrong_chat", "receipt": "failed", "delivered": False}
             action = operation.get("action")
+            if action == "recall_message":
+                message_id = str(operation.get("message_id") or "").strip()
+                if not _MESSAGE_ID.fullmatch(message_id):
+                    self.rejected.append("invalid_message_id")
+                    return {"ok": False, "reason": "invalid_message_id", "receipt": "failed", "delivered": False}
+                self.recalled.append(payload)
+                statuses.append("confirmed")
+                delivered = True
+                continue
             if action == "send_text":
                 if not str(operation.get("text") or "").strip():
                     self.rejected.append("empty_text")

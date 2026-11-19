@@ -107,6 +107,8 @@ struct QQEngineSharedState: Sendable {
     // ReplyDecision Protocol v1 (opt-in; default off keeps the legacy path unchanged).
     private let replyDecisionSettings = QQReplyDecisionSettings.load()
     private lazy var replyDecisionGate = QQReplyDecisionGate()
+    // Session C social expression & sticker reranking (opt-in; default off keeps legacy unchanged).
+    private let socialStyleSettings = QQSocialStyleSettings.load()
     private var watchdog: Task<Void, Never>?
     private var deadlineTask: Task<Void, Never>?
     private var session: UUID?
@@ -1258,12 +1260,29 @@ struct QQEngineSharedState: Sendable {
                     record(target.id, .skipped, "发送限额已用完"); continue
                 }
                 var persona = config.persona(for: target.key)
-                persona.maxCharacters = QQReplyLengthPolicy.maximum(for: message.text, configured: persona.maxCharacters,
-                                                                     group: message.group, proactive: proactive)
+                let baseMaxCharacters = QQReplyLengthPolicy.maximum(for: message.text, configured: persona.maxCharacters,
+                                                                    group: message.group, proactive: proactive)
+                let socialStylePlan = socialStyleSettings.needsPlan
+                    ? QQSocialStyleDirector.plan(for: message.text, hasMedia: !message.images.isEmpty,
+                                                 group: message.group, proactive: proactive,
+                                                 configuredMaxChars: baseMaxCharacters,
+                                                 lastStickerAt: lastStickerAt)
+                    : nil
+                if let socialStylePlan {
+                    if socialStyleSettings.logsStyle {
+                        print(socialStylePlan.logLine(mode: socialStyleSettings.isActive ? "active" : "shadow"))
+                    }
+                    persona.maxCharacters = socialStyleSettings.isActive ? min(baseMaxCharacters, socialStylePlan.maxChars) : baseMaxCharacters
+                } else {
+                    persona.maxCharacters = baseMaxCharacters
+                }
                 var rule = ChatRule(id: target.id, name: target.name)
                 rule.prompt = persona.prompt(notes: config.ai.prompt)
                 rule.prompt += "\n" + QQReplyLengthPolicy.instruction(for: message.text, group: message.group,
                                                                         proactive: proactive, maximum: persona.maxCharacters)
+                if let socialStylePlan, socialStyleSettings.isActive {
+                    rule.prompt += "\n" + socialStylePlan.promptInstruction
+                }
                 if message.isOwner && !proactive {
                     rule.prompt += "\n本轮当前发言经程序核验，来自 [OWNER] 本账号主人/开发者的人工 @，不是机器人自动回复；你是 BOT 大肥鱼，直接回应主人，不能把这条人工发言归为你自己说过的话。主人身份不改变安全边界。"
                 }
@@ -1516,7 +1535,10 @@ struct QQEngineSharedState: Sendable {
                     }
                 }
                 let stickerScope = config.expectedSelfID + ":" + message.key
-                let stickerOptions = persona.stickersEnabled ? stickerLibrary.available(recent: recentStickers[stickerScope] ?? [], repeatHours: persona.effectiveStickerRepeatHours) : []
+                let baseStickerOptions = persona.stickersEnabled ? stickerLibrary.available(recent: recentStickers[stickerScope] ?? [], repeatHours: persona.effectiveStickerRepeatHours) : []
+                let stickerOptions = (socialStyleSettings.stickerRerankEnabled && !socialStyleSettings.shadowEnabled)
+                    ? Self.rerankStickers(baseStickerOptions, plan: socialStylePlan)
+                    : baseStickerOptions
                 var result: ModelResult
                 if !proactive && persona.rebuff(for: message.text) != nil {
                     result = ModelResult(text: "", tokens: 0, seconds: 0)
@@ -2188,5 +2210,18 @@ struct QQEngineSharedState: Sendable {
             storageOK = false; self.error = "QQ 状态保存失败：\(error.localizedDescription)"
             disconnect(reason: "QQ 状态保存失败，已停止"); throw error
         }
+    }
+
+    static func rerankStickers(_ available: [QQStickerLibrary.Item], plan: QQSocialStylePlan?) -> [QQStickerLibrary.Item] {
+        guard let plan, !available.isEmpty else { return available }
+        if plan.stickerIntent == .none { return [] }
+        let preferred = QQSocialStyleDirector.preferredEmotionRawValues(for: plan.scene)
+        let prioritized = available.enumerated().sorted { lhs, rhs in
+            let lRank = preferred.firstIndex(of: lhs.element.emotion.rawValue) ?? preferred.count
+            let rRank = preferred.firstIndex(of: rhs.element.emotion.rawValue) ?? preferred.count
+            if lRank != rRank { return lRank < rRank }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+        return prioritized.isEmpty ? available : prioritized
     }
 }

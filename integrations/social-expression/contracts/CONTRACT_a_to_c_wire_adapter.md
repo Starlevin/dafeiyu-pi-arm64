@@ -1,8 +1,9 @@
-# 契约 A→C：发言决策线上字段适配（轻量规范）
+# 契约 A→C：发言决策线上字段适配（已冻结）
 
-版本：`social-style-c1`  
-状态：提案 + 已实现 `social_expression/adapters.py` 与针对性 mock tests。  
-生产改动：无。A 的决策所有权不变；C 只做表达形状，或在硬边界上否决发送。
+版本：`social-style-c1` / 适配器 `a2c-wire-v1`  
+冻结日期：`2026-11-17`  
+状态：已实现 `social_expression/adapters.py` 与 mock tests；生产接入未执行。  
+主控单页：`CONTRACT_c_integration_one_pager.md`。
 
 ## 1. 线上格式
 
@@ -10,6 +11,7 @@ A 可以发送大写动作与 camelCase 字段：
 
 ```json
 {
+  "contract_version": "a2c-wire-v1",
   "action": "SPEAK",
   "score": 0.78,
   "reason": "addressed_by_member",
@@ -18,6 +20,8 @@ A 可以发送大写动作与 camelCase 字段：
   "ttlSeconds": 120
 }
 ```
+
+`contract_version` 可省略；出现时必须等于 `a2c-wire-v1`，否则按契约错误回落 `WAIT`。
 
 C 内部统一为：
 
@@ -42,13 +46,14 @@ C 内部统一为：
 | `addressed` | `addressed` | 必须是 JSON `true/false`；字符串 `"true"`、数字 `1` 都拒绝 |
 | `score` | `score` | 数值 `0..1`；缺省 `0`；越界 -> 契约错误 |
 | `reason` | `reason` | 字符串，截断 160 字；非字符串转字符串；只用于日志，不参与决策 |
+| `contract_version` | 版本校验 | 可省略；出现时必须等于 `a2c-wire-v1`，否则 `version_mismatch` -> `WAIT` |
 
 若同时出现 snake_case 与 camelCase，**snake_case 优先**，避免双写漂移。
 
 ## 3. 失败策略
 
 - `parse_upstream(payload)`：严格模式，非法字段抛 `ContractError`。
-- `from_session_a(payload)`：生产用安全包装，任何非法/缺失/类型错误都回落为：
+- `from_session_a(payload)`：生产用安全包装，任何非法/缺失/类型错误/版本不匹配都回落为：
 
 ```json
 {"action": "wait", "score": 0.0, "reason": "upstream_contract_error:<code>", "addressed": false,

@@ -7,6 +7,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from .models import MemoryFact, UpstreamDecision
 from .text import redact
+from .version import A_TO_C_VERSION, B_TO_C_VERSION
 
 
 class ContractError(ValueError):
@@ -47,6 +48,9 @@ def parse_upstream(payload: Mapping[str, Any]) -> UpstreamDecision:
     """Strict A -> C parser. Raises ContractError; use from_session_a for fallback."""
     if not isinstance(payload, Mapping):
         raise ContractError("payload_not_mapping")
+    version = payload.get("contract_version")
+    if version is not None and version != A_TO_C_VERSION:
+        raise ContractError("version_mismatch")
     action = normalize_upstream_action(payload.get("action"))
 
     addressed = payload.get("addressed", False)
@@ -227,6 +231,9 @@ def qq_memory_fact(
     expired items, invalidated items, or empty text all fail closed.
     """
     envelope = _as_mapping(payload, "envelope")
+    version = envelope.get("contract_version")
+    if version is not None and version != B_TO_C_VERSION:
+        raise ContractError("version_mismatch")
     scope_key = _required_string(envelope.get("scope_key"), "scope_key", 64)
     if scope_key != current_scope_key:
         raise ContractError("scope_mismatch")

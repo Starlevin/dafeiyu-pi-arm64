@@ -64,7 +64,7 @@ class MigrationCheckTests(unittest.TestCase):
         self.assertEqual(1, report["totals"]["active"])
 
     def test_duplicate_item_id_fails(self):
-        report = analyze(make_state(items=[make_item(), make_item()]))
+        report = analyze(make_state(items=[make_item(), make_item(text="冲突内容")]))
         self.assertEqual("FAIL", report["verdict"])
         self.assertEqual(1, report["scopes"][0]["duplicates"]["itemIDs"])
 

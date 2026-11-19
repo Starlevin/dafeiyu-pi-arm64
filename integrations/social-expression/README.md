@@ -12,8 +12,9 @@
 
 | 部分 | 状态 |
 | --- | --- |
-| Python 风格器 / 贴纸层 / 通道构建 | **CODE PASS**（96 项单测，41 条场景 0 偏差） |
+| Python 风格器 / 贴纸层 / 通道构建 | **CODE PASS**（96 项基线；41 条场景 0 偏差） |
 | A→C / B→C 字段适配 | **CODE PASS（mock）**（`adapters.py` + 28 项针对性测试） |
+| 契约冻结 / 通道协议 | **CODE PASS（离线）**（`a2c-wire-v1` / `b2c-memory-v1` / `c-transport-v1`；新增 31 项协议/预算测试） |
 | 微信 Python 接入 | **STAGED**（契约已写，未改生产 `pi_bridge.py`） |
 | QQ Swift 接入 | **STAGED / NOT_COMPILED**（无 Swift 工具链；需主会话原生端口） |
 | 真实 QQ/微信 E2E | **NOT_RUN**（无生产写权限） |
@@ -43,9 +44,11 @@ social-expression/
 │   ├── prompting.py       # 追加到现有人格提示的紧凑约束块
 │   ├── channels.py        # QQ/微信消息构建、目标守卫、发送节流、回执判定
 │   ├── adapters.py       # A→C 动作/字段归一；QQMemoryItem→MemoryFact 脱敏适配
+│   ├── runtime_budget.py # Pi 3B 静态门控：贴纸/GIF/语气可选回退
+│   ├── version.py        # 冻结的契约版本常量
 │   ├── mock.py            # mock OneBot / mock 微信 Bridge（仅内存）
 │   └── feature_flags.py   # 三个环境开关
-├── tests/                 # 96 项 unittest；41 条人工期望场景
+├── tests/                 # 旧 96 基线 + 新增 31 项协议/预算测试
 ├── fixtures/
 │   ├── synthetic_style_cases.json
 │   ├── style_samples_extra_9.json
@@ -57,12 +60,15 @@ social-expression/
 │   ├── CONTRACT_a_to_c_wire_adapter.md
 │   ├── CONTRACT_b_to_c_qq_memory_adapter.md
 │   ├── CONTRACT_wechat_target_identity_proposal.md
+│   ├── CONTRACT_c_integration_one_pager.md
 │   └── style_table_v1.json
 ├── reports/
-│   └── style_samples_50.md  # 50 例角色风格决策层抽样
+│   ├── style_samples_50.md  # 50 例角色风格决策层抽样
+│   └── transport_protocol_freeze.md
 ├── tools/
 │   ├── evaluate.py        # 一致性 + 延迟 + 内存
 │   ├── export_contract.py # 从代码导出语言中立表
+│   ├── budget_probe.py    # 预算门控 + 本机 fallback 自检；Pi NOT_RUN
 │   └── sample_style_50.py # 41+9 抽样报告
 └── LICENSES_RESEARCH.md
 ```
@@ -72,8 +78,10 @@ social-expression/
 ```powershell
 cd <project-root>\开发工作区\2026-11-17-social-expression-c\integrations\social-expression
 python -m unittest discover -s tests -v
+python -m unittest discover -s tests -p "test_transport_protocol.py" -v
 python tools\evaluate.py
 python tools\export_contract.py
+python tools\budget_probe.py
 python tools\sample_style_50.py
 ```
 
@@ -83,7 +91,9 @@ python tools\sample_style_50.py
 
 - 41 条合成场景：决策偏差 **0**；回复 32、静默 9；贴纸选中 10 次。
 - 8200 次 `decide`：多次采样 p50 **0.038–0.050ms**、p95 **0.071–0.089ms**、max **0.26–0.85ms**（Windows 本机，单次采样会波动）。
-- `tracemalloc` 峰值 **4.2KB**；无网络、无模型、无文件。
+- `tracemalloc` 峰值 **4.2KB**（旧基线）；无网络、无模型、无文件。
+- 旧 96 项为基线；新增协议/预算测试单独计数：`test_transport_protocol.py` 31 项，全套 127 项。
+- `budget_probe.py` 输出中的本机数据只作 fallback 自检，不是 Pi 3B 实测。
 - Pi 3B 实机：**NOT_RUN**；不得把 Windows 数值当作生产耗时。
 
 ## 许可证

@@ -46,4 +46,51 @@ struct QQReplyPoliciesTests {
         #expect(reply.text.count <= 50)
         #expect(!reply.isFallback)
     }
+
+    @Test func socialStyleSettingsDefaultOffAndParseFlags() {
+        let off = QQSocialStyleSettings.load([:])
+        #expect(!off.styleEnabled)
+        #expect(!off.stickerRerankEnabled)
+        #expect(!off.shadowEnabled)
+        #expect(!off.isActive)
+        #expect(!off.needsPlan)
+
+        let shadow = QQSocialStyleSettings.load([
+            "DAFEIYU_SOCIAL_STYLE": "1",
+            "DAFEIYU_STICKER_RERANK": "1",
+            "DAFEIYU_SOCIAL_STYLE_SHADOW": "1"
+        ])
+        #expect(shadow.styleEnabled)
+        #expect(shadow.stickerRerankEnabled)
+        #expect(shadow.shadowEnabled)
+        #expect(!shadow.isActive)
+        #expect(shadow.logsStyle)
+
+        let active = QQSocialStyleSettings.load([
+            "DAFEIYU_SOCIAL_STYLE": "1",
+            "DAFEIYU_STICKER_RERANK": "1",
+            "DAFEIYU_SOCIAL_STYLE_SHADOW": "0"
+        ])
+        #expect(active.isActive)
+        #expect(active.stickerRerankEnabled)
+    }
+
+    @Test func socialStyleDirectorPlansScenesAndStickerCooldown() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let help = QQSocialStyleDirector.plan(for: "启动报错怎么解决", configuredMaxChars: 160, now: now)
+        #expect(help.scene == .seriousHelp)
+        #expect(help.tone == .neutral)
+        #expect(help.stickerIntent == .none)
+
+        let celebration = QQSocialStyleDirector.plan(for: "面试通过了太棒", configuredMaxChars: 160, now: now)
+        #expect(celebration.scene == .celebration)
+        #expect(celebration.tone == .celebratory)
+        #expect(celebration.stickerIntent == .preferred)
+        #expect(celebration.maxChars == 50)
+        #expect(celebration.logLine(mode: "active").contains("[social_style] scene=celebration"))
+
+        let cooled = QQSocialStyleDirector.plan(for: "面试通过了太棒", configuredMaxChars: 160,
+                                                lastStickerAt: now.addingTimeInterval(-60), now: now)
+        #expect(cooled.stickerIntent == .none)
+    }
 }

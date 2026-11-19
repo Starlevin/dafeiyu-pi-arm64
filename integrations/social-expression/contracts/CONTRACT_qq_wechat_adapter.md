@@ -1,6 +1,7 @@
 # 契约 C：QQ / 微信通道接入（主会话执行）
 
-版本：`social-style-c1`  
+版本：`social-style-c1` / 通道 `c-transport-v1`  
+冻结单页：`CONTRACT_c_integration_one_pager.md`（目标 ID、回执字段、重复/撤回/重试、预算回退以此页为准）。  
 状态：**接口提案 + 可运行 Python 模块**。本会话没有生产写权限，未修改 `QQEngine.swift`、`pi_bridge.py`、`tx_guard.py`。
 
 ## 0. 交付状态
@@ -151,7 +152,7 @@ QQ 核心是 Swift，不能 import Python。主会话二选一：
 
 ## 5. 主会话验收清单
 
-- [ ] `python -m unittest discover -s tests` 全绿（当前 96 项）。
+- [ ] `python -m unittest discover -s tests` 全绿（旧 96 项基线；新增协议测试单独计数）。
 - [ ] 微信 mock：准确群名、@对象、贴纸回执、图片 fallback、节流、错发守卫。
 - [ ] QQ Swift 端口编译通过（本会话 NOT_COMPILED）。
 - [ ] QQ mock/真实 OneBot：准确群号、@QQ、贴纸 `visible_outgoing` 回执。
