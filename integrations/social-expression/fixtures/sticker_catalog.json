@@ -1,0 +1,110 @@
+{
+  "version": 1,
+  "note": "合成贴纸元数据，仅用于选择层单测；不包含真实文件、路径或群成员素材。",
+  "items": [
+    {
+      "id": "st_joy_01", "title": "转圈庆祝", "emotion": "joy",
+      "tags": ["celebration", "win", "happy", "庆祝"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "original-drawing",
+      "origin": "original", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 2, "intensity_max": 3, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "caption": "开心地转一圈"
+    },
+    {
+      "id": "st_joy_02", "title": "竖大拇指", "emotion": "joy",
+      "tags": ["celebration", "congrats"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "original-drawing",
+      "origin": "original", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 1, "intensity_max": 2, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "caption": "不错不错"
+    },
+    {
+      "id": "st_laugh_01", "title": "偷笑", "emotion": "teasing",
+      "tags": ["banter", "laugh", "smug", "调侃"],
+      "license": "CC-BY-4.0", "author": "dafeiyu-art", "source": "licensed-drawing",
+      "origin": "licensed", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 1, "intensity_max": 2, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "caption": "憋笑"
+    },
+    {
+      "id": "st_context_game", "title": "排位冲", "emotion": "teasing",
+      "tags": ["banter", "game", "第五人格", "排位"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "original-drawing",
+      "origin": "original", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 2, "intensity_max": 3, "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "caption": "上分去"
+    },
+    {
+      "id": "st_sleep_01", "title": "盖被子", "emotion": "sleepy",
+      "tags": ["sleep", "goodnight", "晚安", "休息"],
+      "license": "CC-BY-SA-4.0", "author": "dafeiyu-art", "source": "licensed-drawing",
+      "origin": "licensed", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 0, "intensity_max": 1, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "caption": "晚安"
+    },
+    {
+      "id": "st_hello_01", "title": "挥手", "emotion": "joy",
+      "tags": ["greeting", "hello", "问候"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "original-drawing",
+      "origin": "original", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 1, "intensity_max": 2, "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "caption": "来了来了"
+    },
+    {
+      "id": "st_neutral_01", "title": "点头", "emotion": "neutral",
+      "tags": ["chat", "neutral", "日常"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "bundled",
+      "origin": "bundled", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 0, "intensity_max": 1, "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "caption": "懂了"
+    },
+    {
+      "id": "st_sad_01", "title": "拍拍", "emotion": "sad",
+      "tags": ["comfort", "sad", "安慰"],
+      "license": "CC-BY-4.0", "author": "dafeiyu-art", "source": "licensed-drawing",
+      "origin": "licensed", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 0, "intensity_max": 1, "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "caption": "拍拍"
+    },
+    {
+      "id": "st_member_photo", "title": "群友头像", "emotion": "joy",
+      "tags": ["celebration"],
+      "license": "", "author": "", "source": "chat-media",
+      "origin": "member_photo", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 2, "intensity_max": 3, "sha256": "",
+      "caption": "未经授权"
+    },
+    {
+      "id": "st_unlicensed", "title": "来源不明", "emotion": "joy",
+      "tags": ["celebration"],
+      "license": "", "author": "", "source": "unknown",
+      "origin": "licensed", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 2, "intensity_max": 3, "sha256": "",
+      "caption": "无许可证"
+    },
+    {
+      "id": "st_forwarded", "title": "转发图", "emotion": "joy",
+      "tags": ["celebration"],
+      "license": "unknown", "author": "unknown", "source": "forwarded",
+      "origin": "forwarded_unknown", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 2, "intensity_max": 3, "sha256": "",
+      "caption": "转发来源不明"
+    },
+    {
+      "id": "st_private_only", "title": "私下安慰", "emotion": "sad",
+      "tags": ["comfort"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "original-drawing",
+      "origin": "original", "group_ok": false, "private_ok": true, "public_sharing": true,
+      "intensity_min": 0, "intensity_max": 1, "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "caption": "只在私聊"
+    },
+    {
+      "id": "st_unsafe", "title": "去死吧", "emotion": "teasing",
+      "tags": ["banter"],
+      "license": "CC0-1.0", "author": "dafeiyu-art", "source": "original-drawing",
+      "origin": "original", "group_ok": true, "private_ok": true, "public_sharing": true,
+      "intensity_min": 2, "intensity_max": 3, "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "caption": "攻击性"
+    }
+  ]
+}

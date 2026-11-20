@@ -10,6 +10,9 @@ import UniformTypeIdentifiers
 #endif
 
 struct QQIncomingImages {
+    #if os(Linux)
+    var session: URLSession? = nil
+    #else
     private static let ephemeralSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil; config.httpCookieStorage = nil
@@ -17,6 +20,7 @@ struct QQIncomingImages {
         return URLSession(configuration: config)
     }()
     var session: URLSession = ephemeralSession
+    #endif
     static func allowedURL(_ value: String?) -> URL? {
         guard let value, value.utf8.count <= 8192, var url = URLComponents(string: value),
               ["http", "https"].contains(url.scheme ?? ""), url.user == nil, url.password == nil, url.port == nil,
@@ -26,24 +30,34 @@ struct QQIncomingImages {
     }
     func load(_ value: String?, maxFrames: Int = 6) async throws -> [Data] {
         guard let url = Self.allowedURL(value) else { throw AppFailure.message("图片下载地址不受支持") }
-        var request = URLRequest(url: url); request.timeoutInterval = 15
         #if os(Linux)
-        let (linuxData, response) = try await session.boundedData(for: request, limit: 8_000_000)
+        if let session {
+            var request = URLRequest(url: url); request.timeoutInterval = 15
+            let (data, response) = try await session.boundedData(for: request, limit: 8_000_000)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                throw AppFailure.message("图片暂时无法下载")
+            }
+            try Task.checkCancellation()
+            return try Self.frames(data, maxFrames: maxFrames)
+        }
+        // A short-lived HTTPS URLSession can crash FoundationNetworking while tearing down libcurl.
+        let frames = try await Task.detached(priority: .utility) {
+            try LinuxImages.downloadFrames(url, maxFrames: maxFrames)
+        }.value
+        try Task.checkCancellation()
+        return frames
         #else
+        var request = URLRequest(url: url); request.timeoutInterval = 15
         let (bytes, response) = try await session.bytes(for: request, delegate: QQImageNoRedirect())
-        #endif
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, response.expectedContentLength <= 8_000_000 else { throw AppFailure.message("图片暂时无法下载") }
         var data = Data()
-        #if os(Linux)
-        data = linuxData
-        #else
         for try await byte in bytes {
             guard data.count < 8_000_000 else { throw AppFailure.message("图片太大，未进行识别") }
             data.append(byte)
         }
-        #endif
         try Task.checkCancellation()
         return try Self.frames(data, maxFrames: maxFrames)
+        #endif
     }
     static func frames(_ data: Data, maxFrames: Int = 6) throws -> [Data] {
         #if os(Linux)

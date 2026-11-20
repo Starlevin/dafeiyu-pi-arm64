@@ -83,6 +83,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mode == "flaky" and count == 1:
             self._send(500, {"error": {"message": "transient"}})
             return
+        if mode == "bad_json":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "24")
+            self.end_headers()
+            self.wfile.write(b'{"choices": [broken-json}')
+            return
         if mode == "slow":
             time.sleep(3)
         self._send(200, {

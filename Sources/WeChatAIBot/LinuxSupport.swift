@@ -19,21 +19,27 @@ enum Keychain {
 
 enum LinuxImages {
     static func process(_ data: Data, mode: String, options: [String: Int] = [:]) throws -> [Data] {
-        guard data.count <= 20_000_000, let resources = RuntimeResources.directory else {
-            throw AppFailure.message("图片过大或资源目录不可用")
-        }
+        guard data.count <= 20_000_000 else { throw AppFailure.message("图片过大") }
+        return try run(["image": data.base64EncodedString(), "mode": mode, "options": options], timeout: "20")
+    }
+
+    static func downloadFrames(_ url: URL, maxFrames: Int) throws -> [Data] {
+        try run(["url": url.absoluteString, "mode": "frames", "options": ["maxFrames": maxFrames]], timeout: "30")
+    }
+
+    private static func run(_ payload: [String: Any], timeout: String) throws -> [Data] {
+        guard let resources = RuntimeResources.directory else { throw AppFailure.message("图片资源目录不可用") }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("dafeiyu-image-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let input = directory.appendingPathComponent("input"), output = directory.appendingPathComponent("output")
-        let payload: [String: Any] = ["image": data.base64EncodedString(), "mode": mode, "options": options]
         try JSONSerialization.data(withJSONObject: payload).write(to: input)
         FileManager.default.createFile(atPath: output.path, contents: nil, attributes: [.posixPermissions: 0o600])
         let stdin = try FileHandle(forReadingFrom: input), stdout = try FileHandle(forWritingTo: output)
         defer { try? stdin.close(); try? stdout.close() }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/timeout")
-        process.arguments = ["--signal=KILL", "20", "/usr/bin/python3", resources.appendingPathComponent("Linux/image-helper.py").path]
+        process.arguments = ["--signal=KILL", timeout, "/usr/bin/python3", resources.appendingPathComponent("Linux/image-helper.py").path]
         process.standardInput = stdin; process.standardOutput = stdout; process.standardError = FileHandle.nullDevice
         try process.run(); process.waitUntilExit()
         guard process.terminationStatus == 0, let size = try output.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= 20_000_000,

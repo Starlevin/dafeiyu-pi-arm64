@@ -129,7 +129,7 @@ struct DeepSeekClient {
     }
     func reply(key: String, config: BotConfig, rule: ChatRule, history: [ChatTurn], text: String, jsonOutput: Bool = false, thinkingEnabled: Bool = false, images: [Data] = [],
                toolHandler: (@MainActor @Sendable (String, String) async throws -> ModelToolResult)? = nil,
-               onlineToolsEnabled: Bool = true, imageGenerationEnabled: Bool = false, artworkEnabled: Bool = false,
+               onlineToolsEnabled: Bool = true, socialToolsEnabled: Bool = false, imageGenerationEnabled: Bool = false, artworkEnabled: Bool = false,
                reserve: @escaping @Sendable () async throws -> Void) async throws -> ModelResult {
         var messages: [[String: Any]] = [["role": "system", "content": rule.prompt.isEmpty ? config.prompt : rule.prompt]]
         if thinkingEnabled && !history.isEmpty {
@@ -183,7 +183,7 @@ struct DeepSeekClient {
             }
             if jsonOutput && (toolHandler == nil || round > 0) { parameters["response_format"] = ["type": "json_object"] }
             if toolHandler != nil && round == 0 {
-                parameters["tools"] = (onlineToolsEnabled ? QQOnlineTools.definitions : []) + (imageGenerationEnabled ? [QQImageGenerator.definition] : []) + (artworkEnabled ? [QQArtworkLibrary.definition] : [])
+                parameters["tools"] = (onlineToolsEnabled ? QQOnlineTools.definitions : []) + (socialToolsEnabled ? [QQSocialTools.definition] : []) + (imageGenerationEnabled ? [QQImageGenerator.definition] : []) + (artworkEnabled ? [QQArtworkLibrary.definition] : [])
                 parameters["tool_choice"] = "auto"
             }
             let body = try JSONSerialization.data(withJSONObject: parameters)
@@ -193,7 +193,15 @@ struct DeepSeekClient {
                 do {
                     let data = try await request(path: "chat/completions", key: key, body: body,
                                                  timeout: thinkingEnabled ? 90 : provider.requestTimeout)
-                    response = try JSONDecoder().decode(Response.self, from: data); break
+                    do {
+                        response = try JSONDecoder().decode(Response.self, from: data)
+                    } catch {
+                        // Keep malformed upstream bodies distinguishable from HTTP/transport failures.
+                        // The generic JSONDecoder localizedDescription ("data is not in the correct format")
+                        // gives no stage context and was the Observed 22:21 QQ failure text.
+                        throw AppFailure.message("模型响应格式无效（阶段：chat_completion_response）")
+                    }
+                    break
                 } catch let error as HTTPFailure where error.isRetryable && attempt < provider.maxRetries {
                     // 超时与 5xx 指数退避重试；429 在免费额度场景通常意味着配额耗尽，
                     // 退避次数用尽后如实上报，不自动切换到任何付费方案。
@@ -316,7 +324,7 @@ struct DeepSeekClient {
             let captions = options.map { ["id": $0.id, "配字或画面": $0.title, "适用情境": $0.context ?? $0.title] }
             fastRule.prompt += "\n最终 JSON 在 text、emotion、intensity 外增加 sticker_id 字段，值为下列候选的准确 id 或 null。按当前对话选择：图片配字、角色立场、动作与语气必须一起合适，不能仅凭情绪相同就选；无合适图一律 null。最多一张，不输出任何路径或 URL。\n本轮可选表情 JSON：\n" + String(decoding: try JSONSerialization.data(withJSONObject: captions, options: [.sortedKeys]), as: UTF8.self)
         }
-        fastRule.prompt += "\n保持简短。只输出最终 JSON 短答，不解释推理过程。"
+        fastRule.prompt += "\n按本轮角色提示的场景长度生成合适回复；简单问题简答，认真问题可以完整解释，不要因为 fast 模式硬压成一句。只输出最终 JSON，不展示推理过程。"
         var result = try await reply(key: key, config: config, rule: fastRule, history: history, text: text,
                                      jsonOutput: true, thinkingEnabled: false, images: images, reserve: reserve)
         if !options.isEmpty, let data = result.text.data(using: .utf8),
@@ -341,7 +349,7 @@ struct DeepSeekClient {
     //              所以只有确实要用工具时才必须二次核验。默认 true 保持既有行为不变。
     func reviewedQQReply(key: String, config: BotConfig, rule: ChatRule, history: [ChatTurn], text: String,
                          images: [Data] = [], toolHandler: (@MainActor @Sendable (String, String) async throws -> ModelToolResult)? = nil,
-               onlineToolsEnabled: Bool = true, imageGenerationEnabled: Bool = false, artworkEnabled: Bool = false,
+               onlineToolsEnabled: Bool = true, socialToolsEnabled: Bool = false, imageGenerationEnabled: Bool = false, artworkEnabled: Bool = false,
                          stickerOptions: [QQStickerLibrary.Item] = [], proactive: Bool = false,
                          userText: String = "", toolsMayRun: Bool = true,
                          reserve: @escaping @Sendable () async throws -> Void) async throws -> ModelResult {
@@ -373,7 +381,7 @@ struct DeepSeekClient {
             perfLog("回退双阶段，原因=\(reason ?? "")")
         }
         var draft = try await reply(key: key, config: config, rule: generationRule, history: history, text: effectiveText,
-            jsonOutput: true, thinkingEnabled: true, images: effectiveImages, toolHandler: toolHandler, onlineToolsEnabled: onlineToolsEnabled, imageGenerationEnabled: imageGenerationEnabled, artworkEnabled: artworkEnabled, reserve: reserve)
+            jsonOutput: true, thinkingEnabled: true, images: effectiveImages, toolHandler: toolHandler, onlineToolsEnabled: onlineToolsEnabled, socialToolsEnabled: socialToolsEnabled, imageGenerationEnabled: imageGenerationEnabled, artworkEnabled: artworkEnabled, reserve: reserve)
         perfLog("阶段1 草稿 耗时=\(String(format: "%.1f", draft.seconds))s tokens=\(draft.tokens)")
         if proactive {
             draft = participationResult(draft)

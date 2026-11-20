@@ -60,7 +60,41 @@ struct QQMemoryBookTests {
         b.append(QQMemoryEvent(id: "bot", subject: "BOT", text: "BOT 猜测", at: now))
         #expect(b.pending.count == 1)
         for i in 0..<140 { b.append(QQMemoryEvent(id: "bulk\(i)", subject: "PEER", text: "合成消息", at: now)) }
-        #expect(b.pending.count == 128); #expect(b.recent.count == 24); #expect(b.droppedEvents == 13)
+        #expect(b.pending.count == 128); #expect(b.archivedPending?.count == 13)
+        #expect(b.queueCount == 141); #expect(b.droppedEvents == 0); #expect((b.refusedEvents ?? 0) == 0)
+        #expect(b.recent.count == 24)
+    }
+    @Test func hardCapRefusesNewExcerptsWithoutDeletingQueuedOnes() throws {
+        var book = QQMemoryBook()
+        for i in 0..<QQMemoryBook.pendingHardLimit {
+            let accepted = book.append(QQMemoryEvent(id: "cap\(i)", subject: "PEER", text: "队列消息\(i)", at: now.addingTimeInterval(Double(i))))
+            #expect(accepted)
+        }
+        #expect(book.queueCount == QQMemoryBook.pendingHardLimit)
+        #expect(book.pending.count == QQMemoryBook.pendingSoftLimit)
+        #expect(book.archivedPending?.count == QQMemoryBook.pendingHardLimit - QQMemoryBook.pendingSoftLimit)
+        let refused = QQMemoryEvent(id: "over-cap", subject: "PEER", text: "硬上限后的新消息", at: now.addingTimeInterval(999))
+        let refusedAccepted = book.append(refused)
+        #expect(!refusedAccepted)
+        #expect((book.refusedEvents ?? 0) == 1)
+        #expect(book.queueCount == QQMemoryBook.pendingHardLimit)
+        #expect(book.lastQueueWarningAt == refused.at)
+    }
+    @Test func archivedExcerptsSurviveReloadAndApplyAcrossHotColdBoundary() throws {
+        var book = QQMemoryBook()
+        for i in 0..<141 {
+            book.append(QQMemoryEvent(id: "archive\(i)", subject: "PEER", text: "归档消息\(i)", at: now.addingTimeInterval(Double(i))))
+        }
+        let loaded = try JSONDecoder().decode(QQMemoryBook.self, from: JSONEncoder().encode(book))
+        #expect(loaded.queueCount == 141)
+        #expect(loaded.archivedPending?.count == 13)
+        let oldest = try #require(loaded.batch().first)
+        #expect(oldest.id == "archive0")
+        var mutable = loaded
+        let delta = try JSONSerialization.data(withJSONObject: ["summary": "", "changes": []])
+        try mutable.apply(try QQMemoryDelta.decode(String(decoding: delta, as: UTF8.self)), batch: [oldest], candidateIDs: [], now: now)
+        #expect(mutable.queueCount == 140)
+        #expect(!(mutable.archivedPending ?? []).contains { $0.id == oldest.id })
     }
     @Test func retrievalBenchmarkAndExpiration() throws {
         var book = QQMemoryBook()
@@ -74,5 +108,59 @@ struct QQMemoryBookTests {
         print("QQ memory retrieval benchmark: 256 facts, mean \(milliseconds) ms/query")
         #expect(milliseconds < 50)
         #expect(index.search("晚饭", subject: "MEMBER_42", now: now.addingTimeInterval(366 * 86400)).isEmpty)
+    }
+
+    @Test func perSpeakerRetrievalNeverLeaksOtherGroupMembers() throws {
+        var book = QQMemoryBook()
+        let a = QQMemoryEvent(id: "member-a", subject: "MEMBER_A",
+                              text: "我喜欢旅行和星空摄影", at: now)
+        let b = QQMemoryEvent(id: "member-b", subject: "MEMBER_B",
+                              text: "我喜欢旅行和秘密收藏模型", at: now)
+        book.append(a)
+        try book.apply(delta(source: a, text: "喜欢旅行和星空摄影"), batch: [a], candidateIDs: [], now: now)
+        book.append(b)
+        try book.apply(delta(source: b, text: "喜欢旅行和秘密收藏模型"), batch: [b], candidateIDs: [], now: now)
+        let index = QQMemoryIndex(book.items)
+        let result = index.search("喜欢旅行", subject: "MEMBER_A", now: now)
+        #expect(!result.isEmpty)
+        #expect(result.allSatisfy { $0.subject == "MEMBER_A" })
+        let context = index.context("旅行", subject: "MEMBER_A", characters: 1200, now: now)
+        #expect(context.contains("星空摄影"))
+        #expect(!context.contains("秘密收藏模型"))
+        let peer = index.context("旅行", subject: "MEMBER_B", characters: 1200, now: now)
+        #expect(peer.contains("秘密收藏模型"))
+        #expect(!peer.contains("星空摄影"))
+    }
+
+    @Test func duplicateMemoryFactsNormalizePunctuationWithoutErasingCorrections() throws {
+        var book = QQMemoryBook()
+        let first = QQMemoryEvent(id: "one", subject: "PEER", text: "我喜欢清淡的晚饭", at: now)
+        book.append(first)
+        try book.apply(delta(source: first, text: "喜欢清淡的晚饭"), batch: [first], candidateIDs: [], now: now)
+        let same = QQMemoryEvent(id: "two", subject: "PEER", text: "我还是喜欢清淡的晚饭。", at: now.addingTimeInterval(10))
+        book.append(same)
+        try book.apply(delta(source: same, text: "喜欢 清淡的晚饭！"), batch: [same], candidateIDs: [], now: now.addingTimeInterval(10))
+        #expect(book.items.filter { $0.current(now.addingTimeInterval(10)) && $0.kind == "preference" }.count == 1)
+        let correction = QQMemoryEvent(id: "three", subject: "PEER", text: "我现在不喜欢清淡的晚饭", at: now.addingTimeInterval(20))
+        book.append(correction)
+        let old = try #require(book.items.first { $0.current(now.addingTimeInterval(20)) && $0.kind == "preference" })
+        try book.apply(delta(source: correction, text: "现在不喜欢清淡的晚饭", replaces: [old.id]),
+                       batch: [correction], candidateIDs: [old.id], now: now.addingTimeInterval(20))
+        let index = QQMemoryIndex(book.items)
+        #expect(index.context("晚饭", subject: "PEER", characters: 500, now: now.addingTimeInterval(21)).contains("不喜欢"))
+    }
+
+    @Test func removePendingOnlyDropsCommittedIDsAndKeepsOthers() throws {
+        var book = QQMemoryBook()
+        let a = QQMemoryEvent(id: "a", subject: "PEER", text: "第一条", at: now)
+        let b = QQMemoryEvent(id: "b", subject: "PEER", text: "第二条", at: now.addingTimeInterval(1))
+        let appendedA = book.append(a)
+        let appendedB = book.append(b)
+        #expect(appendedA)
+        #expect(appendedB)
+        book.removePending(ids: ["a"])
+        #expect(book.pending.map(\.id) == ["b"])
+        #expect(book.queueCount == 1)
+        #expect(book.knownIDs.contains("a"))
     }
 }

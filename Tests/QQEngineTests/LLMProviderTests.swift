@@ -260,5 +260,21 @@ import BotCore
             }
         }
     }
+
+    @Test func malformedJSONIsStructuredFailure() async throws {
+        try await withFixture { port in
+            let client = makeClient(port, mode: "bad_json", retries: 2)
+            do {
+                _ = try await reply(client)
+                Issue.record("非法 JSON 不应被视为成功")
+            } catch let failure as AppFailure {
+                #expect(failure.localizedDescription.contains("模型响应格式无效"))
+            } catch {
+                Issue.record("非法 JSON 失败类型不符合预期：\(type(of: error))")
+            }
+            let snapshot = try await stats(port: port, mode: "bad_json")
+            #expect(snapshot["count"] as? Int == 1)
+        }
+    }
 }
 #endif

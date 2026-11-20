@@ -133,6 +133,11 @@ public struct Usage: Codable, Sendable {
         guard calls < limit else { return false }
         calls += 1; return true
     }
+    public func canReserve(limit: Int, now: Date = Date()) -> Bool {
+        var copy = self
+        copy.rollover(now: now)
+        return copy.calls < limit
+    }
 }
 
 /// All async work carries an epoch. Pause, edits, and restart invalidate old work.

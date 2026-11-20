@@ -1,0 +1,55 @@
+{
+  "available": true,
+  "reason": "",
+  "startedAt": 1762000000,
+  "rev": 42,
+  "dayCount": 3,
+  "today": {
+    "totals": { "in": 12480, "out": 3160, "total": 15640, "calls": 87, "missing": 2, "callers": 2 },
+    "providers": [
+      { "provider": "openai-compat@loopback-gw", "model": "synth-chat-large",
+        "in": 12000, "out": 3000, "total": 15000, "calls": 80, "missing": 0 },
+      { "provider": "chatgpt-oauth@api.openai.com", "model": "synth-oauth-model",
+        "in": 480, "out": 160, "total": 640, "calls": 7, "missing": 2 }
+    ],
+    "empty": false
+  },
+  "days7": {
+    "totals": { "in": 48210, "out": 12030, "total": 60240, "calls": 312, "missing": 5, "callers": 3 },
+    "providers": [
+      { "provider": "openai-compat@loopback-gw", "model": "synth-chat-large",
+        "in": 40000, "out": 10000, "total": 50000, "calls": 260, "missing": 0 },
+      { "provider": "openai-compat@echo-provider", "model": "synth-backup-small",
+        "in": 7800, "out": 1900, "total": 9700, "calls": 42, "missing": 3 },
+      { "provider": "chatgpt-oauth@api.openai.com", "model": "synth-oauth-model",
+        "in": 410, "out": 130, "total": 540, "calls": 10, "missing": 2 }
+    ],
+    "empty": false
+  },
+  "since": {
+    "totals": { "in": 99010, "out": 24800, "total": 123810, "calls": 640, "missing": 11, "callers": 3 },
+    "providers": [
+      { "provider": "openai-compat@loopback-gw", "model": "synth-chat-large",
+        "in": 80000, "out": 20000, "total": 100000, "calls": 520, "missing": 1 },
+      { "provider": "openai-compat@echo-provider", "model": "synth-backup-small",
+        "in": 18500, "out": 4700, "total": 23200, "calls": 108, "missing": 8 },
+      { "provider": "chatgpt-oauth@api.openai.com", "model": "synth-oauth-model",
+        "in": 510, "out": 100, "total": 610, "calls": 12, "missing": 2 }
+    ],
+    "empty": false
+  },
+  "coverage": {
+    "inScope": [
+      "model-hub /v1/chat/completions 的每一次上游调用（含主通道与 fallback 备用模型）",
+      "OpenAI 兼容 chat（chat/completions 非流式）",
+      "OpenAI Responses（非流式）",
+      "ChatGPT OAuth Responses 流式（末帧 response.completed.response.usage）"
+    ],
+    "notInScope": [
+      "引擎直连的第三方 provider 端点（不经过 model-hub）",
+      "第三方图像生成接口",
+      "上游 4xx 且未给 usage：计入调用数与缺用量"
+    ],
+    "zeroToken": ["/v1/models、/api/status 等本地只读接口"]
+  }
+}

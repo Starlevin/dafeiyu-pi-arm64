@@ -7,6 +7,7 @@ public struct QQGroupContext: Sendable {
     private let account: String
     public let recentImages: [(label: String, images: [QQIncomingImage])]
     public let hasUnansweredText: Bool
+    public let hasTriggerText: Bool
     public let hasRecentMedia: Bool
 
     public init?(events: [QQMemoryEvent], through id: String, messages: [String: QQIncoming] = [:], account: String = "") {
@@ -40,9 +41,22 @@ public struct QQGroupContext: Sendable {
                 event.text.contains("（对方发来图片或表情包") || event.text.contains("（群成员发送了媒体或卡片"))
         }
         let sinceReply = self.events.lastIndex(where: { $0.subject == "BOT" }).map { $0 + 1 } ?? 0
+        let trigger = Self.readableText(events[anchor].text)
+        let triggerMessage = messages[id]
+        let refersToNearbyMedia = trigger.range(
+            of: "^(?:(?:请问|帮我看看)[，： ]*)?(?:这[个张幅段]|那[个张幅段]|图里|图片里|画面里|视频里|上图|上一张|上一条|刚才那张)",
+            options: .regularExpression
+        ) != nil
+        hasTriggerText = events[anchor].subject != "BOT" && !trigger.isEmpty &&
+            triggerMessage?.replyTo == nil && triggerMessage?.images.isEmpty != false && !refersToNearbyMedia
         hasUnansweredText = self.events.dropFirst(sinceReply).contains { event in
             event.subject != "BOT" && !Self.readableText(event.text).isEmpty
         }
+    }
+
+    /// 最近一条 BOT 发言（已去除传输占位符）；仅供主动决策判断“刚说过/重复话题”，不参与生成。
+    public var lastBotEvent: (text: String, at: Date)? {
+        events.last(where: { $0.subject == "BOT" }).map { (Self.readableText($0.text), $0.at) }
     }
 
     public func context(characters: Int) -> String {
@@ -72,8 +86,16 @@ public struct QQGroupContext: Sendable {
 
     public func speaker(for id: String) -> String? { events.first { $0.id == id }?.subject }
 
+    /// 最近时间线的可读文本（已去除传输占位符，限长），供只读话题识别使用。
+    /// 不含 message id、speaker 标签或图片数据；调用方仍须自行限长。
+    public func eventsText(limit: Int = 8) -> [String] {
+        events.suffix(limit).map { String(Self.readableText($0.text).prefix(500)) }
+            .filter { !$0.isEmpty }
+    }
+
     public static let participationPrompt = """
     [QQ_PARTICIPATION] 本轮是主动加入群话题，只是一次是否适合开口的评估，不保证发言。先判断当前话题是否理解、谁对谁说、有无自然接话点。
+    最新发言明确向全群提问或征求意见，且可以直接根据文字给出具体回答或建议时，主动给出一条简短的接话。若相邻媒体与该文字话题无关，忽略它。
     以下情形保持安静：依赖未读图片/转发/卡片，指代不明；只是别人点名互聊或主人对其他成员说话；只有哈哈、复读、打卡、收尾、孤立表情；旧话题已被 BOT 回应；缺少游戏等必要背景，只能泛泛反问或编梗；回复不能增加新的相关内容。不要为了显示在场问“大家在聊什么”、复述关键词或催人给准信。允许读懂一张普通表情后仍不参与。
     完整信息不等于值得插话。成员在等某个具体的人回答、介绍自己的经历或发照片时，留给当事人回答；不要补一句泛泛的鼓励、等你好消息或带头评价，主人也不例外。缺乏具体接话价值的客套句一律不发。主动发言默认面向全群，不能把触发者、话题主角和回复对象混成同一个你。只有能自然接住眼前共同话题、明确面向大家的问题或有把握的玩笑时才开口。一句短梗比事实说教合适时就接梗，但不编造人物行为。被纠正就承认那个具体错误，不为了挽尊再发明严重后果。人设不能成为强行嘲讽的理由。
     输出格式覆盖前面的三项要求，必须包含布尔 participate，及 text、emotion、intensity；participate=false 时 text=""、emotion="neutral"、intensity=0，程序不会发送任何内容或表情。participate=true 时遵守原字数和短答规则。校对阶段同样可改为 false；若另有 sticker_id 要求则保留该字段。只输出 JSON，不解释是否参与。

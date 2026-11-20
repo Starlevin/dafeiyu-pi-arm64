@@ -1,0 +1,301 @@
+{
+  "version": "social-style-c1",
+  "note": "语言中立决策表，供会话 A / QQ Swift 端口 / 微信 Python 适配器共用；数值与 policy.py 保持一致。",
+  "platforms": [
+    "qq",
+    "wechat"
+  ],
+  "scopes": [
+    "group",
+    "private"
+  ],
+  "enums": {
+    "action": [
+      "reply",
+      "silence"
+    ],
+    "length": [
+      "short",
+      "medium",
+      "long"
+    ],
+    "tone": [
+      "neutral",
+      "playful",
+      "gentle",
+      "dry",
+      "celebratory",
+      "sleepy"
+    ],
+    "humor": [
+      "none",
+      "light",
+      "self_deprecating"
+    ],
+    "quote": [
+      "none",
+      "reply_to_current",
+      "reference_previous"
+    ],
+    "sticker_intent": [
+      "none",
+      "optional",
+      "preferred"
+    ]
+  },
+  "profiles": {
+    "qq_group": {
+      "max_chars": 60,
+      "max_bubbles": 1,
+      "short_budget": 34,
+      "medium_budget": 58
+    },
+    "qq_private": {
+      "max_chars": 60,
+      "max_bubbles": 1,
+      "short_budget": 34,
+      "medium_budget": 58
+    },
+    "wechat_group": {
+      "max_chars": 70,
+      "max_bubbles": 2,
+      "short_budget": 34,
+      "medium_budget": 58
+    },
+    "wechat_private": {
+      "max_chars": 140,
+      "max_bubbles": 2,
+      "short_budget": 34,
+      "medium_budget": 58
+    }
+  },
+  "scenes": {
+    "crisis": {
+      "length": "short",
+      "tone": "gentle",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.9
+    },
+    "credential_attack": {
+      "length": "short",
+      "tone": "dry",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.95
+    },
+    "serious_help": {
+      "length": "medium",
+      "tone": "neutral",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "sad": {
+      "length": "short",
+      "tone": "gentle",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "tired": {
+      "length": "short",
+      "tone": "gentle",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "optional",
+      "bubbles": 1,
+      "confidence": 0.7
+    },
+    "conflict": {
+      "length": "short",
+      "tone": "gentle",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.75
+    },
+    "complaint": {
+      "length": "short",
+      "tone": "dry",
+      "humor": "self_deprecating",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.75
+    },
+    "celebration": {
+      "length": "short",
+      "tone": "celebratory",
+      "humor": "light",
+      "quote": "none",
+      "question": false,
+      "sticker": "preferred",
+      "bubbles": 1,
+      "confidence": 0.85
+    },
+    "sleep": {
+      "length": "short",
+      "tone": "sleepy",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "optional",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "greeting": {
+      "length": "short",
+      "tone": "playful",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "optional",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "media_question": {
+      "length": "medium",
+      "tone": "neutral",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.75
+    },
+    "game_talk": {
+      "length": "medium",
+      "tone": "playful",
+      "humor": "light",
+      "quote": "none",
+      "question": false,
+      "sticker": "optional",
+      "bubbles": 1,
+      "confidence": 0.7
+    },
+    "banter": {
+      "length": "short",
+      "tone": "playful",
+      "humor": "light",
+      "quote": "none",
+      "question": false,
+      "sticker": "optional",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "forward": {
+      "length": "short",
+      "tone": "dry",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "detailed_request": {
+      "length": "long",
+      "tone": "neutral",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "question": {
+      "length": "medium",
+      "tone": "neutral",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.7
+    },
+    "media_unreadable": {
+      "length": "short",
+      "tone": "gentle",
+      "humor": "none",
+      "quote": "none",
+      "question": true,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "sensitive": {
+      "length": "short",
+      "tone": "gentle",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "none",
+      "bubbles": 1,
+      "confidence": 0.8
+    },
+    "chitchat": {
+      "length": "short",
+      "tone": "playful",
+      "humor": "none",
+      "quote": "none",
+      "question": false,
+      "sticker": "optional",
+      "bubbles": 1,
+      "confidence": 0.6
+    }
+  },
+  "thresholds": {
+    "ambient_relevance": 0.7,
+    "quiet_start_hour": 0,
+    "quiet_end_hour": 8,
+    "floor_window_seconds": 120.0,
+    "floor_min_gap_seconds": 30.0,
+    "floor_rate_window_seconds": 300.0,
+    "floor_rate_max": 3,
+    "repeat_similarity": 0.72,
+    "repeat_prompt_similarity": 0.8
+  },
+  "sticker_policy": {
+    "min_gap_seconds": {
+      "qq": 180.0,
+      "wechat": 150.0
+    },
+    "min_replies": {
+      "qq": 3,
+      "wechat": 2
+    },
+    "max_per_hour": 2,
+    "item_repeat_seconds": 86400,
+    "sender_repeat_seconds": 1800,
+    "score_threshold": 2.5,
+    "allowed_origins": [
+      "bundled",
+      "original",
+      "licensed"
+    ],
+    "blocked_origins": [
+      "member_photo",
+      "member_avatar",
+      "forwarded_unknown",
+      "screenshot",
+      "unverified"
+    ]
+  }
+}

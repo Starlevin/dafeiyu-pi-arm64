@@ -25,7 +25,7 @@ public struct QQMemoryEvent: Codable, Equatable, Sendable {
     public let text: String
     public let at: Date
     public init(id: String, subject: String, text: String, at: Date) {
-        self.id = id; self.subject = subject; self.text = String(QQMemoryBook.redact(text).prefix(1200)); self.at = at
+        self.id = id; self.subject = subject; self.text = String(QQMemoryRedactor.redact(text).prefix(1200)); self.at = at
     }
 }
 
@@ -39,6 +39,13 @@ public struct QQMemoryItem: Codable, Equatable, Sendable, Identifiable {
     public let sourceIDs: [String]
     public let updatedAt: Date
     public let expiresAt: Date
+    public init(id: String = UUID().uuidString, subject: String, kind: String, text: String,
+                keywords: [String] = [], importance: Int = 2, sourceIDs: [String] = [],
+                updatedAt: Date, expiresAt: Date, invalidatedAt: Date? = nil) {
+        self.id = id; self.subject = subject; self.kind = kind; self.text = text
+        self.keywords = keywords; self.importance = importance; self.sourceIDs = sourceIDs
+        self.updatedAt = updatedAt; self.expiresAt = expiresAt; self.invalidatedAt = invalidatedAt
+    }
     public var invalidatedAt: Date?
     public func current(_ now: Date) -> Bool { invalidatedAt == nil && expiresAt > now }
 }
@@ -72,12 +79,30 @@ public struct QQMemoryDelta: Decodable, Sendable {
 
 /// One account + one private peer/group. Pending excerpts survive pause; no cross-scope search.
 public struct QQMemoryBook: Codable, Equatable, Sendable {
+    /// Keep the hot excerpt queue small so one busy group cannot grow the state file without bound.
+    public static let pendingSoftLimit = 128
+    /// Hard cap for hot + archived excerpts. At the cap new captures are explicitly refused;
+    /// existing excerpts are never removed to make room.
+    public static let pendingHardLimit = 512
     public private(set) var pending: [QQMemoryEvent] = []
+    /// Cold but still processable excerpts. Decoded as nil from older state files.
+    public private(set) var archivedPending: [QQMemoryEvent]? = []
     public private(set) var recent: [QQMemoryEvent] = []
     public private(set) var items: [QQMemoryItem] = []
     public private(set) var knownIDs: [String] = []
     public private(set) var lastCompactedAt: Date?
+    /// Historical count from the old lossy queue. New code never increments it.
     public private(set) var droppedEvents = 0
+    /// Explicit refusals after the hard cap, so overflow is visible instead of silent.
+    public private(set) var refusedEvents: Int? = 0
+    public private(set) var lastQueueWarningAt: Date?
+    public var queueCount: Int { pending.count + (archivedPending?.count ?? 0) }
+    public var queueHighWatermark: Bool { queueCount >= Self.pendingSoftLimit }
+    public var oldestQueuedAt: Date? { pendingQueue.first?.at }
+    /// Chronological hot+cold view used for due/batch/apply. At most pendingHardLimit items.
+    private var pendingQueue: [QQMemoryEvent] {
+        (pending + (archivedPending ?? [])).sorted { $0.at < $1.at }
+    }
     public init() {}
     public static func subject(account: String, target: String, sender: String) -> String {
         if sender == account { return "OWNER" }
@@ -90,22 +115,37 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
     }
     @discardableResult public mutating func append(_ event: QQMemoryEvent) -> Bool {
         guard !event.text.isEmpty, !knownIDs.contains(event.id) else { return false }
+        let isQueueable = !["BOT", "SELF_UNKNOWN"].contains(event.subject)
+        if isQueueable, queueCount >= Self.pendingHardLimit {
+            refusedEvents = (refusedEvents ?? 0) + 1
+            lastQueueWarningAt = event.at
+            return false
+        }
         knownIDs.append(event.id); knownIDs = Array(knownIDs.suffix(1024))
         recent.append(event); recent = Array(recent.sorted { $0.at < $1.at }.suffix(24))
-        if !["BOT", "SELF_UNKNOWN"].contains(event.subject) {
+        if isQueueable {
             pending.append(event); pending.sort { $0.at < $1.at }
-            if pending.count > 128 { droppedEvents += pending.count - 128; pending = Array(pending.suffix(128)) }
+            if pending.count > Self.pendingSoftLimit {
+                let overflow = pending.count - Self.pendingSoftLimit
+                let moved = Array(pending.prefix(overflow))
+                pending.removeFirst(overflow)
+                var archive = archivedPending ?? []
+                archive.append(contentsOf: moved)
+                archive.sort { $0.at < $1.at }
+                archivedPending = archive
+            }
         }
         return true
     }
     public func due(options: QQMemoryOptions, now: Date = Date()) -> Bool {
-        guard let oldest = pending.first else { return false }
-        return pending.count >= options.messageThreshold || pending.reduce(0, { $0 + $1.text.count }) >= options.characterThreshold || now.timeIntervalSince(oldest.at) >= Double(options.intervalMinutes * 60)
+        let queue = pendingQueue
+        guard let oldest = queue.first else { return false }
+        return queue.count >= options.messageThreshold || queue.reduce(0, { $0 + $1.text.count }) >= options.characterThreshold || now.timeIntervalSince(oldest.at) >= Double(options.intervalMinutes * 60)
     }
     public func batch() -> [QQMemoryEvent] {
         var result: [QQMemoryEvent] = [], size = 0
         let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        for event in pending.prefix(32) {
+        for event in pendingQueue.prefix(32) {
             guard let data = try? encoder.encode(event) else { break }
             let cost = String(decoding: data, as: UTF8.self).count + 1
             if size + cost > 7500 { break }
@@ -116,7 +156,8 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
     /// Validate every mutation against supplied evidence and candidates, then apply atomically.
     public mutating func apply(_ delta: QQMemoryDelta, batch: [QQMemoryEvent], candidateIDs: Set<String>, now: Date = Date()) throws {
         let sources = Dictionary(uniqueKeysWithValues: batch.map { ($0.id, $0) })
-        guard !batch.isEmpty, Set(sources.keys).isSubset(of: Set(pending.map(\.id))) else { throw CoreError.invalid("记忆批次已变化") }
+        let queueIDs = Set(pendingQueue.map(\.id))
+        guard !batch.isEmpty, Set(sources.keys).isSubset(of: queueIDs) else { throw CoreError.invalid("记忆批次已变化") }
         let allowedKinds = ["preference", "fact", "task", "event"]
         let changes = delta.changes
         for item in changes {
@@ -137,7 +178,7 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
             for i in items.indices where change.replaces.contains(items[i].id) || (items[i].kind == "episode" && !obsoleteSources.isDisjoint(with: items[i].sourceIDs)) { items[i].invalidatedAt = now }
             guard change.operation == "upsert" else { continue }
             let text = Self.redact(change.text)
-            if items.contains(where: { $0.subject == change.subject && $0.text == text && $0.current(now) }) { continue }
+            if items.contains(where: { $0.subject == change.subject && $0.kind == change.kind && QQReplyRepetitionPolicy.normalized($0.text) == QQReplyRepetitionPolicy.normalized(text) && $0.current(now) }) { continue }
             let days = min(change.days, change.kind == "event" ? 90 : change.kind == "task" ? 30 : 365)
             items.append(QQMemoryItem(subject: change.subject, kind: change.kind, text: text, keywords: change.keywords.map(Self.redact), importance: change.importance, sourceIDs: [change.sourceID], updatedAt: now, expiresAt: now.addingTimeInterval(Double(days * 86400))))
         }
@@ -149,7 +190,22 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
         let episodes = items.filter { $0.kind == "episode" && $0.current(now) }.suffix(64)
         items = Array(active) + historical + episodes
         pending.removeAll { sources[$0.id] != nil }; lastCompactedAt = now
+        if var archive = archivedPending {
+            archive.removeAll { sources[$0.id] != nil }
+            archivedPending = archive
+        }
     }
+    /// Authoritative reliable-store mode may remove already-committed excerpts from the
+    /// legacy mirror after the new store has durably applied them. Shadow mode never calls this.
+    public mutating func removePending(ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        pending.removeAll { ids.contains($0.id) }
+        if var archive = archivedPending {
+            archive.removeAll { ids.contains($0.id) }
+            archivedPending = archive
+        }
+    }
+
     public mutating func importLegacy(text: String, subject: String, at: Date) {
         let characters = Array(Self.redact(text).prefix(2000))
         for offset in stride(from: 0, to: characters.count, by: 600) {
@@ -190,12 +246,13 @@ public struct QQMemoryIndex: Sendable {
         for term in Self.terms(query) {
             let matches = postings[term] ?? []
             let weight = log(1 + Double(records.count + 1) / Double(matches.count + 1))
-            for id in matches { scores[id, default: 0] += weight }
+            for id in matches where records[id]?.subject == subject { scores[id, default: 0] += weight }
         }
         // Small persistent context: current speaker's profile and open tasks, even without word overlap.
         for item in records.values where item.subject == subject && ["preference", "task", "legacy"].contains(item.kind) { scores[item.id, default: 0] += 1 }
         return scores.compactMap { id, score -> (QQMemoryItem, Double)? in
-            guard let item = records[id], item.current(now) || (history && now.timeIntervalSince(item.invalidatedAt ?? item.expiresAt) < 90 * 86400) else { return nil }
+            guard let item = records[id], item.subject == subject,
+                  item.current(now) || (history && now.timeIntervalSince(item.invalidatedAt ?? item.expiresAt) < 90 * 86400) else { return nil }
             let freshness = 1 / (1 + max(0, now.timeIntervalSince(item.updatedAt)) / 86400)
             return (item, score + Double(item.importance) * 0.15 + freshness * 0.3 + (item.subject == subject ? 0.5 : 0))
         }.sorted { $0.1 == $1.1 ? $0.0.id < $1.0.id : $0.1 > $1.1 }.prefix(limit).map(\.0)

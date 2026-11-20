@@ -48,7 +48,7 @@ private final class FastPathFixtureProtocol: URLProtocol, @unchecked Sendable {
     }
 }
 
-@Suite("单轮快速路径可达性")
+@Suite("单轮快速路径可达性", .serialized)
 struct QQFastReplyPathTests {
 
     private func makeSession() -> URLSession {
