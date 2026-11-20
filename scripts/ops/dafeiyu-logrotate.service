@@ -1,0 +1,9 @@
+[Unit]
+Description=DaFeiYu engine log size rotation (copytruncate, keep 2)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dafeiyu-logrotate.py
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
