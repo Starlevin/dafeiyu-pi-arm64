@@ -1,6 +1,9 @@
 import Foundation
 import Testing
 @testable import WeChatAIBot
+#if canImport(Combine)
+import Combine
+#endif
 #if canImport(Glibc)
 import Glibc
 #endif
@@ -77,14 +80,23 @@ import Glibc
         ]) {
             let engine = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
             defer { engine.disconnect() }
+            var sawWatchdog = false
+            #if canImport(Combine)
+            // URLSession can report a refused connection before the next status sample.
+            let statusObservation = engine.$status.sink { status in
+                if status.contains("低频守护第") { sawWatchdog = true }
+            }
+            defer { statusObservation.cancel() }
+            #endif
+
             engine.save(endpoint: "ws://127.0.0.1:\(port)", expectedSelfID: "12345")
             #expect(engine.useTemporaryCredentials(token: "synthetic-test-token", key: "synthetic-key"))
 
             // 等待：首次连接失败 → 快速退避（1 次、5 秒）→ 预算耗尽 → 转入守护 → 守护开始探测。
-            var sawWatchdog = false
             for _ in 0..<60 {
                 try await Task.sleep(nanoseconds: 500_000_000)
-                if engine.status.contains("低频守护第") { sawWatchdog = true; break }
+                sawWatchdog = sawWatchdog || engine.status.contains("低频守护第")
+                if sawWatchdog { break }
             }
             #expect(sawWatchdog, "快速退避预算耗尽后应转入低频守护并继续探测，实际状态：\(engine.status)")
             #expect(!engine.connected)
