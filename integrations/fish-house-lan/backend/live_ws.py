@@ -467,6 +467,26 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
     return qq if qq.evidence == EVIDENCE_DEGRADED else wx
 
 
+def pending_qq_ingress(panel: dict[str, Any] | None, *, after: float, now: float) -> float:
+    """Recover a fresh native queue edge from the same bounded panel sample."""
+    records = (panel or {}).get("runtimeRecords")
+    if not isinstance(records, list):
+        return 0.0
+    newest_ingress = 0.0
+    for row in records[:QQ_MAX_RECORDS]:
+        if not isinstance(row, dict):
+            continue
+        stamp = row.get("timestamp")
+        age = _age({"time": stamp}, now)
+        if age is None or age > QQ_RECEIVED_WINDOW_SEC:
+            continue
+        if qq_native_chat_ingress(row):
+            newest_ingress = max(newest_ingress, stamp)
+        elif qq_confirmed_chat(row) or row.get("state") in ("failed", "uncertain", "cancelled", "skipped"):
+            after = max(after, stamp)
+    return newest_ingress if newest_ingress > after else 0.0
+
+
 # --------------------------------------------------------------- the bridge
 class LiveBridge:
     """Owns the client registry, seq counter and the 1 s evidence tick."""
@@ -494,6 +514,7 @@ class LiveBridge:
         self._reason = ""
         # Dedupe key = (source, phase, real event timestamp).
         self._last_key: tuple[str, str, float] | None = None
+        self._last_qq_ingress_at = 0.0
         self._last_ts = 0.0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -602,7 +623,7 @@ class LiveBridge:
                         self.stats["overflow"] += 1
                     break
 
-    def evaluation(self, *, force: bool = False) -> tuple[EvidenceSnapshot, dict[str, Any]]:
+    def evaluation(self, *, force: bool = False, preserve_qq_ingress: bool = False) -> tuple[EvidenceSnapshot, dict[str, Any]]:
         """Read evidence once and turn it into the current state payload."""
         router = self._router_now()
         now = time.time()
@@ -619,6 +640,11 @@ class LiveBridge:
                 panel = None
 
         evidence = pick_evidence(live, panel, now=now)
+        if preserve_qq_ingress and evidence.source == "qq" and evidence.reason == "active_chat":
+            ingress_at = pending_qq_ingress(panel, after=self._last_qq_ingress_at, now=now)
+            if ingress_at:
+                evidence = EvidenceSnapshot("qq", "received", EVIDENCE_VERIFIED,
+                                            reason="native_chat_queued", at=ingress_at)
         phase = phase_for_source_snapshot(evidence.phase)
 
         if evidence.evidence == EVIDENCE_VERIFIED and phase != "idle":
@@ -683,7 +709,9 @@ class LiveBridge:
         crossfades once instead of being re-triggered every tick. A bubble that
         expires is its own single ``bubble`` frame. Nothing repeats.
         """
-        evidence, payload = self.evaluation()
+        evidence, payload = self.evaluation(preserve_qq_ingress=True)
+        if evidence.source == "qq" and evidence.reason == "native_chat_queued":
+            self._last_qq_ingress_at = max(self._last_qq_ingress_at, evidence.at)
         key = self.dedupe_key(evidence)
         frames: list[dict[str, Any]] = []
         bubble_now = str(payload.get("bubble_text") or "")

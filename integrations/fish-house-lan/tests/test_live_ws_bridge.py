@@ -281,6 +281,34 @@ class EvidenceTests(unittest.TestCase):
                 self.assertEqual(evidence(marker, NOW - window - 1), "idle")
                 self.assertEqual(evidence(marker, NOW + 1), "idle")
 
+    def test_producer_emits_native_qq_ingress_once_when_model_start_is_in_same_poll(self):
+        ingress = {"state": "queued", "timestamp": NOW - 2, "_ingress": True}
+        active = {"state": "generating", "timestamp": NOW - 1, "_active": True}
+        panel = {"runtimeRecords": [active, ingress]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: self.live(),
+                                    lambda: panel)
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            first = bridge.produce()
+            second = bridge.produce()
+            self.assertEqual(bridge.produce(), [])
+        self.assertEqual((first[-1]["phase"], first[-1]["event_at"]), ("received", NOW - 2))
+        self.assertEqual((second[-1]["phase"], second[-1]["event_at"]), ("thinking", NOW - 1))
+        self.assertEqual(first[0]["node_id"], "pick")
+
+    def test_producer_does_not_replay_terminated_qq_ingress_or_override_newer_wechat(self):
+        ingress = {"state": "queued", "timestamp": NOW - 3, "_ingress": True}
+        active = {"state": "generating", "timestamp": NOW - 1, "_active": True}
+        panel = {"runtimeRecords": [active, ingress]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: self.live(
+            wx={"activity_state": "thinking", "activity_at": NOW}), lambda: panel)
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            self.assertEqual(bridge.produce()[-1]["source"], "wechat")
+        for terminal in ("confirmed", "skipped", "failed", "uncertain", "cancelled"):
+            row = {"state": terminal, "timestamp": NOW - 2, "_chat": terminal == "confirmed"}
+            with self.subTest(terminal=terminal):
+                self.assertEqual(live_ws.pending_qq_ingress(
+                    {"runtimeRecords": [active, row, ingress]}, after=0, now=NOW), 0)
+
     def test_wechat_reuses_normalized_activity_state(self):
         live = self.live(wx={"activity_state": "thinking",
                              "diagnostics": {"fresh": True, "reason": "generation_started"}})
