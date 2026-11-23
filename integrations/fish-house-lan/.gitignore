@@ -1,0 +1,5 @@
+.chrome-e2e-profile/
+.firefox-e2e-profile/
+__pycache__/
+*.pyc
+/web/fish_house/themes/default/videos/

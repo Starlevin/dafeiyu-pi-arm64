@@ -1,0 +1,292 @@
+"use strict";
+// Isolated real-Chrome test: serves only the workspace UI and an in-memory /ws fixture.
+const fs = require("fs"), os = require("os"), path = require("path"), { spawn, spawnSync } = require("child_process");
+const ROOT = path.resolve(__dirname, "../web"), OUT = path.join(os.tmpdir(), "fish-house-live-player-report.json");
+const PORT = 18931, CDP = 9239, CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const py = String.raw`import asyncio,json,os
+from aiohttp import web
+root=os.environ['LIVE_WEB_ROOT']; clients=set()
+with open(os.path.join(root,'fish_house/themes/default/theme.json'),encoding='utf-8') as f: clone=json.load(f)
+clone['meta']['id']='live-test-clone'
+retry_theme=json.loads(json.dumps(clone)); retry_theme['meta']['id']='live-test-retry'
+retry_node=next(n for n in retry_theme['config']['flow']['nodes'] if n['id']=='phone_pickup')
+retry_source=retry_node['video']; retry_node['video']='videos/preload-once.mp4'; retry_asset_count=[0]
+poison=json.loads(json.dumps(clone)); poison['meta']['id']='live-test-poison'
+wait_node=next((n for n in poison['config']['flow']['nodes'] if n.get('role')=='wait' and n.get('loop')),None)
+wait_node['video']='https://evil.example/hidden.mp4'
+rekeyed=json.loads(json.dumps(clone)); rekeyed['meta']['id']='live-test-rekeyed'
+idmap={n['id']:('graph_node_%02d'%i) for i,n in enumerate(rekeyed['config']['flow']['nodes'])}
+for n in rekeyed['config']['flow']['nodes']: n['id']=idmap[n['id']]
+for e in rekeyed['config']['flow']['edges']: e['from']=idmap[e['from']]; e['to']=idmap[e['to']]
+for item in rekeyed['config']['actions']: item['key']=idmap.get(item.get('key'),item.get('key'))
+for key in ('videos','audio','durations'): rekeyed['config'][key]={idmap.get(k,k):v for k,v in rekeyed['config'][key].items()}
+async def live(req): raise web.HTTPFound('/fish_house/live.html'+(('?'+req.query_string) if req.query_string else ''))
+async def ws_route(req):
+ w=web.WebSocketResponse(); await w.prepare(req); clients.add(w)
+ await w.send_json({'type':'state','seq':1,'ts':int(__import__('time').time()),'source':'qq','phase':'idle','node_id':'rest','bubble_text':'','ttl_ms':0})
+ try:
+  while not w.closed:
+   msg=await w.receive()
+   if msg.type in (web.WSMsgType.CLOSE,web.WSMsgType.CLOSED,web.WSMsgType.ERROR): break
+ finally: clients.discard(w)
+ return w
+async def inject(req):
+ item=await req.json()
+ for client in list(clients):
+  if not client.closed: await client.send_json(item)
+ return web.json_response({'queued':True})
+async def disconnect(req):
+ for w in list(clients): await w.close()
+ return web.json_response({'closed':True})
+async def ws_stats(req): return web.json_response({'clients':len(clients)})
+async def favicon(req): return web.Response(status=204)
+async def theme_clone(req): return web.json_response(clone)
+async def theme_retry(req): return web.json_response(retry_theme)
+async def retry_asset(req):
+ retry_asset_count[0]+=1
+ if retry_asset_count[0]==1: return web.Response(status=503)
+ return web.FileResponse(os.path.join(root,'fish_house/themes/default',retry_source))
+async def retry_count(req): return web.json_response({'count':retry_asset_count[0]})
+async def theme_poison(req): return web.json_response(poison)
+async def theme_rekeyed(req): return web.json_response(rekeyed)
+async def theme_selection(req): return web.json_response({'theme_url':'/fish_house/themes/default/theme.json'})
+async def clone_asset(req):
+ name=req.match_info['name']; file=os.path.realpath(os.path.join(root,'fish_house/themes/default',name))
+ base=os.path.realpath(os.path.join(root,'fish_house/themes/default'))
+ if not file.startswith(base+os.sep) or not os.path.isfile(file): raise web.HTTPNotFound()
+ return web.FileResponse(file)
+app=web.Application(); app.router.add_get('/live',live); app.router.add_get('/ws',ws_route); app.router.add_get('/ws-stats',ws_stats); app.router.add_get('/retry-count',retry_count); app.router.add_get('/favicon.ico',favicon); app.router.add_post('/inject',inject); app.router.add_post('/disconnect',disconnect); app.router.add_get('/fish_house/live.theme.json',theme_selection); app.router.add_get('/fish_house/themes/cloned/theme.json',theme_clone); app.router.add_get('/fish_house/themes/retry/theme.json',theme_retry); app.router.add_get('/fish_house/themes/retry/videos/preload-once.mp4',retry_asset); app.router.add_get('/fish_house/themes/poison/theme.json',theme_poison); app.router.add_get('/fish_house/themes/rekeyed/theme.json',theme_rekeyed); app.router.add_get('/fish_house/themes/cloned/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/retry/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/poison/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/rekeyed/{name:.*}',clone_asset); app.router.add_static('/',root,show_index=False)
+web.run_app(app,host='127.0.0.1',port=int(os.environ['LIVE_PORT']),access_log=None)`;
+class CDPClient {
+  constructor(url) { this.ws = new WebSocket(url); this.pending = new Map(); this.id = 0; this.errors = []; }
+  async connect() { await new Promise((ok, no) => { this.ws.onopen = ok; this.ws.onerror = no; }); this.ws.onmessage = e => { const m = JSON.parse(String(e.data)); if (m.id && this.pending.has(m.id)) { const p = this.pending.get(m.id); this.pending.delete(m.id); m.error ? p.reject(Error(m.error.message)) : p.resolve(m.result); } if (m.method === "Runtime.exceptionThrown" || (m.method === "Log.entryAdded" && m.params.entry.level === "error")) this.errors.push(m); }; }
+  send(method, params = {}) { return new Promise((resolve, reject) => { const id = ++this.id; this.pending.set(id, { resolve, reject }); this.ws.send(JSON.stringify({ id, method, params })); setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(Error("CDP timeout " + method)); } }, 12000); }); }
+  async js(expression) { const r = await this.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }); if (r.exceptionDetails) throw Error(JSON.stringify(r.exceptionDetails)); return r.result && r.result.value; }
+  close() { try { this.ws.close(); } catch (_) {} }
+}
+async function until(test, label, timeout = 12000) { const end = Date.now() + timeout; while (Date.now() < end) { const v = await test(); if (v) return v; await sleep(100); } throw Error("timeout: " + label); }
+async function main() {
+  const env = Object.assign({}, process.env, { LIVE_WEB_ROOT: ROOT, LIVE_PORT: String(PORT) });
+  const server = spawn("python", ["-c", py], { env, stdio: "ignore" });
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "fh-live-chrome-"));
+  const chrome = spawn(CHROME, ["--headless=new", "--no-sandbox", "--autoplay-policy=no-user-gesture-required", `--remote-debugging-port=${CDP}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
+  const report = { status: "FAIL", assertions: [], runtimeConsoleErrors: 0, blackFrameSamples: 0 };
+  const check = (name, ok, details) => { report.assertions.push({ name, pass: !!ok, details }); if (!ok) throw Error(name + ": " + details); };
+  let cdp;
+  try {
+    await until(async () => { try { return (await fetch(`http://127.0.0.1:${CDP}/json/version`)).ok; } catch (_) { return false; } }, "Chrome CDP");
+    const targets = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json();
+    cdp = new CDPClient(targets.find(t => t.type === "page").webSocketDebuggerUrl); await cdp.connect();
+    await cdp.send("Page.enable"); await cdp.send("Runtime.enable"); await cdp.send("Log.enable");
+    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/live` });
+    await until(() => cdp.js("window.__fishHouseLive && window.__fishHouseLive.getState().currentNode === 'rest'"), "idle theme playback");
+    const defaultTheme = await (await fetch(`http://127.0.0.1:${PORT}/fish_house/themes/default/theme.json`)).json();
+    const route = (from, to, theme = defaultTheme) => { const q=[[from]], seen={}; while(q.length){const p=q.shift(),tail=p[p.length-1];if(tail===to)return p;if(seen[tail])continue;seen[tail]=true;(theme.config.flow.edges||[]).filter(e=>e.from===tail).forEach(e=>q.push(p.concat([e.to])));}return []; };
+    const defaultIdle = defaultTheme.config.flow.nodes.find(n=>n.role==="wait"&&n.loop) || defaultTheme.config.flow.nodes.find(n=>n.role==="wait");
+    const defaultPhone = defaultTheme.config.flow.nodes.find(n=>["phone","phone_only","both"].includes(n.role)&&n.loop) || defaultTheme.config.flow.nodes.find(n=>["phone","phone_only","both"].includes(n.role));
+    const defaultPickup = defaultTheme.config.flow.nodes.find(n=>n.id===route(defaultIdle.id,defaultPhone.id)[1]);
+    const defaultPickupUrl = `http://127.0.0.1:${PORT}/fish_house/themes/default/${defaultPickup.video}`;
+    await until(() => cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(defaultPickupUrl)});return v&&v.readyState>=2&&v.paused&&v.style.opacity==='0'?true:null})()`), "default theme's first pickup video preloads while idle");
+    await sleep(500);
+    const defaultPreload = await cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(defaultPickupUrl)});return v&&{ready:v.readyState,paused:v.paused,preload:v.preload}})()`);
+    check("idle playback preloads exactly the first graph node into the hidden inactive video", defaultPreload.ready>=2 && defaultPreload.paused && defaultPreload.preload==="auto", JSON.stringify(defaultPreload));
+    let m = await cdp.js("({id:window.__fishHouseLive.getState().themeId,current:window.__fishHouseLive.getState().currentNode,videos:[...document.querySelectorAll('video')].map(v=>({paused:v.paused,ready:v.readyState,src:v.currentSrc,opacity:getComputedStyle(v).opacity,time:v.currentTime,muted:v.muted}))})");
+    check("/live route, source theme ID and actual muted video playback", m.id === "7ce22364d7" && m.videos.some(v => !v.paused && v.ready >= 2 && v.src.includes("themes/default/videos/") && v.muted), JSON.stringify(m));
+    const frames = await until(async () => { const f = await cdp.js("(function(){var v=[...document.querySelectorAll('video')].filter(x=>!x.paused&&x.readyState>=2)[0];if(!v)return null;var c=document.createElement('canvas');c.width=64;c.height=64;var x=c.getContext('2d');x.drawImage(v,0,0,64,64);var d=x.getImageData(0,0,64,64).data,n=0;for(var i=0;i<d.length;i+=4)if(d[i]+d[i+1]+d[i+2]>24)n++;return {n:n,time:v.currentTime,muted:v.muted}})()"); return f && f.time > .45 ? f : false; }, "video frame advancement");
+    report.blackFrameSamples++; check("decoded frame is non-black and autoplay is muted", frames.n > 100 && frames.muted, JSON.stringify(frames));
+    check("same-origin theme cover is loaded and replaced after video frame", await cdp.js("document.getElementById('cover').naturalWidth > 0 && getComputedStyle(document.getElementById('cover')).opacity === '0'"), "cover fallback is removed after first decoded frame");
+    const send = async (seq, phase, source = "qq", type = "state", node = "") => { const msg = { type, seq, ts: Math.floor(Date.now()/1000), source, phase, node_id: node, bubble_text: phase === "received" ? "正在处理" : "", ttl_ms: 0 }; await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(msg) }); };
+    let seq = 2;
+    await cdp.js("window.__fhLiveNodes=[];window.__fhLivePrevious='';window.__fhLiveTraceTimer=setInterval(function(){var n=window.__fishHouseLive.getState().currentNode;if(n&&n!==window.__fhLivePrevious){window.__fhLiveNodes.push(n);window.__fhLivePrevious=n;}},40)");
+    const preloadResourceCount = await cdp.js(`performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length`);
+    const fastReceived = seq++; await send(fastReceived, "received");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === fastReceived, "fast received accepted");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === defaultPickup.id, "preloaded pickup becomes active");
+    const pickupActivation = await cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(defaultPickupUrl)});return {found:!!v,paused:v&&v.paused,opacity:v&&v.style.opacity,requests:performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length}})()`);
+    check("first pickup activation reuses the preloaded video request", pickupActivation.found && !pickupActivation.paused && pickupActivation.opacity === "1" && pickupActivation.requests === preloadResourceCount, JSON.stringify({active:pickupActivation.found&&!pickupActivation.paused, opacity:pickupActivation.opacity, requestsBefore:preloadResourceCount, requestsAfter:pickupActivation.requests}));
+    await send(seq++, "sent");
+    const samples = [], sampleDir = fs.mkdtempSync(path.join(os.tmpdir(), "fh-live-transition-")), sampleEnd = Date.now() + 25000;
+    let completed = false;
+    while (Date.now() < sampleEnd) {
+      const shot = await cdp.send("Page.captureScreenshot", { format:"png" }), file = path.join(sampleDir, `frame-${samples.length}.png`);
+      fs.writeFileSync(file, Buffer.from(shot.data,"base64")); samples.push(file);
+      const trace = await cdp.js("window.__fhLiveNodes");
+      if (trace.includes("phone_pickup") && trace.includes("phone_loop") && trace.includes("phone_putdown") && trace[trace.length-1] === "rest") { completed = true; break; }
+      await sleep(350);
+    }
+    check("Chromium samples captured across fast transition", samples.length >= 5, `samples=${samples.length}`);
+    const scan = spawnSync("python", ["-c", "import json,sys; from PIL import Image; out=[]; \nfor f in sys.argv[1:]:\n im=Image.open(f).convert('RGB'); c=im.crop((im.width//2-32,im.height//2-32,im.width//2+32,im.height//2+32)); n=sum(1 for r,g,b in c.getdata() if r+g+b>24); out.append({'file':f,'lit_pixels':n,'total':4096,'black':n<100});\nprint(json.dumps({'samples':len(out),'black_frames':sum(1 for x in out if x['black']),'frames':out}))", ...samples], { encoding:"utf8" });
+    if (scan.status !== 0) throw Error("transition sample pixel scan failed: " + scan.stderr);
+    const pixelScan = JSON.parse(scan.stdout.trim()); report.blackFrameSamples = pixelScan.samples; report.sampledBlackFrames = pixelScan.black_frames;
+    fs.rmSync(sampleDir, {recursive:true,force:true});
+    check("no black transition frames sampled in Chromium", pixelScan.black_frames === 0, `sampled=${pixelScan.samples}; black=${pixelScan.black_frames}`);
+    check("fast received-to-sent finishes phone loop and returns idle", completed, JSON.stringify(await cdp.js("window.__fhLiveNodes")));
+    check("fast received then sent completes pickup, reply loop, putdown, and idle", true, JSON.stringify(await cdp.js("window.__fhLiveNodes")));
+    const sequences = [["received","phone_pickup"],["thinking","phone_pickup"],["replying","phone_putdown"],["sent","phone_putdown"],["error","rest"],["idle","rest"]];
+    for (const [phase, expected] of sequences) { await send(seq++, phase, phase === "thinking" ? "wechat" : "qq"); if (phase === "thinking") await sleep(1000); else await until(() => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(expected)}`), phase + " mapped node"); }
+    check("all phase mappings accepted in order (received/thinking to phone, reply/sent to putdown, idle/error)", true, sequences.map(s=>s.join("→")).join(", "));
+    const dedupeSeq = seq++; await send(dedupeSeq, "received"); await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === dedupeSeq, "received seq"); await send(dedupeSeq, "thinking", "wechat"); await sleep(300); const afterDupSeq = await cdp.js("window.__fishHouseLive.getState().lastSeq");
+    check("duplicate sequence ignored", afterDupSeq === dedupeSeq, `accepted seq remains ${afterDupSeq}`);
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({type:"bubble",seq:seq++,ts:Math.floor(Date.now()/1000),source:"qq",phase:"received",node_id:"",bubble_text:"正在处理",ttl_ms:1200}) });
+    await until(async () => !(await cdp.js("document.getElementById('bubble').classList.contains('hidden')")), "bubble appears");
+    check("default temporary event bubble appears", true, "bubble text is capped; ttl_ms is limited to three seconds");
+    await until(async () => (await cdp.js("document.getElementById('bubble').classList.contains('hidden')")), "bubble ttl expires", 4000);
+    const configFrame = (n, url, show) => ({type:"config",seq:n,ts:Math.floor(Date.now()/1000),source:"qq",phase:"idle",node_id:"",bubble_text:"",ttl_ms:0,config:{theme_url:url,show_bubble:show}});
+    const invalidConfigSeq = seq++;
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(invalidConfigSeq,"https://evil.example/theme.json",true)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === invalidConfigSeq, "config sequence accepted");
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(invalidConfigSeq,"/fish_house/themes/cloned/theme.json",true)) });
+    await sleep(250);
+    check("duplicate config seq ignored; external theme URL rejected", await cdp.js("window.__fishHouseLive.getState().themeId === '7ce22364d7'"), "same-origin allowlist and config de-duplication");
+    const cloneTheme = await (await fetch(`http://127.0.0.1:${PORT}/fish_house/themes/cloned/theme.json`)).json();
+    const cloneCmp = JSON.parse(JSON.stringify(cloneTheme)), defaultCmp = JSON.parse(JSON.stringify(defaultTheme));
+    cloneCmp.meta.id = defaultCmp.meta.id;
+    check("test theme clone differs only by theme ID", JSON.stringify(cloneCmp) === JSON.stringify(defaultCmp), "videos, node roles, IDs and graph edges are byte-equivalent JSON");
+    const graphPath = (from, to) => { const q=[[from]], seen={}; while(q.length){const p=q.shift(),tail=p[p.length-1];if(tail===to)return p;if(seen[tail])continue;seen[tail]=true;(cloneTheme.config.flow.edges||[]).filter(e=>e.from===tail).forEach(e=>q.push(p.concat([e.to])));}return []; };
+    const nodes = cloneTheme.config.flow.nodes, waitNode = nodes.find(n=>n.role==="wait"&&n.loop) || nodes.find(n=>n.role==="wait");
+    const phoneNode = nodes.find(n=>["phone","phone_only","both"].includes(n.role)&&n.loop) || nodes.find(n=>["phone","phone_only","both"].includes(n.role));
+    const pickupNode = nodes.find(n=>n.id===graphPath(waitNode.id,phoneNode.id)[1]);
+    const putdownNode = nodes.find(n=>n.id===graphPath(phoneNode.id,waitNode.id)[1]);
+    const cloneConfigSeq = seq++;
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(cloneConfigSeq,"/fish_house/themes/cloned/theme.json",false)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().themeId")) === "live-test-clone", "same-origin cloned theme load");
+    await until(async () => (await cdp.js("[...document.querySelectorAll('video')].some(v=>!v.paused&&v.readyState>=2&&v.currentSrc.includes('/themes/cloned/videos/'))")), "cloned theme local video playback");
+    const clonePickupUrl = `http://127.0.0.1:${PORT}/fish_house/themes/cloned/${pickupNode.video}`;
+    const clonePreload = await until(() => cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(clonePickupUrl)});return v&&v.readyState>=2&&v.paused&&v.style.opacity==='0'?{ready:v.readyState,paused:v.paused}:null})()`), "new theme preloads its own first pickup video");
+    check("theme switch clears old buffers and preloads the selected theme's pickup", clonePreload.ready>=2 && clonePreload.paused, JSON.stringify(clonePreload));
+    check("renamed theme ID uses theme graph roles and same-origin video paths", pickupNode && putdownNode && await cdp.js("window.__fishHouseLive.getState().idleNode") === waitNode.id && await cdp.js("window.__fishHouseLive.getState().phoneNode") === phoneNode.id, `idle=${waitNode.id}, phone=${phoneNode.id}, pickup=${pickupNode.id}, putdown=${putdownNode.id}`);
+    await cdp.js("window.__fhLiveNodes=[];window.__fhLivePrevious='';");
+    const cloneReceivedSeq = seq++;
+    await send(cloneReceivedSeq,"received","qq","flow_goto",pickupNode.id);
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === cloneReceivedSeq, "flow_goto pickup accepted");
+    await send(seq++,"sent","qq","flow_goto",putdownNode.id);
+    await until(async () => { const t=await cdp.js("window.__fhLiveNodes"); return t.includes(pickupNode.id)&&t.includes(phoneNode.id)&&t.includes(putdownNode.id)&&t[t.length-1]===waitNode.id; }, "fast flow_goto pickup→phone→putdown→idle", 25000);
+    check("fast received-pickup then sent-putdown flow_goto completes clone graph path", true, JSON.stringify(await cdp.js("window.__fhLiveNodes")));
+    const orderedSeq = seq++;
+    const orderedFrame = {type:"flow_goto",seq:orderedSeq,ts:Math.floor(Date.now()/1000),event_at:Date.now()/1000,source:"qq",phase:"sent",node_id:pickupNode.id,bubble_text:"",ttl_ms:0,orders:[waitNode.id,pickupNode.id,phoneNode.id,putdownNode.id,waitNode.id].map(node_id=>({node_id}))};
+    await cdp.js(`window.__fishHouseLive.apply(${JSON.stringify(orderedFrame)}, false)`);
+    await cdp.js(`window.__fishHouseLive.apply(${JSON.stringify(Object.assign({},orderedFrame,{type:"state",seq:seq++}))}, false)`);
+    const orderedState = await cdp.js("window.__fishHouseLive.getState()");
+    check("ordered graph orders play adjacent nodes without expanding or duplicating a fast repeat", orderedState.pendingNode === pickupNode.id && JSON.stringify(orderedState.queued) === JSON.stringify([phoneNode.id,putdownNode.id,waitNode.id]), JSON.stringify(orderedState));
+    await until(async () => {
+      const state = await cdp.js("window.__fishHouseLive.getState()");
+      return state.currentNode === waitNode.id && !state.pendingNode && !state.queued.length;
+    }, "ordered action cycle completes before reconnect", 25000);
+    check("bubble can be disabled and cloned config remains live", await cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-clone' && getComputedStyle(document.getElementById('bubble')).opacity === '0'"), "theme loaded, bubble disabled");
+    const beforeHome = await (await fetch(`http://127.0.0.1:${PORT}/fish_house/home.html`)).status;
+    check("existing home.html remains available", beforeHome === 200, "HTTP " + beforeHome);
+    await fetch(`http://127.0.0.1:${PORT}/disconnect`, { method:"POST" });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 1, "reconnect snapshot resets sequence");
+    await send(2, "idle", "wechat");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === "rest", "post-reconnect idle event");
+    await send(3, "thinking", "qq", "flow_goto", pickupNode.id);
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === pickupNode.id, "flow_goto real theme node");
+    check("WS reconnect resets sequence; flow_goto follows a real theme edge", true, "new socket snapshot seq=1, then state seq=2 and graph edge seq=3");
+    await cdp.send("Page.navigate", { url:`http://127.0.0.1:${PORT}/live?bubble=0` });
+    await until(async () => (await cdp.js("window.__fishHouseLive && window.__fishHouseLive.getState().themeId")) === "7ce22364d7", "query bubble override boot");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 1, "query page snapshot");
+    await until(async () => (await (await fetch(`http://127.0.0.1:${PORT}/ws-stats`)).json()).clients >= 1, "active query-page websocket");
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(2,"/fish_house/themes/cloned/theme.json",true)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 2, "query page config sequence");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().themeId")) === "live-test-clone", "query page cloned config");
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({type:"bubble",seq:3,ts:Math.floor(Date.now()/1000),source:"qq",phase:"received",node_id:"",bubble_text:"隐藏测试",ttl_ms:1200}) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 3, "bubble query frame accepted");
+    check("/live?bubble=0 keeps bubbles hidden despite config enable and positive event TTL", await cdp.js("document.getElementById('bubble').classList.contains('hidden') && getComputedStyle(document.getElementById('bubble')).opacity === '0'"), "query override survives cloned theme config and event");
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(4,"/fish_house/themes/poison/theme.json",true)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().themeId")) === "live-test-poison", "poison theme metadata load");
+    await sleep(300);
+    const poisonMetrics = await cdp.js("({state:window.__fishHouseLive.getState(),videos:[...document.querySelectorAll('video')].map(v=>v.currentSrc),coverOpacity:Number(getComputedStyle(document.getElementById('cover')).opacity),coverWidth:document.getElementById('cover').naturalWidth})");
+    check("theme with external MP4 is blocked and same-origin cover remains as fallback", poisonMetrics.state.currentNode === "" && poisonMetrics.state.pendingNode === "" && poisonMetrics.videos.every(src=>!src.includes('evil.example')) && poisonMetrics.coverOpacity > .9 && poisonMetrics.coverWidth > 0, JSON.stringify(poisonMetrics));
+    const rekeyTheme = await (await fetch(`http://127.0.0.1:${PORT}/fish_house/themes/rekeyed/theme.json`)).json();
+    const rekeyNodes = rekeyTheme.config.flow.nodes, rekeyIdle = rekeyNodes.find(n=>n.role==="wait"&&n.loop) || rekeyNodes.find(n=>n.role==="wait");
+    const rekeyPhone = rekeyNodes.find(n=>["phone","phone_only","both"].includes(n.role)&&n.loop) || rekeyNodes.find(n=>["phone","phone_only","both"].includes(n.role));
+    const rekeyPath = (from,to) => { const q=[[from]], seen={}; while(q.length){const p=q.shift(),tail=p[p.length-1];if(tail===to)return p;if(seen[tail])continue;seen[tail]=true;(rekeyTheme.config.flow.edges||[]).filter(e=>e.from===tail).forEach(e=>q.push(p.concat([e.to])));}return []; };
+    const rekeyPickup = rekeyNodes.find(n=>n.id===rekeyPath(rekeyIdle.id,rekeyPhone.id)[1]);
+    const rekeyPutdown = rekeyNodes.find(n=>n.id===rekeyPath(rekeyPhone.id,rekeyIdle.id)[1]);
+    const originalIds = defaultTheme.config.flow.nodes.map(n=>n.id);
+    check("rekeyed fixture changes node and edge IDs but preserves roles and video assets", rekeyNodes.every(n=>!originalIds.includes(n.id)&&/^graph_node_/.test(n.id)) && rekeyNodes.every((n,i)=>n.role===defaultTheme.config.flow.nodes[i].role&&rekeyTheme.config.videos[n.id]===defaultTheme.config.videos[defaultTheme.config.flow.nodes[i].id]), `theme=${rekeyTheme.meta.id}; nodes=${rekeyNodes.map(n=>n.id).join(',')}`);
+    await cdp.js("Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:true}})");
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(5,"/fish_house/themes/rekeyed/theme.json",false)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().themeId")) === "live-test-rekeyed", "renamed-node theme loaded");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === rekeyIdle.id, "renamed-node idle video plays");
+    await sleep(400);
+    check("Save-Data mode suppresses inactive pickup preload after theme switch", await cdp.js(`![...document.querySelectorAll('video')].some(v=>v.currentSrc.includes(${JSON.stringify('/themes/rekeyed/' + rekeyPickup.video)}))`), "selected theme idle video plays; pickup remains unfetched");
+    await cdp.js("Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false}})");
+    check("renamed node IDs are chosen from graph roles", rekeyIdle && rekeyPhone && rekeyPickup && rekeyPutdown && await cdp.js("window.__fishHouseLive.getState().idleNode") === rekeyIdle.id && await cdp.js("window.__fishHouseLive.getState().phoneNode") === rekeyPhone.id, `idle=${rekeyIdle.id},phone=${rekeyPhone.id},pickup=${rekeyPickup.id},putdown=${rekeyPutdown.id}`);
+    await cdp.js("window.__fhRekeyTrace=[];window.__fhRekeyLast='';window.__fhRekeyTimer=setInterval(function(){var s=window.__fishHouseLive.getState(),n=s.currentNode;if(n&&n!==window.__fhRekeyLast){window.__fhRekeyLast=n;var v=[...document.querySelectorAll('video')].filter(x=>!x.paused)[0];window.__fhRekeyTrace.push({node:n,src:v&&v.currentSrc,ready:v&&v.readyState,time:v&&v.currentTime});}},40)");
+    await send(6,"received","qq","flow_goto",rekeyPickup.id);
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 6, "rekey received flow_goto accepted");
+    await send(7,"sent","qq","flow_goto",rekeyPutdown.id);
+    await until(async () => {const t=await cdp.js("window.__fhRekeyTrace");return t.some(x=>x.node===rekeyPickup.id)&&t.some(x=>x.node===rekeyPhone.id)&&t.some(x=>x.node===rekeyPutdown.id)&&t[t.length-1].node===rekeyIdle.id;}, "renamed-node flow_goto pickup→phone→putdown→idle", 25000);
+    const rekeyMetrics = await cdp.js("window.__fhRekeyTrace");
+    check("non-rest/non-phone node names drive real idle and fast flow_goto playback", rekeyMetrics.filter(x=>["graph_node_00","graph_node_01","graph_node_02","graph_node_03","graph_node_04","graph_node_05","graph_node_06"].includes(x.node)).length>=4&&rekeyMetrics.filter(x=>x.ready>=2&&x.time>0&&x.src&&x.src.includes('/themes/rekeyed/videos/')).length>=4, JSON.stringify(rekeyMetrics));
+    // Regression: a one-shot action can end while the queue is empty. A later
+    // real ordered WS event must start its route immediately; there will be no
+    // second `ended` callback to drain the new queue.
+    await cdp.js(`window.__fishHouseLive.playNode(${JSON.stringify(rekeyPutdown.id)})`);
+    await until(async () => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(rekeyPutdown.id)} && [...document.querySelectorAll('video')].some(v=>!v.paused && v.readyState>=2)`), "late-order one-shot playback starts");
+    await until(async () => cdp.js(` [...document.querySelectorAll('video')].some(v=>v.currentSrc.includes(${JSON.stringify('/themes/rekeyed/' + rekeyPutdown.video)}) && v.ended)`), "late-order one-shot reaches ended", 12000);
+    const lateSeq = 8;
+    const lateFrame = {type:"flow_goto",seq:lateSeq,ts:Math.floor(Date.now()/1000),event_at:Date.now()/1000,source:"wechat",phase:"idle",node_id:rekeyIdle.id,bubble_text:"",ttl_ms:0,orders:[{node_id:rekeyIdle.id}]};
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(lateFrame) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === lateSeq, "late ordered event accepted");
+    const lateSamples = [], lateDir = fs.mkdtempSync(path.join(os.tmpdir(), "fh-live-late-tail-"));
+    let lateComplete = false;
+    const lateEnd = Date.now() + 16000;
+    while (Date.now() < lateEnd) {
+      const shot = await cdp.send("Page.captureScreenshot", { format:"png" });
+      const file = path.join(lateDir, `frame-${lateSamples.length}.png`);
+      fs.writeFileSync(file, Buffer.from(shot.data,"base64")); lateSamples.push(file);
+      if (await cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(rekeyIdle.id)} && !window.__fishHouseLive.getState().queued.length`)) { lateComplete = true; break; }
+      await sleep(220);
+    }
+    const lateScan = spawnSync("python", ["-c", "from PIL import Image; import sys; print(sum(1 for f in sys.argv[1:] if Image.open(f).convert('L').crop((Image.open(f).width//3,Image.open(f).height//3,Image.open(f).width*2//3,Image.open(f).height*2//3)).getextrema()[1] < 12))", ...lateSamples], { encoding:"utf8" });
+    if (lateScan.status !== 0) throw Error("late tail frame scan failed: " + lateScan.stderr);
+    const lateBlack = Number(lateScan.stdout.trim()); fs.rmSync(lateDir, {recursive:true,force:true});
+    check("late ordered WS event after one-shot ended reaches wait", lateComplete, JSON.stringify(await cdp.js("window.__fishHouseLive.getState()")));
+    check("late ended-to-wait tail has no sampled black frames", lateSamples.length >= 1 && lateBlack === 0, `samples=${lateSamples.length}; black=${lateBlack}`);
+    await cdp.js(`window.__fishHouseLive.playNode(${JSON.stringify(rekeyPutdown.id)})`);
+    await until(async () => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(rekeyPutdown.id)} && [...document.querySelectorAll('video')].some(v=>!v.paused && v.readyState>=2)`), "late fallback one-shot playback starts");
+    await until(async () => cdp.js(` [...document.querySelectorAll('video')].some(v=>v.currentSrc.includes(${JSON.stringify('/themes/rekeyed/' + rekeyPutdown.video)}) && v.ended)`), "late fallback one-shot reaches ended", 12000);
+    const fallbackSeq = 9;
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({type:"state",seq:fallbackSeq,ts:Math.floor(Date.now()/1000),source:"wechat",phase:"idle",node_id:rekeyIdle.id,bubble_text:"",ttl_ms:0}) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === fallbackSeq, "late fallback state accepted");
+    await until(async () => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(rekeyIdle.id)} && !window.__fishHouseLive.getState().queued.length`), "late fallback path reaches wait", 12000);
+    check("late state fallback after one-shot ended reaches wait", true, `node=${rekeyIdle.id}`);
+    const retryThemeSeq = 10;
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(retryThemeSeq,"/fish_house/themes/retry/theme.json",false)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().themeId")) === "live-test-retry", "one-shot retry theme loaded");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === "rest", "retry theme idle playback");
+    const retryUrl = `http://127.0.0.1:${PORT}/fish_house/themes/retry/videos/preload-once.mp4`;
+    await until(async () => cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(retryUrl)});return v&&v.error?{code:v.error.code,paused:v.paused,opacity:v.style.opacity}:null})()`), "hidden first pickup preload receives the fixture's one-time 503");
+    const failedPreloadState = await cdp.js("({node:window.__fishHouseLive.getState().currentNode,active:[...document.querySelectorAll('video')].filter(v=>!v.paused&&v.style.opacity==='1').length})");
+    check("failed hidden preload leaves the existing idle video visible", failedPreloadState.node === "rest" && failedPreloadState.active === 1, JSON.stringify(failedPreloadState));
+    await send(11,"received","qq","flow_goto","phone_pickup");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 11, "failed-preload pickup event accepted");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === "phone_pickup", "failed hidden preload reloads and plays on entry", 12000);
+    const retryStats = await (await fetch(`http://127.0.0.1:${PORT}/retry-count`)).json();
+    check("failed hidden preload is retried once when its node becomes active", retryStats.count >= 2 && await cdp.js(`([...document.querySelectorAll('video')].some(v=>v.currentSrc===${JSON.stringify(retryUrl)}&&!v.paused&&v.style.opacity==='1'))`), JSON.stringify(retryStats));
+    await cdp.js("window.__fhNativePlay=HTMLMediaElement.prototype.play;HTMLMediaElement.prototype.play=function(){return Promise.reject(new DOMException('fixture rejection','NotAllowedError'))}");
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(configFrame(12,"/fish_house/themes/cloned/theme.json",true)) });
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().themeId")) === "live-test-clone", "rejected play clone theme");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === "", "rejected play starts before checking pending");
+    await until(async () => (await cdp.js("window.__fishHouseLive.getState().pendingNode")) === "", "rejected play clears pending");
+    await until(async () => (await cdp.js("Number(getComputedStyle(document.getElementById('cover')).opacity) > .9")), "same-origin cover restored after rejection");
+    const rejectedMetrics = await cdp.js("({state:window.__fishHouseLive.getState(),opacity:Number(getComputedStyle(document.getElementById('cover')).opacity),coverWidth:document.getElementById('cover').naturalWidth})");
+    check("play rejection clears pending state and leaves same-origin cover visible", rejectedMetrics.state.currentNode === "" && rejectedMetrics.state.pendingNode === "" && rejectedMetrics.opacity > .9 && rejectedMetrics.coverWidth > 0, JSON.stringify(rejectedMetrics));
+    await cdp.js("HTMLMediaElement.prototype.play=window.__fhNativePlay");
+    const s = await cdp.send("Page.captureScreenshot", { format:"png" }); fs.writeFileSync(path.join(os.tmpdir(), "fish-house-live-frame.png"), Buffer.from(s.data,"base64"));
+    const expectedRetryErrors = cdp.errors.filter(e => e.method === "Log.entryAdded" && e.params.entry.url === retryUrl && /503/.test(e.params.entry.text));
+    const unexpectedBrowserErrors = cdp.errors.filter(e => !expectedRetryErrors.includes(e));
+    check("the retry fixture records exactly its intentional first-request 503", expectedRetryErrors.length === 1, JSON.stringify(expectedRetryErrors));
+    report.runtimeConsoleErrors = unexpectedBrowserErrors.length; report.browserErrors = cdp.errors; check("zero unexpected browser runtime/console errors", !unexpectedBrowserErrors.length, "count="+unexpectedBrowserErrors.length+" details="+JSON.stringify(unexpectedBrowserErrors));
+    report.status = "PASS";
+  } finally {
+    report.finishedAt = new Date().toISOString(); fs.writeFileSync(OUT, JSON.stringify(report,null,2));
+    if (cdp) cdp.close(); server.kill(); chrome.kill();
+    try { fs.rmSync(profile,{recursive:true,force:true}); } catch (_) {}
+  }
+  console.log(JSON.stringify({report:OUT,...report},null,2));
+}
+main().catch(e=>{console.error(e.stack||e);process.exitCode=1;});

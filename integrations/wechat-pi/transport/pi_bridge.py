@@ -6,11 +6,13 @@ import argparse
 from collections import deque
 import hashlib
 import json
+import math
 import os
+from pathlib import Path
 from queue import Empty, Queue
 import re
 import sys
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 import time
 import urllib.error
 import urllib.request
@@ -20,27 +22,38 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pi_xinput as xi  # noqa: E402
 import pi_vision as pv  # noqa: E402
 import pi_media_reply as pm  # noqa: E402
+from auto_reply_allowlist import (auto_reply_group_allowed,
+                                  configured_auto_reply_groups,
+                                  configured_swift_proactive_groups,
+                                  runtime_public_question_cooldown,
+                                  runtime_proactive_group_allowed,
+                                  selected_auto_reply_groups,
+                                  swift_proactive_candidate_allowed)
 try:
     import pi_sticker_transport as pst
     import pi_sticker_vision as psv
 except ImportError:
     pst = psv = None  # Optional rollout; old bridge remains available.
 from bridge_health import Health
-from runtime_paths import (client_runtime_home, configured_group, core_home,
-                           staging_home, state_home, token_file)
 try:
     import group_routes
 except Exception:
     group_routes = None
 from wxsession import parse_row_name
 try:
+    import private_chats as pc
+except ImportError:
+    pc = None
+try:
     from wal_hybrid_wake import WalWake
 except ImportError:
     WalWake = None  # Optional hint module: keep existing UI polling.
 try:
-    from wal_sweep_queue import WalSweepQueue, should_enqueue_wal_sweep
+    from wal_sweep_queue import (WalSweepQueue, VerifiedWalRescanQueue,
+                                 should_enqueue_wal_sweep)
 except ImportError:
     WalSweepQueue = None
+    VerifiedWalRescanQueue = None
     should_enqueue_wal_sweep = None
 try:
     import bridge_proactive_context as bpc
@@ -56,9 +69,26 @@ gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
 MENTION_TOKEN = "\u2005"      # 真 @ 之后的分隔符
-SPECIAL_GROUP = configured_group("SPECIAL_GROUP")
-AUTO_REPLY_GROUP = configured_group("AUTO_REPLY_GROUP")
-ADMIN_LOCAL_ID = configured_group("ADMIN_LOCAL_ID")
+AUTO_REPLY_GROUP = "我推的apex人格"
+CORE_CONFIG_FILE = Path.home() / "dafeiyu-wechat/core/config.json"
+
+
+def _proactive_group_enabled(args, target):
+    return (
+        auto_reply_group_allowed(target, getattr(args, "auto_reply_group", ()),
+                                 getattr(args, "group", ()))
+        and runtime_proactive_group_allowed(target, getattr(args, "token_file", CORE_CONFIG_FILE))
+    )
+
+
+def _proactive_candidate_group_configured(args, target):
+    """Whether this exact monitored group opted into proactive candidates."""
+    return auto_reply_group_allowed(target, getattr(args, "auto_reply_group", ()),
+                                    getattr(args, "group", ()))
+
+
+class _ProactivePolicyDisabled(RuntimeError):
+    pass
 
 class AutoReplyLimiter:
     """Per-process high-participation guard, group-scoped and bounded."""
@@ -83,6 +113,84 @@ class AutoReplyLimiter:
         self.daily.append(now)
         self.last = now
         return True
+
+
+PUBLIC_QUESTION_SETTLE_SECONDS = 1.5
+
+
+class PendingPublicQuestion:
+    __slots__ = ("trace", "due_at")
+
+    def __init__(self, trace, due_at):
+        self.trace = trace
+        self.due_at = due_at
+
+
+class PublicQuestionSettleQueue:
+    """Main-thread-only quiet-window scheduler; no sleep, UI, or disk I/O."""
+
+    def __init__(self, delay=PUBLIC_QUESTION_SETTLE_SECONDS):
+        if delay <= 0:
+            raise ValueError("delay must be positive")
+        self.delay = float(delay)
+        self._pending = {}
+
+    def stage(self, target, trace, now):
+        if not target or not trace:
+            raise ValueError("target and trace are required")
+        self._pending.clear()
+        self._pending[target] = PendingPublicQuestion(trace=trace, due_at=now + self.delay)
+
+    def pending(self, target):
+        return self._pending.get(target)
+
+    def pending_targets(self):
+        return set(self._pending)
+
+    def due_trace(self, target, now):
+        item = self._pending.get(target)
+        return item.trace if item is not None and now >= item.due_at else None
+
+    def wait_timeout(self, interval, now):
+        if not self._pending:
+            return interval
+        earliest = min(item.due_at for item in self._pending.values())
+        return min(interval, max(0.01, earliest - now))
+
+    def cancel(self, target):
+        self._pending.pop(target, None)
+
+    @property
+    def has_pending(self):
+        return bool(self._pending)
+
+
+def settle_poll_targets(targets, settling_targets):
+    """While a candidate settles, defer unrelated scans without cancelling it."""
+    if not settling_targets:
+        return list(targets)
+    return [target for target in targets if target in settling_targets]
+
+
+def keep_pending_settle_group_open(app, target, settler):
+    """Cancel a pending settle only when the exact authorized group is no longer open."""
+    if not group_is_open(app, target):
+        settler.cancel(target)
+        return False
+    return True
+
+
+def latest_candidate_matches(rows, expected_trace, trace_at, is_plain_candidate):
+    """Fail closed unless the expected trace is the current final visible row."""
+    if not isinstance(rows, (list, tuple)) or not rows or not expected_trace:
+        return False
+    try:
+        raw_text = rows[-1][0]
+        if not is_plain_candidate(raw_text):
+            return False
+        return trace_at(len(rows) - 1) == expected_trace
+    except Exception:
+        return False
 
 
 def eligible_auto_text(raw):
@@ -122,12 +230,101 @@ def capture_media(rect, bounds):
 
 # --------------------------------------------------------------------- a11y --
 def get_app():
+    unit = "dafeiyu-wechat-client.service"
+
+    def process_identity(pid):
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+        try:
+            with open("/proc/%d/cgroup" % pid, "r", encoding="utf-8",
+                      errors="replace") as stream:
+                cgroups = stream.read().splitlines()
+            managed = tuple(sorted(
+                (parts[0], parts[1], parts[2])
+                for line in cgroups
+                if len(parts := line.split(":", 2)) == 3
+                and unit in parts[2].split("/")
+            ))
+            if not managed:
+                return None
+            with open("/proc/%d/stat" % pid, "r", encoding="utf-8",
+                      errors="replace") as stream:
+                stat = stream.read()
+            close = stat.rfind(")")
+            if close < 0:
+                return None
+            fields = stat[close + 1:].split()
+            # tail begins at field 3 (state); starttime is field 22.
+            if len(fields) <= 19:
+                return None
+            return managed, fields[19]
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def pid_snapshot(desktop, count):
+        children, pids = [], []
+        try:
+            for index in range(count):
+                child = desktop.get_child_at_index(index)
+                if child is None:
+                    return None
+                pid = child.get_process_id()
+                if not isinstance(pid, int) or pid <= 0:
+                    return None
+                children.append(child)
+                pids.append(pid)
+        except Exception:
+            return None
+        return children, tuple(pids)
+
+    def full_lookup(desktop, count):
+        for index in range(count):
+            app = desktop.get_child_at_index(index)
+            if app and "wechat" in (app.get_name() or "").lower():
+                # Keep legacy discovery semantics: return the first name match
+                # immediately. A separate PID-only snapshot can teach a hint;
+                # if it fails, this call still returns the legacy result.
+                snapshot = pid_snapshot(desktop, count)
+                if snapshot is not None:
+                    children, pids = snapshot
+                    try:
+                        same_node = children[index] is app or children[index] == app
+                    except Exception:
+                        same_node = False
+                    if same_node and len(set(pids)) == len(pids):
+                        pid = pids[index]
+                        identity = process_identity(pid)
+                        get_app._registry_hint = (
+                            (count, index, pids, pid, identity)
+                            if identity is not None else None)
+                    else:
+                        get_app._registry_hint = None
+                else:
+                    get_app._registry_hint = None
+                return app
+        get_app._registry_hint = None
+        return None
+
     d = Atspi.get_desktop(0)
-    for i in range(d.get_child_count()):
-        a = d.get_child_at_index(i)
-        if a and "wechat" in (a.get_name() or "").lower():
-            return a
-    return None
+    count = d.get_child_count()
+    hint = getattr(get_app, "_registry_hint", None)
+    if (isinstance(hint, tuple) and len(hint) == 5 and hint[0] == count
+            and isinstance(hint[1], int) and 0 <= hint[1] < count):
+        snapshot = pid_snapshot(d, count)
+        if snapshot is not None:
+            children, pids = snapshot
+            _, index, old_order, old_pid, old_identity = hint
+            candidate, pid = children[index], pids[index]
+            if (len(set(pids)) == len(pids)
+                    and pids == old_order and pid == old_pid):
+                identity = process_identity(pid)
+                if identity is not None and identity == old_identity:
+                    try:
+                        if "wechat" in (candidate.get_name() or "").lower():
+                            return candidate
+                    except Exception:
+                        pass
+    return full_lookup(d, count)
 
 
 def role(n) -> str:
@@ -173,14 +370,15 @@ def walk(node, dep=0, maxd=26):
                 yield from walk(c, dep + 1, maxd)
 
 
-def _walk_showing(node, dep=0, maxd=26, skip_lists=False):
-    """Prune hidden Qt subtrees (and optionally message/chat row lists)."""
+def _walk_showing(node, dep=0, maxd=26, skip_lists=False, include_role=False):
+    """Prune hidden Qt subtrees; optionally return a role read used for pruning."""
     if dep > maxd or not showing(node):
         return
-    if skip_lists and role(node) == "list" and nm(node) in ("Messages", "Chats"):
-        yield node, dep
+    node_role = role(node) if (skip_lists or include_role) else None
+    if skip_lists and node_role == "list" and nm(node) in ("Messages", "Chats"):
+        yield (node, dep, node_role) if include_role else (node, dep)
         return
-    yield node, dep
+    yield (node, dep, node_role) if include_role else (node, dep)
     try:
         ch = node.get_child_count()
     except Exception:
@@ -192,7 +390,7 @@ def _walk_showing(node, dep=0, maxd=26, skip_lists=False):
             except Exception:
                 continue
             if c is not None:
-                yield from _walk_showing(c, dep + 1, maxd, skip_lists)
+                yield from _walk_showing(c, dep + 1, maxd, skip_lists, include_role)
 
 
 def messages_list(a):
@@ -220,7 +418,7 @@ def ancestor(node, levels):
 def chat_title(a, *, normalize=True) -> str:
     """会话标题：消息区上方最靠上、宽度较大的 label。
 
-    群标题可能带成员数后缀，这里统一剥掉。
+    实测群标题会带成员数后缀，例如 '别野(5)'，这里统一剥掉。
     """
     ml = messages_list(a)
     if ml is None:
@@ -242,13 +440,16 @@ def chat_title(a, *, normalize=True) -> str:
 
 
 def norm_title(t: str) -> str:
-    """去掉群标题末尾的成员数后缀。"""
+    """去掉群标题末尾的成员数后缀，如 '别野(5)' -> '别野'。"""
     t = (t or "").strip()
     if t.endswith(")") or t.endswith("）"):
         i = max(t.rfind("("), t.rfind("（"))
         if i > 0 and t[i + 1:-1].isdigit():
             return t[:i].strip()
     return t
+
+
+ADMIN_LOCAL_ID = "wxid_qinghan_local"
 
 
 def showing(node):
@@ -310,6 +511,45 @@ def sidebar_signatures(app, allowed):
             if len(values) == 1}
 
 
+VERIFIED_WAL_EMPTY_REFRESH_SECONDS = 0.65
+
+
+def schedule_verified_wal_empty_refresh(queue, target, *, now, verified_pending,
+                                         scope_open, had_previous_snapshot,
+                                         appended, viewport_gap, settled,
+                                         source_at):
+    """Retain one short re-read only after an eligible verified-open empty scan."""
+    if (not verified_pending or not scope_open or not had_previous_snapshot
+            or appended or viewport_gap or settled):
+        return False
+    if (isinstance(source_at, bool) or not isinstance(source_at, (int, float))
+            or not math.isfinite(source_at) or source_at > now
+            or now - source_at > 5.0):
+        return False
+    return queue.retry_empty_once(
+        target, now=now, delay_s=VERIFIED_WAL_EMPTY_REFRESH_SECONDS)
+
+
+def verified_wal_scan_may_ack(*, forced_due, verified_pending, viewport_gap):
+    return forced_due and verified_pending and not viewport_gap
+
+
+def verified_wal_scan_may_short_refresh(*, verified_due, verified_pending,
+                                        viewport_gap):
+    return verified_due and verified_pending and not viewport_gap
+
+
+def cancel_filtered_empty_refreshes(queue, due_targets, allowed_targets):
+    """Drop expired short windows that cannot be scanned in this poll pass."""
+    allowed = set(allowed_targets)
+    cancelled = []
+    for target in due_targets:
+        if target not in allowed and queue.empty_refresh_pending(target):
+            if queue.cancel_empty_refresh(target):
+                cancelled.append(target)
+    return cancelled
+
+
 def should_scan_chat(name, signature, last_signature, has_snapshot,
                      last_scan, now, full_scan_interval=60.0,
                      *, urgent_verified=False):
@@ -338,6 +578,23 @@ def private_session_is_verified(args, app, target, now=None):
         and len(visible_chat_matches(app, target)) == 1)
 
 
+def _private_accounts(args):
+    watcher = getattr(args, "_private_watcher", None)
+    if watcher is not None:
+        return watcher.current()
+    raw = getattr(args, "private_accounts", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _is_admin_chat(args, target):
+    admin = getattr(args, "admin_chat", "")
+    return bool(admin) and target == admin
+
+
+def _is_private_target(args, target):
+    return _is_admin_chat(args, target) or target in _private_accounts(args)
+
+
 def verified_wal_target(app, args, wal_roles, now=None):
     """Select only a previously verified, currently open chat for WAL fast read.
 
@@ -350,13 +607,16 @@ def verified_wal_target(app, args, wal_roles, now=None):
     title = chat_title(app)
     if title in args.group and group_is_open(app, title):
         return title
-    if (title == args.admin_chat
+    if (_is_admin_chat(args, title)
             and private_session_is_verified(args, app, title, now)):
+        return title
+    if (title in _private_accounts(args)
+            and private_chat_is_open(app, title)):
         return title
     return None
 
 
-def _special_group_search_overlay_visible(app):
+def _bieye_search_overlay_visible(app):
     """Detect the measured Qt search-result list, not an ordinary chat list.
 
     Search results intercept clicks on the underlying sidebar; do not navigate
@@ -373,9 +633,9 @@ def _special_group_search_overlay_visible(app):
     return False
 
 
-def _dismiss_special_group_search_overlay(app):
-    """Only close the observed contact-search popup for the configured group."""
-    if not _special_group_search_overlay_visible(app):
+def _dismiss_bieye_search_overlay(app):
+    """Only close the observed QQ/WeChat contact-search popup in Bieye mode."""
+    if not _bieye_search_overlay_visible(app):
         return True
     # The Pi WeChat UI at DISPLAY=:99 has its search Clear button here. Never
     # guess or click if the measured search-result geometry differs.
@@ -387,13 +647,13 @@ def _dismiss_special_group_search_overlay(app):
     if header is None:
         return False
     xi.click(302, 108, settle=0.3)
-    return not _special_group_search_overlay_visible(get_app())
+    return not _bieye_search_overlay_visible(get_app())
 
 
 def group_is_open(app, name):
-    # In the configured special group, visible search results can obscure the
-    # current room; even a matching title must fail closed.
-    if SPECIAL_GROUP and name == SPECIAL_GROUP and _special_group_search_overlay_visible(app):
+    # In the explicitly authorized Bieye group, visible search results can
+    # obscure the current room; even a matching title must fail closed.
+    if name == "别野" and _bieye_search_overlay_visible(app):
         return False
     raw_title = chat_title(app, normalize=False)
     # A title alone cannot distinguish two groups with the same display name.
@@ -404,8 +664,8 @@ def group_is_open(app, name):
 
 
 def open_chat(app, name):
-    if SPECIAL_GROUP and name == SPECIAL_GROUP:
-        if not _dismiss_special_group_search_overlay(app):
+    if name == "别野":
+        if not _dismiss_bieye_search_overlay(app):
             return False
         app = get_app()
     matches = visible_chat_matches(app, name)
@@ -413,7 +673,7 @@ def open_chat(app, name):
         return False
     x, y, w, h = matches[0]
     xi.click(x + min(40, w // 2), y + h // 2)
-    if SPECIAL_GROUP and name == SPECIAL_GROUP:
+    if name == "别野":
         # Qt title update may lag click; read only, never repeat the click.
         for _ in range(3):
             if group_is_open(get_app(), name):
@@ -488,6 +748,91 @@ def open_account(app, name, account):
     return chat_title(get_app(), normalize=False) == name
 
 
+def private_chat_is_open(app, name):
+    """Verify an open non-admin private chat (no group suffix, unique visible row)."""
+    if app is None or _bieye_search_overlay_visible(app):
+        return False
+    raw_title = chat_title(app, normalize=False)
+    return raw_title == name and len(visible_chat_matches(app, name)) == 1
+
+
+def open_contact_search(app, name):
+    """Open an allowlisted local contact under the Contacts section when off-screen."""
+    node, rect = search_field(app)
+    if node is None or rect is None:
+        return False
+    x, y, w, h = rect
+    xi.click(x + w // 2, y + h // 2)
+    if not xi.type_text(name):
+        xi.key("Escape")
+        return False
+    editor = node.get_text_iface()
+    if editor is None or Atspi.Text.get_text(editor, 0, -1) != name:
+        xi.key("Escape")
+        return False
+    hits = []
+    in_contacts = False
+    stop_headers = {
+        "Group Chats", "Chat History", "Official Accounts",
+        "Internet search results", "Channels", "Mini Programs",
+        "群聊", "聊天记录", "公众号", "网络查找", "视频号", "小程序",
+    }
+    for candidate, _ in walk(app):
+        if not showing(candidate) or role(candidate) != "list item":
+            continue
+        parent = candidate.get_parent()
+        hit = ext(candidate)
+        if parent is None or nm(parent) == "Chats" or not hit or hit[2] <= 0 or hit[3] <= 0:
+            continue
+        if hit[0] >= 350:
+            continue
+        label = nm(candidate).strip()
+        first = tx_guard.row_first_line(label) if tx_guard is not None else label.splitlines()[0].strip()
+        if first in ("Contacts", "联系人"):
+            in_contacts = True
+            continue
+        if first in stop_headers:
+            if in_contacts:
+                break
+            continue
+        if in_contacts and first == name:
+            hits.append(hit)
+    if len(hits) != 1:
+        xi.key("Escape")
+        return False
+    hx, hy, hw, hh = hits[0]
+    xi.click(hx + hw // 2, hy + hh // 2, settle=0.6)
+    return private_chat_is_open(get_app(), name)
+
+
+def open_private_chat(app, target, account):
+    """Open an allowlisted non-admin private chat without granting admin trust."""
+    if not account:
+        return False
+    if not account.startswith("wxid_"):
+        return open_account(app, target, account)
+    if _bieye_search_overlay_visible(app):
+        if not _dismiss_bieye_search_overlay(app):
+            return False
+        app = get_app()
+        if app is None:
+            return False
+    if private_chat_is_open(app, target):
+        return True
+    matches = visible_chat_matches(app, target)
+    if len(matches) == 1:
+        x, y, w, h = matches[0]
+        xi.click(x + min(40, w // 2), y + h // 2)
+        for _ in range(3):
+            if private_chat_is_open(get_app(), target):
+                return True
+            time.sleep(0.25)
+        return False
+    if len(matches) > 1:
+        return False
+    return open_contact_search(app, target)
+
+
 def read_messages(app):
     """Read visible rows in list order, including accessibility media placeholders."""
     listing = messages_list(app)
@@ -540,7 +885,7 @@ def avatar_side(rect, bounds):
 def _avatar_fuzzy_match(first_rect, second_rect, direction):
     """Compare adjacent incoming avatar pixels without external image packages.
 
-    Only used for the configured group after the UI already verified both incoming directions.
+    Only used for Bieye after the UI already verified both incoming directions.
     The crop producer is pi_vision._png, a filter-0 8-bit RGB PNG.
     """
     if direction != "incoming":
@@ -614,7 +959,7 @@ def _avatar_fuzzy_match(first_rect, second_rect, direction):
 def same_sender_image(first_rect, second_rect, bounds, target):
     """Require the same incoming direction and a matching avatar.
 
-    Fuzzy avatar matching is enabled only in the configured special group.
+    Fuzzy avatar matching is enabled only in the authorized Bieye test group.
     All other groups retain the former strict-hash association.
     """
     first = avatar_side(first_rect, bounds)
@@ -623,7 +968,7 @@ def same_sender_image(first_rect, second_rect, bounds, target):
         return False
     if first[1] == second[1]:
         return True
-    if not SPECIAL_GROUP or target != SPECIAL_GROUP:
+    if target != "别野":
         return False
     return _avatar_fuzzy_match(first_rect, second_rect, first[0])
 
@@ -676,7 +1021,7 @@ def _tx_header_info(app, target):
     raw_title = ""
     showing_target = 0
     ghost_labels = 0
-    # Qt may split a member-count title into parent and child labels,
+    # Qt 群标题会把 '别野(5)' 拆成父 label('别野(5)') 与子 label('别野')/'(5)'，
     # 只在当前 label 不位于已计数的同类 label 子树内部时才累加，避免单控件双计；
     # 同一子树外若出现第二个同名 showing label，仍累加至 >=2 并由 tx_guard 拦截。
     matched_showing_depth = None
@@ -689,10 +1034,15 @@ def _tx_header_info(app, target):
         if role(node) != "label":
             continue
         label_name = nm(node)
+        matches_target = tx_guard is not None and tx_guard.norm_target(label_name) == target
+        # Once the first visible title is known, only labels that can affect
+        # target uniqueness or ghost detection need a separate state query.
+        if not matches_target and (raw_title or not label_name):
+            continue
         is_showing = showing(node)
         if is_showing and label_name and not raw_title:
             raw_title = label_name.strip()
-        if tx_guard is not None and tx_guard.norm_target(label_name) == target:
+        if matches_target:
             if is_showing:
                 if matched_showing_depth is None:
                     showing_target += 1
@@ -718,14 +1068,21 @@ def _tx_chats_info(app, target):
     selected_matches = 0
     for i in range(listing.get_child_count()):
         row = listing.get_child_at_index(i)
-        if row is None or not showing(row):
+        if row is None:
+            continue
+        try:
+            states = row.get_state_set()
+            is_showing = states.contains(Atspi.StateType.SHOWING)
+        except Exception:
+            return None, None, None
+        if not is_showing:
             continue
         first = tx_guard.row_first_line(nm(row))
         norm_first = tx_guard.norm_target(first)
         if norm_first == target:
             matches.append(row)
         try:
-            is_selected = row.get_state_set().contains(Atspi.StateType.SELECTED)
+            is_selected = states.contains(Atspi.StateType.SELECTED)
         except Exception:
             return None, None, None
         if is_selected:
@@ -863,8 +1220,8 @@ def mention_body(text, bots):
     return None
 
 
-def normalize_special_group_quote(text, bots, body):
-    """Bounded, explicitly untrusted reference context; configured group only.
+def normalize_bieye_quote(text, bots, body):
+    """Bounded, explicitly untrusted reference context; Bieye group only.
 
     Qt's accessibility list can expose a native reply as
     @bot<separator> question\nQuote Author's message: quoted text.
@@ -954,8 +1311,16 @@ def _pilot_force_old(payload: dict) -> bool:
     deliver_ready 丢弃（出站图片/表情/真@/引用/文件/多气泡），因此桥侧在
     入站时按 payload 特征预判，命中即强制 old，避免「交给试点却被静默丢」。
     """
-    if payload.get("chat_type") == "private" or payload.get("group_auto_reply"):
+    if payload.get("chat_type") == "private":
         return True
+    if payload.get("group_auto_reply"):
+        candidate = dict(payload)
+        if not candidate.get("account"):
+            candidate["account"] = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT", "")
+        # Separate allowlist: existing Apex/Node candidate selection remains unchanged;
+        # only proven candidates in this exact list may route to Swift.
+        if not swift_proactive_candidate_allowed(candidate, configured_swift_proactive_groups()):
+            return True
     if payload.get("quoted") or payload.get("image_described"):
         return True
     if payload.get("rich_media") or payload.get("multi_bubble"):
@@ -1000,12 +1365,17 @@ def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhoo
     - body、delays、异常处理、返回形状全部复用同一个 `_ask_core_once`。
     """
     url, extra = core_target(payload)
+    settled_public_question = (
+        payload.get("group_auto_reply_public_question_settled") is True)
+    if settled_public_question and "x-unified-token" not in extra:
+        return {"ok": False, "error": "settled_candidate_swift_route_unavailable"}
     account = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT") if extra else None
     routed = {**payload, "account": account} if account else payload
     response = _ask_core_once(url or CORE_URL, path, routed, token, timeout, extra)
     # Only a verified connection refusal proves that the pilot did not
     # receive the message. Never re-submit a request with an unknown outcome.
-    if extra and response.get("error") == "core_connection_refused":
+    if (extra and response.get("error") == "core_connection_refused"
+            and not settled_public_question):
         return _ask_core_once(CORE_URL, path, payload, token, timeout)
     return response
 
@@ -1048,8 +1418,18 @@ def _wait_for_state(predicate, timeout, poll, *, clock=None, sleep=None):
     return False, monotonic() - started
 
 
-def send_reply(target, text, on_submit=None):
+def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
+    pre_return_started = time.monotonic()
+    pre_return_timing = {
+        "before_send_identity_ms": 0, "composer_lookup_ms": 0,
+        "composer_setup_ms": 0, "click_ms": 0,
+        "after_click_identity_ms": 0, "post_click_validation_ms": 0,
+        "ledger_reservation_ms": 0, "draft_settle_ms": 0,
+        "draft_validation_ms": 0, "before_return_identity_ms": 0,
+        "receipt_baseline_ms": 0,
+    }
     # 门 0（发送前）：独立核验唯一 SELECTED 行、标题唯一性、同名歧义、无弹窗与草稿空。
+    stage_started = time.monotonic()
     guard = _tx_new_guard(target)
     if guard is None:
         return "tx_guard_missing"
@@ -1059,27 +1439,50 @@ def send_reply(target, text, on_submit=None):
     app = get_app()
     if app is None or chat_title(app) != target:
         return "target_changed"
+    pre_return_timing["before_send_identity_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
+    stage_started = time.monotonic()
     node, rect = composer(app)
+    pre_return_timing["composer_lookup_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
     if node is None:
         return "composer_missing"
+    stage_started = time.monotonic()
     own_fp = _tx_composer_fp(node)
     reader = node.get_text_iface()
     editor = node.get_editable_text_iface()
     if reader is None or editor is None or reader.get_character_count() != 0:
         return "composer_unavailable"
+    pre_return_timing["composer_setup_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
+    stage_started = time.monotonic()
     xi.click(rect[0] + 150, rect[1] + rect[3] // 2,
              settle=0.12 if UI_STATE_WAIT_ENABLED else 0.2)
+    pre_return_timing["click_ms"] = int((time.monotonic() - stage_started) * 1000)
     # 门 1（点击后立刻）：轻量复核 SELECTED 行未漂移。
+    stage_started = time.monotonic()
     g = guard.after_click(reader.get_character_count())
+    pre_return_timing["after_click_identity_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
     if not g.allow:
         return "tx_denied:" + g.reason
+    stage_started = time.monotonic()
     if chat_title(app) != target or reader.get_character_count() != 0:
         return "composer_changed"
+    pre_return_timing["post_click_validation_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
     # The durable reservation must be committed BEFORE adding the draft.
     # If the ledger is unavailable, fail without leaving unsent text in the
     # composer, where a later operator or bot action might accidentally send it.
-    if on_submit:
+    # Settled public-question candidates defer their durable submission mark
+    # until the existing pre-Return message snapshot has passed freshness.
+    # Other replies retain the original reserve-before-draft ordering.
+    if on_submit and auto_ctx is None:
+        stage_started = time.monotonic()
         on_submit()
+        pre_return_timing["ledger_reservation_ms"] = int(
+            (time.monotonic() - stage_started) * 1000)
+    stage_started = time.monotonic()
     editor.set_text_contents(text)
     # Opt-in: replace ONLY the blind 0.25s after set_text_contents with a
     # bounded wait for the same draft state the very next line validates.
@@ -1093,11 +1496,19 @@ def send_reply(target, text, on_submit=None):
             DRAFT_SETTLE_S, DRAFT_POLL_S)
     else:
         time.sleep(DRAFT_SETTLE_S)
+    pre_return_timing["draft_settle_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
+    stage_started = time.monotonic()
     if chat_title(app) != target or Atspi.Text.get_text(reader, 0, -1) != text:
         return "draft_mismatch"
+    pre_return_timing["draft_validation_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
     # 门 2（按 Return 前）：完整复核目标身份与草稿精确匹配；
     # 仅在 clear_proof 证明仍在原会话原输入框且草稿纯粹为我方文本时才清理，切群或草稿不明绝不清除。
+    stage_started = time.monotonic()
     g = guard.before_return(text)
+    pre_return_timing["before_return_identity_ms"] = int(
+        (time.monotonic() - stage_started) * 1000)
     if not g.allow:
         if guard.clear_proof(text, own_fp).allow:
             try:
@@ -1105,42 +1516,398 @@ def send_reply(target, text, on_submit=None):
             except Exception:
                 pass
         return "tx_denied:" + g.reason
-    _, previous = read_messages(app)
+    # The evidence baseline belongs immediately before Return. Its failure
+    # disables confirmation only; it must not veto a send that passed all
+    # existing target and draft guards.
+    prior_viewport_available = False
+    stage_started = time.monotonic()
+    try:
+        baseline_bounds, previous = read_messages(app)
+        if _valid_receipt_baseline(baseline_bounds, previous):
+            prev_hashes = baseline(previous)
+            prior_viewport_available = True
+    except Exception:
+        if auto_ctx is not None:
+            if guard.clear_proof(text, own_fp).allow:
+                try:
+                    editor.set_text_contents("")
+                except Exception:
+                    pass
+            return "auto_reply_stale:rows_unreadable"
+    if auto_ctx is not None:
+        try:
+            recheck = tx_guard.auto_reply_recheck(auto_ctx, previous)
+        except Exception:
+            recheck = None
+        if recheck is None:
+            if guard.clear_proof(text, own_fp).allow:
+                try:
+                    editor.set_text_contents("")
+                except Exception:
+                    pass
+            return "auto_reply_stale:recheck_unavailable"
+        if not recheck.allow:
+            if guard.clear_proof(text, own_fp).allow:
+                try:
+                    editor.set_text_contents("")
+                except Exception:
+                    pass
+            return "auto_reply_stale:" + recheck.reason
+        # Keep the submission journal immediately before Return. If reservation
+        # fails, remove only a draft still proven to be ours in this session.
+        if on_submit:
+            stage_started = time.monotonic()
+            try:
+                on_submit()
+            except Exception:
+                if guard.clear_proof(text, own_fp).allow:
+                    try:
+                        editor.set_text_contents("")
+                    except Exception:
+                        pass
+                raise
+            pre_return_timing["ledger_reservation_ms"] = int(
+                (time.monotonic() - stage_started) * 1000)
+            stage_started = time.monotonic()
+    return_started = time.monotonic()
+    pre_return_timing["receipt_baseline_ms"] = int(
+        (return_started - stage_started) * 1000)
+    pre_return_timing["pre_return_ms"] = int(
+        (return_started - pre_return_started) * 1000)
+    post_return_reader_error = False
     if UI_STATE_WAIT_ENABLED:
         xi.key("Return", (), 0.05)
-        _wait_for_state(
-            lambda: reader.get_character_count() == 0,
-            0.85, DRAFT_POLL_S)
+        try:
+            _wait_for_state(
+                lambda: reader.get_character_count() == 0,
+                0.85, DRAFT_POLL_S)
+        except Exception:
+            post_return_reader_error = True
     else:
         xi.key("Return", (), 0.9)
-    # 门 3（按 Return 后）：轻量复核草稿已清且 SELECTED 仍对齐，否则 unconfirmed（绝不盲重试）。
-    g = guard.after_return(reader.get_character_count())
-    if not g.allow or reader.get_character_count() != 0 or chat_title(app) != target:
-        return "unconfirmed"
-    prev_hashes = baseline(previous)
+    return_key_ms = int((time.monotonic() - return_started) * 1000)
+    # Post-Return first looks for a candidate in the same viewport. Only an
+    # exact new outgoing row pays for the two identity scans; those scans bracket
+    # the candidate read on one app snapshot and reject a UI that changed away.
+    post_started = time.monotonic()
+    timings = {"candidate_read_ms": 0, "candidate_classify_ms": 0,
+               "candidate_confirm_read_ms": 0,
+               "candidate_confirm_classify_ms": 0,
+               "identity_before_ms": 0,
+               "identity_after_ms": 0, "after_return_guard_ms": 0,
+               "retry_wait_ms": 0, "final_check_ms": 0,
+               "final_check_attempted": False, "candidate_reads": 0,
+               "prior_proxy_reads": 0}
 
-    def _has_visible_outgoing():
-        bounds, current = read_messages(app)
-        if bounds is None:
-            return False
-        count = len(new_rows(prev_hashes, baseline(current)))
-        for visible_text, row in current[len(current) - count:]:
-            direction = avatar_side(row, bounds)
-            if visible_text == text and direction and direction[0] == "outgoing":
-                return True
-        return False
+    def _finish_receipt(status):
+        trace_fields = {"trace": trace} if (
+            isinstance(trace, str) and re.fullmatch(r"[0-9a-f]{64}", trace)) else {}
+        log("send_receipt_timing",
+            **trace_fields,
+            **pre_return_timing,
+            post_return_ms=int((time.monotonic() - post_started) * 1000),
+            return_key_ms=return_key_ms,
+            candidate_read_ms=timings["candidate_read_ms"],
+            candidate_classify_ms=timings["candidate_classify_ms"],
+            candidate_confirm_read_ms=timings["candidate_confirm_read_ms"],
+            candidate_confirm_classify_ms=timings["candidate_confirm_classify_ms"],
+            identity_before_ms=timings["identity_before_ms"],
+            identity_after_ms=timings["identity_after_ms"],
+            after_return_guard_ms=timings["after_return_guard_ms"],
+            retry_wait_ms=timings["retry_wait_ms"],
+            final_check_ms=timings["final_check_ms"],
+            final_check_attempted=timings["final_check_attempted"],
+            final_check_from=timings.get("final_check_from", ""),
+            candidate_reads=timings["candidate_reads"],
+            prior_proxy_reads=timings["prior_proxy_reads"],
+            outcome="confirmed" if status == "visible_outgoing" else "unconfirmed")
+        return status
 
-    if _has_visible_outgoing():
-        return "visible_outgoing"
-    if UI_STATE_WAIT_ENABLED:
-        ok_visible, _ = _wait_for_state(_has_visible_outgoing, 0.35, 0.06)
-        if ok_visible:
-            return "visible_outgoing"
-    return "submitted"
+    if not prior_viewport_available:
+        return _finish_receipt("unconfirmed:receipt_prior_viewport_unavailable")
+
+    def _visible_outgoing_check():
+        try:
+            enumerated_app = get_app()
+            using_prior_proxy = enumerated_app is None
+            # During a brief AT-SPI enumeration gap, the proxy that passed all
+            # pre-Return guards may be used only as a tightly bracketed source.
+            # Never use it if AT-SPI reports it defunct or cannot inspect state.
+            receipt_app = app if using_prior_proxy else enumerated_app
+            if not _receipt_proxy_live(receipt_app):
+                return False, "client_unavailable", False
+            if using_prior_proxy:
+                timings["prior_proxy_reads"] += 1
+                started = time.monotonic()
+                before_reason = _receipt_identity_reason(receipt_app, target)
+                timings["identity_before_ms"] += int(
+                    (time.monotonic() - started) * 1000)
+                if before_reason:
+                    return False, before_reason, True
+            started = time.monotonic()
+            bounds, current = read_messages(receipt_app)
+            timings["candidate_read_ms"] += int((time.monotonic() - started) * 1000)
+            timings["candidate_reads"] += 1
+        except Exception:
+            return False, "observation_error", False
+        started = time.monotonic()
+        candidate, reason = _classify_visible_outgoing(
+            True, text, prev_hashes, current, bounds, avatar_side)
+        timings["candidate_classify_ms"] += int((time.monotonic() - started) * 1000)
+        if using_prior_proxy:
+            # In the fallback path the one candidate read itself must be
+            # bracketed. No second candidate read or alternate app is allowed.
+            started = time.monotonic()
+            after_reason = _receipt_identity_reason(receipt_app, target)
+            timings["identity_after_ms"] += int(
+                (time.monotonic() - started) * 1000)
+            if after_reason:
+                return False, "target_changed", True
+            return candidate, reason, False
+        if not candidate:
+            return False, reason, False
+
+        # Candidate text/direction alone is insufficient: verify the selected
+        # title and unique row both before and after reading it, using this app.
+        started = time.monotonic()
+        before_reason = _receipt_identity_reason(receipt_app, target)
+        timings["identity_before_ms"] += int((time.monotonic() - started) * 1000)
+        if before_reason:
+            return False, before_reason, True
+
+        # The first scan is only a trigger for strong verification. Re-read
+        # after the first identity proof so a row seen during a transient chat
+        # switch cannot serve as the receipt; the second proof brackets this
+        # fresh candidate read on the same app snapshot.
+        confirmed_candidate = False
+        confirm_reason = "observation_error"
+        try:
+            started = time.monotonic()
+            confirm_bounds, confirm_rows = read_messages(receipt_app)
+            timings["candidate_confirm_read_ms"] += int(
+                (time.monotonic() - started) * 1000)
+            timings["candidate_reads"] += 1
+            started = time.monotonic()
+            confirmed_candidate, confirm_reason = _classify_visible_outgoing(
+                True, text, prev_hashes, confirm_rows, confirm_bounds,
+                avatar_side)
+            timings["candidate_confirm_classify_ms"] += int(
+                (time.monotonic() - started) * 1000)
+        except Exception:
+            confirmed_candidate = False
+            confirm_reason = "observation_error"
+        started = time.monotonic()
+        after_reason = _receipt_identity_reason(receipt_app, target)
+        timings["identity_after_ms"] += int((time.monotonic() - started) * 1000)
+        if after_reason:
+            return False, "target_changed", True
+        if not confirmed_candidate:
+            return False, confirm_reason, True
+        return True, "visible_outgoing", True
+
+    found, reason, terminal = _visible_outgoing_check()
+    if found:
+        return _finish_receipt("visible_outgoing")
+
+    # Poll only the inexpensive candidate scan. A candidate with failed target
+    # proof is terminal and is never retried or accepted on a later UI state.
+    retry_started = time.monotonic()
+    while not terminal and time.monotonic() - retry_started < 0.35:
+        remaining = max(0.0, 0.35 - (time.monotonic() - retry_started))
+        time.sleep(min(0.06, remaining))
+        found, reason, terminal = _visible_outgoing_check()
+        if found:
+            timings["retry_wait_ms"] = int((time.monotonic() - retry_started) * 1000)
+            return _finish_receipt("visible_outgoing")
+    timings["retry_wait_ms"] = int((time.monotonic() - retry_started) * 1000)
+
+    # The old after-Return diagnostics remain available on failure only. On a
+    # success they are redundant and used to dominate the confirmation tail.
+    after_return_reason = "reader_unavailable" if post_return_reader_error else ""
+    after_return_passed = False
+    if not post_return_reader_error:
+        started = time.monotonic()
+        try:
+            after_return = guard.after_return(reader.get_character_count())
+            if not after_return.allow:
+                after_return_reason = _safe_receipt_reason(after_return.reason)
+            else:
+                after_return_passed = True
+        except Exception:
+            after_return_reason = "reader_unavailable"
+        timings["after_return_guard_ms"] = int((time.monotonic() - started) * 1000)
+    # Reuse the time already spent on the independent guard. Temporary
+    # enumeration and row-read failures can clear during that check as well.
+    # An identity failure is terminal, and any candidate from this last read
+    # still needs the normal target and exact outgoing-row proof.
+    final_read_reasons = ("no_new_rows", "client_unavailable", "observation_error",
+                          "message_list_unavailable", "message_rows_unavailable")
+    if (reason in final_read_reasons and not terminal and after_return_passed
+            and not post_return_reader_error):
+        timings["final_check_attempted"] = True
+        timings["final_check_from"] = reason
+        started = time.monotonic()
+        final_found, final_reason, _final_terminal = _visible_outgoing_check()
+        timings["final_check_ms"] = int((time.monotonic() - started) * 1000)
+        if final_found:
+            return _finish_receipt("visible_outgoing")
+        reason = final_reason
+    if reason == "no_new_rows" and after_return_reason:
+        reason = after_return_reason
+    return _finish_receipt("unconfirmed:" + _safe_receipt_reason(reason))
 
 
 def baseline(rows):
     return [hashlib.sha256(t.encode()).hexdigest() for t, _ in rows]
+
+
+def _safe_receipt_reason(reason):
+    """Restrict diagnostics to reason tokens; never include visible message text."""
+    reason = str(reason or "unknown")
+    safe = {
+        "client_unavailable", "tx_guard_module_missing", "selected_unreadable",
+        "composer_unreadable", "proof_incomplete", "no_selected_row",
+        "multiple_selected_rows", "selected_row_mismatch", "ambiguous_same_name",
+        "selected_not_unique_match", "composer_not_empty", "identity_light_verified",
+        "reader_unavailable", "target_title_mismatch", "title_unavailable",
+        "no_visible_match", "selected_row_unreadable", "target_row_mismatch",
+        "header_unreadable", "title_missing", "title_mismatch",
+        "header_title_ambiguous",
+        "no_new_rows", "viewport_unaligned", "outgoing_direction_unproven",
+        "new_outgoing_text_mismatch", "new_rows_not_outgoing",
+        "message_list_unavailable", "message_rows_unavailable",
+        "target_unverified", "observation_error", "client_unavailable",
+        "target_changed",
+    }
+    if reason in safe:
+        return reason
+    if reason.startswith(("observe_exception:", "observe_light_exception:")):
+        return "observation_error"
+    return "other"
+
+
+def _valid_receipt_baseline(bounds, rows):
+    if (not isinstance(bounds, (tuple, list)) or len(bounds) != 4
+            or not all(isinstance(value, (int, float)) for value in bounds)
+            or bounds[2] <= 0 or bounds[3] <= 0):
+        return False
+    if not isinstance(rows, (list, tuple)) or not rows:
+        return False
+    return all(isinstance(row, (tuple, list)) and len(row) == 2
+               and isinstance(row[0], str)
+               and isinstance(row[1], (tuple, list)) and len(row[1]) == 4
+               and all(isinstance(value, (int, float)) for value in row[1])
+               and row[1][2] > 0 and row[1][3] > 0
+               for row in rows)
+
+
+def _receipt_identity_reason(app, target):
+    """Recheck title and unique selected target on the same app snapshot."""
+    if app is None:
+        return "client_unavailable"
+    if tx_guard is None:
+        return "tx_guard_module_missing"
+    try:
+        header = _tx_header_info(app, target)
+        if header is None:
+            return "header_unreadable"
+        raw_title = header.get("raw_title") or ""
+        normalized_title = tx_guard.norm_target(raw_title)
+        if not normalized_title:
+            return "title_missing"
+        if normalized_title != target:
+            return "title_mismatch"
+        if header.get("showing_target") != 1:
+            return "header_title_ambiguous"
+        visible_matches, selected, selected_matches = _tx_chats_info(app, target)
+    except Exception:
+        return "selected_row_unreadable"
+    if visible_matches is None or selected is None:
+        return "selected_row_unreadable"
+    normalized = [tx_guard.norm_target(tx_guard.row_first_line(name))
+                  for name in selected]
+    if len(normalized) != 1:
+        return "no_selected_row" if not normalized else "multiple_selected_rows"
+    if normalized[0] != target:
+        return "target_row_mismatch"
+    if visible_matches != 1 or selected_matches != 1:
+        return "ambiguous_same_name"
+    return ""
+
+
+def _receipt_proxy_live(app):
+    """A prior app proxy is usable only while AT-SPI does not mark it defunct."""
+    if app is None:
+        return False
+    try:
+        state_set = app.get_state_set()
+        return (state_set is not None
+                and not state_set.contains(Atspi.StateType.DEFUNCT))
+    except Exception:
+        return False
+
+
+def _classify_visible_outgoing(target_verified, submitted_text, previous_hashes,
+                               current_rows, bounds, direction_for_row):
+    """Classify only newly appended, exact-text outgoing rows after target proof."""
+    if not target_verified:
+        return False, "target_unverified"
+    if bounds is None:
+        return False, "message_list_unavailable"
+    if not isinstance(current_rows, (list, tuple)):
+        return False, "message_rows_unavailable"
+    gaps = []
+    appended = new_rows(
+        previous_hashes, baseline(current_rows), on_gap=lambda: gaps.append(True))
+    if gaps:
+        return False, "viewport_unaligned"
+    if not appended:
+        return False, "no_new_rows"
+    new_visible_rows = current_rows[-len(appended):]
+    outgoing_text_mismatch = False
+    direction_unproven = False
+    for visible_text, row in new_visible_rows:
+        try:
+            direction = direction_for_row(row, bounds)
+        except Exception:
+            direction = None
+        if visible_text == submitted_text:
+            if direction and direction[0] == "outgoing":
+                return True, "visible_outgoing"
+            if direction is None:
+                direction_unproven = True
+        elif direction and direction[0] == "outgoing":
+            outgoing_text_mismatch = True
+    if direction_unproven:
+        return False, "outgoing_direction_unproven"
+    if outgoing_text_mismatch:
+        return False, "new_outgoing_text_mismatch"
+    return False, "new_rows_not_outgoing"
+
+
+def _wal_ingress_diagnostic(rows, previous_count, appended, bounds, bots):
+    """Return redacted evidence for a verified WAL rescan; never return text or IDs."""
+    appended_text = [str(row[0]) for row in appended if isinstance(row, (list, tuple)) and row]
+    configured_bots = [str(bot) for bot in (bots or ()) if str(bot)]
+    sides = set()
+    if bounds is not None:
+        for row in appended[:32]:
+            try:
+                direction = avatar_side(row[1], bounds)
+                if direction:
+                    sides.add(direction[0])
+            except Exception:
+                continue
+    side_class = next(iter(sides)) if len(sides) == 1 else ("mixed" if sides else "unknown")
+    return {
+        "visible_rows": len(rows),
+        "baseline_rows": int(previous_count),
+        "appended_rows": len(appended),
+        "literal_at": any("@" in text for text in appended_text),
+        "object_replacement": any("\ufffc" in text for text in appended_text),
+        "configured_bot": any(bot in text for bot in configured_bots for text in appended_text),
+        "side_class": side_class,
+    }
 
 
 def stable_message_trace(target, rows, index, account=""):
@@ -1158,11 +1925,9 @@ def stable_message_trace(target, rows, index, account=""):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def inbound_payload(text, target, group, account=""):
+def inbound_payload(text, target, group, account="", private_id=ADMIN_LOCAL_ID):
     is_group = target == group
-    if not is_group and not ADMIN_LOCAL_ID:
-        return None
-    chat_id = group if is_group else ADMIN_LOCAL_ID
+    chat_id = group if is_group else private_id
     return {
         # 平台与账号维度只由程序补齐，不由聊天正文决定；旧 core 会忽略这两个未知字段。
         "platform": "wechat",
@@ -1171,7 +1936,7 @@ def inbound_payload(text, target, group, account=""):
         "chat_id": chat_id,
         "chat_title": target,
         "sender_name": "群友" if is_group else target,
-        "sender_id": "wx_group_member" if is_group else ADMIN_LOCAL_ID,
+        "sender_id": "wx_group_member" if is_group else private_id,
         "text": text,
         "at_me": True,
         "msg_id": str(uuid.uuid4()),
@@ -1194,16 +1959,17 @@ def record(health, phase, reason, trace=None, **flags):
 
 
 def blocking_state(app):
-    for node, _ in _walk_showing(app, maxd=12, skip_lists=True):
+    for node, _, node_role in _walk_showing(
+            app, maxd=12, skip_lists=True, include_role=True):
         name = nm(node).lower()
         if "confirm on phone" in name or "手机上确认" in name:
             return "login_confirmation_required"
         if ("scan to log in" in name or "扫码登录" in name
-                or (name in ("log in", "登录", "switch account") and role(node) == "button")):
+                or (name in ("log in", "登录", "switch account") and node_role == "button")):
             return "login_required"
         if "after logging out" in name or "确定退出登录" in name:
             return "window_blocked"
-        if role(node) == "dialog" and (ext(node) or (0, 0, 0, 0))[2] > 0:
+        if node_role == "dialog" and (ext(node) or (0, 0, 0, 0))[2] > 0:
             return "window_blocked"
     return None
 
@@ -1247,8 +2013,17 @@ def _make_row_side_fn(bounds, seed=None):
     return cache, row_side
 
 
-def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
+def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
+                public_question_settler=None, public_question_settled_trace=None):
     is_group = target in args.group
+    if is_group:
+        private_id = ""
+    elif _is_admin_chat(args, target):
+        private_id = ADMIN_LOCAL_ID
+    else:
+        private_id = _private_accounts(args).get(target, "")
+        if not private_id or private_id == ADMIN_LOCAL_ID:
+            return False
     queued_any = False
     side_cache, row_side = _make_row_side_fn(bounds)
     for i in range(start, len(rows)):
@@ -1256,14 +2031,19 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
         trace = str(uuid.uuid4())
         body = mention_body(text, args.bots) if is_group else text.strip()
         auto_candidate = False
-        if (is_group and body is None and target == AUTO_REPLY_GROUP
-                and target in getattr(args, "auto_reply_group", ())
-                and eligible_auto_text(text)):
-            body = text.strip()
-            auto_candidate = True
+        if is_group and body is None and eligible_auto_text(text):
+            if _proactive_group_enabled(args, target):
+                body = text.strip()
+                auto_candidate = True
+            elif _proactive_candidate_group_configured(args, target):
+                # Bounded reason-only diagnostic. Do not persist it to Health's
+                # last_event slot and never include group, body, or trace.
+                log("auto_candidate", reason="policy_disabled")
+        if public_question_settled_trace is not None and not auto_candidate:
+            return False
         quoted = False
-        if is_group and SPECIAL_GROUP and target == SPECIAL_GROUP:
-            body, quoted = normalize_special_group_quote(text, args.bots, body)
+        if is_group and target == "别野":
+            body, quoted = normalize_bieye_quote(text, args.bots, body)
         media = is_image(text)
         image_marker = text if media else ""
         if is_group and body is None:
@@ -1280,11 +2060,35 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
                 record(health, "received", "group", trace)
                 record(health, "mention", "direction_unverified", trace, failed=True)
             continue
+        auto_evidence = None
         if auto_candidate:
-            limiter = getattr(args, "auto_limiter", None)
-            if (limiter is None or jobs.full()
-                    or not limiter.take(time.monotonic())):
+            # Prove freshness and a complete current-row context before taking
+            # the limiter slot. Older rows in one appended batch must not burn
+            # the cooldown that belongs to its newest eligible candidate.
+            # superseded() already treats every later visible row as newer, so
+            # skip before build_proven walks/captures avatar sides for context.
+            if i + 1 < len(rows):
+                log("auto_candidate", reason="superseded")
                 continue
+            if not _proactive_group_enabled(args, target):
+                if _proactive_candidate_group_configured(args, target):
+                    log("auto_candidate", reason="policy_disabled")
+                continue
+            if bpc is None:
+                log("auto_candidate", reason="window_unavailable")
+                continue
+            try:
+                ctx, over, ok = bpc.build_proven(
+                    rows, i, candidate_text=body, side_fn=row_side)
+            except Exception:
+                ctx, over, ok = [], True, False
+            if not ok or not isinstance(ctx, list) or not ctx:
+                log("auto_candidate", reason="window_unavailable")
+                continue
+            if over:
+                log("auto_candidate", reason="superseded")
+                continue
+            auto_evidence = (ctx, False, True)
         image_rect = rect if media else None
         if media and not is_group:
             body = ""
@@ -1293,10 +2097,10 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
             if is_image(next_text) and same_sender_image(rect, next_rect, bounds, target):
                 image_rect = next_rect
                 image_marker = next_text
-        # In the configured group, any explicit @ question can refer to
+        # In the approved Bieye group, any explicit @ question can refer to
         # the immediately preceding image; requiring the word "图" missed
         # natural questions such as "这是什么？". Never search past one row.
-        if is_group and image_rect is None and i > 0 and ((SPECIAL_GROUP and target == SPECIAL_GROUP) or "图" in body):
+        if is_group and image_rect is None and i > 0 and (target == "别野" or "图" in body):
             previous_text, previous_rect = rows[i - 1]
             if is_image(previous_text) and same_sender_image(rect, previous_rect, bounds, target):
                 image_rect = previous_rect
@@ -1319,29 +2123,21 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
             log("vision_capture", status="ok" if photo else "failed", trace=trace,
                 png_bytes=len(photo) if photo else 0)
         record(health, "received", "group" if is_group else "private", trace)
-        record(health, "mention", "auto_reply" if auto_candidate else ("accepted" if is_group else "private"), trace)
         if args.dry_run:
+            record(health, "mention", "auto_reply" if auto_candidate else ("accepted" if is_group else "private"), trace)
             continue
-        payload = inbound_payload(body, target, target if is_group else None)
+        if not auto_candidate:
+            record(health, "mention", "accepted" if is_group else "private", trace)
+        payload = inbound_payload(body, target, target if is_group else None, private_id=private_id)
         payload["msg_id"] = trace
         if animated_sticker and photo:
             payload["_sticker_animated"] = True
         if auto_candidate:
             payload["at_me"] = False
             payload["group_auto_reply"] = True
-            # ★ 可信桥接必须显式证明窗口获取成功；缺模块 / 异常一律 fail-closed（静默）。
-            payload["group_auto_reply_window_ok"] = False
-            payload["group_auto_reply_context"] = []
-            payload["group_auto_reply_superseded"] = True
-            if bpc is not None:
-                try:
-                    ctx, over, ok = bpc.build_proven(
-                        rows, i, candidate_text=body, side_fn=row_side)
-                    payload["group_auto_reply_context"] = ctx if isinstance(ctx, list) else []
-                    payload["group_auto_reply_superseded"] = bool(over) or not ok
-                    payload["group_auto_reply_window_ok"] = bool(ok)
-                except Exception:
-                    pass
+            # Populated only from the proof completed before cooldown reservation.
+            payload["group_auto_reply_context"], payload["group_auto_reply_superseded"], \
+                payload["group_auto_reply_window_ok"] = auto_evidence
         if quoted:
             payload["quoted"] = True
         # 非 @ 主动候选携带快照摘要，供投递前证明未被新 incoming 超越；真 @ 恒 None。
@@ -1349,9 +2145,53 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
         if auto_candidate:
             auto_ctx = (tx_guard.make_auto_context(target, rows, i)
                         if tx_guard is not None else {"target": target, "trace": None})
+        settled_candidate = (public_question_settled_trace is not None
+                             and auto_candidate
+                             and trace == public_question_settled_trace
+                             and image_rect is None and photo is None)
+        if settled_candidate and auto_ctx is not None:
+            auto_ctx["settled_public_question"] = True
+        if public_question_settled_trace is not None and not settled_candidate:
+            return False
+        swift_candidate = False
+        if (public_question_settler is not None and auto_candidate
+                and image_rect is None and photo is None):
+            _, route_headers = core_target(payload)
+            swift_candidate = "x-unified-token" in route_headers
+            if settled_candidate and not swift_candidate:
+                log("public_question_settle", result="route_changed")
+                return False
+            if not settled_candidate and swift_candidate:
+                public_question_settler.stage(target, trace, time.monotonic())
+                log("public_question_settle", result="pending", delay_ms=1500)
+                continue
+        if settled_candidate:
+            if not swift_candidate:
+                return False
+            cooldown = runtime_public_question_cooldown(
+                target, getattr(args, "token_file", CORE_CONFIG_FILE))
+            if cooldown is None:
+                log("public_question_settle", result="cooldown_unavailable")
+                return False
+            payload["group_auto_reply_public_question_settled"] = True
+            payload["group_auto_reply_public_question_cooldown_seconds"] = cooldown
+        # Recheck authorization and queue capacity before consuming the rate slot.
+        if auto_candidate and not _proactive_group_enabled(args, target):
+            if _proactive_candidate_group_configured(args, target):
+                log("auto_candidate", reason="policy_disabled")
+            continue
         if jobs.full():
+            if auto_candidate:
+                log("auto_candidate", reason="queue_full")
             record(health, "queue", "queue_full", trace, failed=True)
         else:
+            if auto_candidate:
+                if not settled_candidate:
+                    limiter = getattr(args, "auto_limiter", None)
+                    if limiter is None or not limiter.take(time.monotonic()):
+                        log("auto_candidate", reason="rate_limited")
+                        continue
+                record(health, "mention", "auto_reply", trace)
             record(health, "queue", "accepted", trace)
             jobs.put_nowait((target, is_group, payload, photo,
                              time.monotonic(), auto_ctx))
@@ -1360,8 +2200,8 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None):
 
 
 def approved_media_command(target, text, photo, media_dir):
-    """Explicit special-group pilot commands, never inferred by model free text."""
-    if not SPECIAL_GROUP or target != SPECIAL_GROUP or not media_dir or photo:
+    """Explicit Bieye pilot commands, never inferred by model free text."""
+    if target != "别野" or not media_dir or photo:
         return None
     demos = {
         "发送测试图片": {"kind": "image", "name": "media-upload-test-blue.png"},
@@ -1399,7 +2239,7 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
                         dynamic = bool(payload.pop("_sticker_animated", False))
                         prompt = (psv.DYNAMIC_VISION_PROMPT if dynamic and psv is not None
                                   else VISION_PROMPT)
-                        description = pv.describe(photo, prompt, timeout=60)
+                        description = pv.describe(photo, prompt, timeout=60, trace_id=trace)
                         log("vision_result", trace=trace,
                             status="ok" if description else "failed")
                         if description:
@@ -1425,8 +2265,8 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
         jobs.task_done()
 
 
-def dispatch_sticker(target, candidate, args, health, parent_trace):
-    """One optional verified image reply, configured-group pilot only.
+def dispatch_sticker(target, candidate, args, health, parent_trace, *, proactive=False):
+    """One optional verified image reply, Bieye pilot only.
 
     Sticker and text use separate health/submit traces. No automatic retries,
     no bypass of the existing WeChat GUI target checks and identity guards.
@@ -1434,6 +2274,8 @@ def dispatch_sticker(target, candidate, args, health, parent_trace):
     if (pst is None or not getattr(args, "_sticker_enabled", False)
             or target != pst.APPROVED_GROUP or target not in args.group):
         return "sticker_disabled_or_target_unapproved"
+    if proactive and not _proactive_group_enabled(args, target):
+        return "auto_policy_disabled"
     if not isinstance(candidate, dict):
         return "sticker_candidate_missing"
     sid = candidate.get("id", "")
@@ -1456,6 +2298,8 @@ def dispatch_sticker(target, candidate, args, health, parent_trace):
     reserved = False
     def reserve():
         nonlocal reserved
+        if proactive and not _proactive_group_enabled(args, target):
+            raise pst.StickerError("auto_policy_disabled")
         if health is not None and not health.reserve_submit(sticker_trace):
             raise RuntimeError("sticker_submit_ledger_unavailable")
         reserved = True
@@ -1484,11 +2328,15 @@ def deliver_ready(replies, args, health=None):
             record(health, "generation", response.get("reason") or response.get("error") or "ignored",
                    trace, failed=not response.get("ok"))
             continue
+        auto_ctx = response.get("_auto_ctx")
+        if auto_ctx is not None and (not is_group or not _proactive_group_enabled(args, target)):
+            record(health, "submit", "auto_policy_disabled", trace)
+            continue
         reply = response.get("reply")
         media = response.get("media")
         sticker_only = bool(response.get("stickerOnly"))
         if media is not None:
-            if not is_group or not SPECIAL_GROUP or target != SPECIAL_GROUP or pm.approved_path(
+            if not is_group or target != "别野" or pm.approved_path(
                     media, getattr(args, "media_dir", "")) is None:
                 record(health, "generation", "media_unapproved", trace, failed=True)
                 continue
@@ -1535,13 +2383,18 @@ def deliver_ready(replies, args, health=None):
             continue
         try:
             if is_group:
+                args._private_verified = None
                 ready = group_is_open(app, target) or open_chat(app, target)
-            else:
+            elif _is_admin_chat(args, target):
                 ready = (private_session_is_verified(args, app, target)
                          or open_account(app, target, args.admin_account))
                 if ready:
                     args._private_verified = target
                     args._private_verified_at = time.monotonic()
+            else:
+                args._private_verified = None
+                account = _private_accounts(args).get(target, "")
+                ready = bool(account) and open_private_chat(app, target, account)
         except Exception:
             record(health, "submit", "navigation_error", trace, failed=True)
             continue
@@ -1552,7 +2405,6 @@ def deliver_ready(replies, args, health=None):
 
         # 非 @ 主动候选额外闸门：投递前必须证明评分期间无新 incoming / 视口位移；
         # stickerOnly 与文本统一走此核验，真 @ (auto_ctx=None) 不受额外拦截。
-        auto_ctx = response.get("_auto_ctx")
         if auto_ctx is not None:
             if tx_guard is None:
                 record(health, "submit", "tx_guard_missing", trace, failed=True)
@@ -1581,7 +2433,8 @@ def deliver_ready(replies, args, health=None):
                        trace, failed=True)
                 continue
         if sticker_only:
-            sticker_status = dispatch_sticker(target, response["sticker"], args, health, trace)
+            sticker_status = dispatch_sticker(
+                target, response["sticker"], args, health, trace, proactive=auto_ctx is not None)
             ok_sticker = sticker_status == "visible_outgoing"
             record(health, "submit",
                    sticker_status if ok_sticker else "sticker_" + sticker_status,
@@ -1594,6 +2447,8 @@ def deliver_ready(replies, args, health=None):
             nonlocal submitted
             # Called before the real Return key. A failed durable write must
             # prevent sending, not merely produce a warning.
+            if auto_ctx is not None and not _proactive_group_enabled(args, target):
+                raise _ProactivePolicyDisabled()
             if health is not None and not health.reserve_submit(trace):
                 raise RuntimeError("submit_ledger_unavailable_or_duplicate")
             submitted = True
@@ -1604,7 +2459,14 @@ def deliver_ready(replies, args, health=None):
                 status = pm.send_media(target, media, getattr(args, "media_dir", ""),
                                        mark_submitting, sys.modules[__name__], xi)
             else:
-                status = send_reply(target, reply, mark_submitting)
+                settled_auto_ctx = (
+                    auto_ctx if isinstance(auto_ctx, dict)
+                    and auto_ctx.get("settled_public_question") is True else None)
+                status = send_reply(target, reply, mark_submitting,
+                                    auto_ctx=settled_auto_ctx, trace=trace)
+        except _ProactivePolicyDisabled:
+            record(health, "submit", "auto_policy_disabled", trace)
+            continue
         except Exception:
             status = "send_exception"
         send_done_at = time.monotonic()
@@ -1634,7 +2496,44 @@ def deliver_ready(replies, args, health=None):
         record(health, "confirmation" if submitted else "submit", status, trace,
                success=confirmed, failed=not confirmed, unknown=submitted and not confirmed)
         if confirmed and media is None and isinstance(response.get("sticker"), dict):
-            dispatch_sticker(target, response["sticker"], args, health, trace)
+            dispatch_sticker(
+                target, response["sticker"], args, health, trace, proactive=auto_ctx is not None)
+
+
+# ------------------------------------------------------------ bridge heartbeat --
+# 存活信号必须与 UI 轮询解耦：早先心跳只在「刚好扫到并验证某个会话」时才发，
+# 空闲/无变化/被慢轮询占用时心跳会停摆几十秒，核心 45s 阈值随即把在线桥接判成
+# 离线（fish-house /api/status 报 wechat.connected=false 的直接根因）。
+_HB_LOCK = Lock()
+_HB_STATE = {"listener": True, "uia": False}
+_HB_STOP = Event()
+
+
+def set_heartbeat_state(listener, uia):
+    """只接受 bool 覆盖，None 表示「本次不更新」，避免把未知当成已知。"""
+    with _HB_LOCK:
+        if isinstance(listener, bool):
+            _HB_STATE["listener"] = listener
+        if isinstance(uia, bool):
+            _HB_STATE["uia"] = uia
+
+
+def start_heartbeat(token, interval=12.0):
+    def run():
+        while not _HB_STOP.is_set():
+            try:
+                with _HB_LOCK:
+                    payload = {"platform": "wechat",
+                               "listener": _HB_STATE["listener"],
+                               "uia": _HB_STATE["uia"]}
+                ask_core(payload, token, timeout=3, path="/api/bridge/heartbeat")
+            except Exception:
+                pass
+            _HB_STOP.wait(interval)
+
+    thread = Thread(target=run, name="bridge-heartbeat", daemon=True)
+    thread.start()
+    return thread
 
 
 def main():
@@ -1643,7 +2542,11 @@ def main():
     parser.add_argument("--bot", required=True)
     parser.add_argument("--admin-chat", default="")
     parser.add_argument("--admin-account", default="")
-    parser.add_argument("--token-file", default=str(token_file()))
+    parser.add_argument("--private-chat", action="append", default=[])
+    parser.add_argument("--private-chats-file", default=os.environ.get(
+        "DAFEIYU_WECHAT_PRIVATE_CHATS_FILE",
+        os.path.expanduser("~/dafeiyu-wechat/core/private-chats.json")))
+    parser.add_argument("--token-file", default=str(CORE_CONFIG_FILE))
     parser.add_argument("--interval", type=float, default=3)
     parser.add_argument("--auto-reply-group", action="append", default=[])
     parser.add_argument("--vision", action="store_true")
@@ -1652,44 +2555,73 @@ def main():
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     args.group = list(dict.fromkeys(args.group))
-    if os.environ.get("DAFEIYU_WECHAT_AUTO_REPLY_ENABLED") == "1":
-        if AUTO_REPLY_GROUP:
-            args.auto_reply_group.append(AUTO_REPLY_GROUP)
-        else:
-            parser.error("auto replies require DAFEIYU_WECHAT_AUTO_REPLY_GROUP")
-    if any(not AUTO_REPLY_GROUP or g != AUTO_REPLY_GROUP or g not in args.group
-           for g in args.auto_reply_group):
-        parser.error("auto replies are limited to one configured monitored group")
+    configured_auto_groups, auto_groups_error = configured_auto_reply_groups()
+    if auto_groups_error and os.environ.get("DAFEIYU_WECHAT_AUTO_REPLY_GROUPS") is not None:
+        parser.error("invalid DAFEIYU_WECHAT_AUTO_REPLY_GROUPS allowlist")
+    if os.environ.get("DAFEIYU_WECHAT_APEX_AUTO") == "1":
+        args.auto_reply_group.append(AUTO_REPLY_GROUP)
+    selected, selection_error = selected_auto_reply_groups(
+        args.auto_reply_group, configured_auto_groups, AUTO_REPLY_GROUP, args.group)
+    if selection_error:
+        parser.error("auto reply groups must be explicitly allowlisted and monitored")
+    args.auto_reply_group = selected
     args.auto_limiter = AutoReplyLimiter()
+    public_question_settler = (
+        PublicQuestionSettleQueue()
+        if os.environ.get("DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST") == "1" and not args.once
+        else None
+    )
     args.bots = [b.strip() for b in args.bot.split(",") if b.strip()]
     if not args.bots:
         parser.error("--bot requires at least one nickname")
     if bool(args.admin_chat) != bool(args.admin_account):
         parser.error("--admin-chat and --admin-account must be provided together")
-    if args.admin_chat and not ADMIN_LOCAL_ID:
-        parser.error("--admin-chat requires DAFEIYU_WECHAT_ADMIN_LOCAL_ID")
     if args.admin_chat in args.group:
         parser.error("--admin-chat must differ from all group names")
+    cli_private = {}
+    if pc is not None:
+        try:
+            cli_private = pc.parse_cli_private_chats(
+                args.private_chat,
+                admin_chat=args.admin_chat,
+                admin_account=args.admin_account,
+                groups=args.group,
+            )
+            allow_path = Path(os.path.expanduser(args.private_chats_file)) if args.private_chats_file else None
+            args._private_watcher = pc.AllowlistWatcher(
+                cli_map=cli_private,
+                file_path=allow_path,
+                admin_chat=args.admin_chat,
+                admin_account=args.admin_account,
+                groups=args.group,
+                on_event=lambda kind, detail: log("private_allowlist", status=kind, detail=detail),
+            )
+        except Exception as exc:
+            parser.error(str(exc))
+    else:
+        if args.private_chat:
+            parser.error("private_chats module unavailable")
+        args._private_watcher = None
     with open(args.token_file, encoding="utf-8") as cfg:
         token = json.load(cfg)["gateway"]["wechat"]["inboundToken"]
-    # Sticker sends require explicit opt-in and matching special/sticker groups.
+    # Roll out gallery-backed sticker images only in the previously approved
+    # Bieye test group. No other group or private message gets sticker sends.
     args._sticker_enabled = bool(
         not args.dry_run and pst is not None
-        and os.environ.get("DAFEIYU_WECHAT_STICKERS") == "1"
-        and SPECIAL_GROUP and pst.APPROVED_GROUP == SPECIAL_GROUP
-        and SPECIAL_GROUP in args.group)
+        and os.environ.get("DAFEIYU_WECHAT_STICKERS") == "1")
     args._sticker_token = token
-    args._sticker_library = str(core_home() / "data" / "stickers")
-    args._sticker_stage = str(staging_home() / "sticker-send")
+    args._sticker_library = os.path.expanduser("~/dafeiyu-wechat/core/data/stickers")
+    args._sticker_stage = os.path.expanduser(
+        "~/dafeiyu-wechat/staging/maintenance-20261113/sticker-send")
     args._sticker_cooldown = pst.StickerCooldown(min_gap=150) if pst is not None else None
     if args._sticker_enabled:
-        print("wechat_sticker_bridge_enabled_special_group_only", flush=True)
+        print("wechat_sticker_bridge_enabled_bieye_only", flush=True)
     snapshots = {}
     last_sidebar = {}
     last_scanned = {}
     args._private_verified = None
     args._private_verified_at = 0.0
-    health = None if args.dry_run else Health(str(state_home() / "bridge-health.json"))
+    health = None if args.dry_run else Health(os.path.expanduser("~/.local/state/dafeiyu-wechat/bridge-health.json"))
     jobs, replies = Queue(maxsize=16), Queue()
     ready_signal = Event()
     wake_signal = Event()
@@ -1702,6 +2634,7 @@ def main():
         Thread(target=generate_replies, args=(jobs, replies, token, health,
                                              args.media_dir, ready_signal, wake_signal), daemon=True).start()
     wal_wake = None
+    verified_rechecks = None
     if not args.dry_run and os.environ.get("DAFEIYU_WECHAT_WAL_WAKE") == "1":
         if WalWake is None:
             print("wal_hints_unavailable_ui_fallback", flush=True)
@@ -1711,6 +2644,8 @@ def main():
                                    print(*fields, flush=True))
                 if not wal_wake.start():
                     wal_wake = None
+                elif VerifiedWalRescanQueue is not None:
+                    verified_rechecks = VerifiedWalRescanQueue(time.monotonic)
             except Exception as error:
                 print("wal_hints_init_failed_ui_fallback", type(error).__name__, flush=True)
     moments = None
@@ -1736,26 +2671,41 @@ def main():
                 except Exception:
                     _moments_code = "unknown"
                 print("moments_self_check_failed code=%s" % _moments_code, flush=True)
-    next_private_poll = 0.0
+    next_private_polls = {}
+    known_privates = set(_private_accounts(args).keys())
     next_heartbeat = 0.0
     next_window_check = 0.0
+    if not args.dry_run:
+        start_heartbeat(token)
     blocked = None
     last_wal_hint_log = 0.0
-    print("bridge_ready auto_reply=%s" % (bool(AUTO_REPLY_GROUP)
-          and AUTO_REPLY_GROUP in args.auto_reply_group), flush=True)
+    print("bridge_ready apex_auto=%s candidate_groups=%d" % (
+        AUTO_REPLY_GROUP in args.auto_reply_group,
+        sum(1 for g in args.auto_reply_group if g != AUTO_REPLY_GROUP)), flush=True)
     while True:
         expected_runtime = os.environ.get("XDG_RUNTIME_DIR")
-        if expected_runtime and os.path.realpath(str(client_runtime_home())) != expected_runtime:
+        if expected_runtime and os.path.realpath(os.path.expanduser(
+                "~/dafeiyu-wechat/client-session/runtime")) != expected_runtime:
             print("client_runtime_changed", flush=True)
             return 4
         try:
             deliver_ready(replies, args, health)
         except Exception as error:
             log("send_result", status=type(error).__name__)
+        privates = _private_accounts(args)
+        removed_privates = known_privates - set(privates.keys())
+        if removed_privates:
+            for old_priv in removed_privates:
+                snapshots.pop(old_priv, None)
+                last_sidebar.pop(old_priv, None)
+                last_scanned.pop(old_priv, None)
+                next_private_polls.pop(old_priv, None)
+        known_privates = set(privates.keys())
         targets = list(args.group)
         watched = set(args.group)
         if args.admin_chat:
             watched.add(args.admin_chat)
+        watched.update(privates.keys())
         if moments is not None and jobs.empty() and replies.empty() and time.monotonic() >= moments_next:
             moments_next = time.monotonic() + 3
             try:
@@ -1771,8 +2721,26 @@ def main():
         # preview remains unchanged, only the already-open and independently
         # verified conversation can get an extra read. All other sessions
         # retain normal sidebar changes and periodic full checks.
-        wal_roles = wal_wake.take_pending() if wal_wake is not None else set()
+        wal_event_times = {}
+        if wal_wake is not None:
+            if hasattr(wal_wake, "take_pending_with_timing"):
+                wal_roles, wal_event_times = wal_wake.take_pending_with_timing()
+            else:  # Backward-compatible optional wake implementations.
+                wal_roles = wal_wake.take_pending()
+        else:
+            wal_roles = set()
+        wal_message_at = wal_event_times.get("message")
+        if wal_message_at is not None:
+            log("wal_ingress_stage", stage="loop", role="message",
+                event_to_loop_ms=max(0, int((time.monotonic() - wal_message_at) * 1000)))
         urgent_target = verified_wal_target(app_now, args, wal_roles, now)
+        if (verified_rechecks is not None and urgent_target in args.group
+                and "message" in wal_roles):
+            last = last_scanned.get(urgent_target, now)
+            earliest = last + 8.0
+            if verified_rechecks.hint(urgent_target, now=now, earliest_at=earliest,
+                                      source_at=wal_message_at):
+                log("wal_verified_recheck_queued", delay_ms=max(0, int((earliest - now) * 1000)))
         if (sweep is not None and should_enqueue_wal_sweep(
                 wal_roles, watched, current_signatures, last_sidebar, urgent_target)):
             if sweep.hint(wal_roles, watched, now=now):
@@ -1781,24 +2749,63 @@ def main():
             log("wal_hint", role="message" if "message" in wal_roles else "session",
                 verified_open=bool(urgent_target))
             last_wal_hint_log = now
-        private_preview_changed = (
-            args.admin_chat in current_signatures
-            and current_signatures[args.admin_chat] != last_sidebar.get(args.admin_chat))
-        if args.admin_chat and (now >= next_private_poll or private_preview_changed
-                                or urgent_target == args.admin_chat
-                                or (sweep is not None and sweep.due(args.admin_chat, now=now))):
-            targets.append(args.admin_chat)
-            next_private_poll = now + 20
+        settling_targets = (public_question_settler.pending_targets()
+                            if public_question_settler is not None else set())
+        # Activity in another sidebar row or a WAL hint is not proof that this
+        # exact pending group was answered. Keep its bounded 1.5s poll window;
+        # the selected-group check below cancels if the UI really changed scope.
+        if not settling_targets:
+            private_list = ([args.admin_chat] if args.admin_chat else []) + list(privates.keys())
+            for priv_target in private_list:
+                private_preview_changed = (
+                    priv_target in current_signatures
+                    and current_signatures[priv_target] != last_sidebar.get(priv_target))
+                if (now >= next_private_polls.get(priv_target, 0.0) or private_preview_changed
+                        or urgent_target == priv_target
+                        or (sweep is not None and sweep.due(priv_target, now=now))):
+                    targets.append(priv_target)
+                    next_private_polls[priv_target] = now + 20
+        else:
+            # Preserve the current group while the one in-memory candidate settles.
+            targets = settle_poll_targets(targets, settling_targets)
+        verified_recheck_targets = set()
+        if verified_rechecks is not None:
+            for target in args.group:
+                if not verified_rechecks.due(target, now=now):
+                    continue
+                if app_now is not None and group_is_open(app_now, target):
+                    verified_recheck_targets.add(target)
+                else:
+                    # A one-shot short refresh is valid only while the same
+                    # independently verified group remains selected.
+                    verified_rechecks.cancel_empty_refresh(target)
+            # Another group's settle window can temporarily filter this target
+            # out. Drop its short deadline instead of waking the full Qt scan
+            # every 10 ms after it expires.
+            cancel_filtered_empty_refreshes(
+                verified_rechecks, verified_recheck_targets, targets)
         # Verified open/changed preview first, then persistent WAL supplement.
         targets.sort(key=lambda t: (
             0 if t == urgent_target else
             1 if t in current_signatures and current_signatures[t] != last_sidebar.get(t)
-            else 2 if sweep is not None and sweep.due(t, now=now)
-            else 3,
-            0 if t == AUTO_REPLY_GROUP else 1))
+            else 2 if t in verified_recheck_targets
+            else 3 if sweep is not None and sweep.due(t, now=now)
+            else 4,
+            0 if t in args.auto_reply_group else 1))
         for target in targets:
-            forced_due = sweep.due(target) if sweep is not None else False
-            priv_interval = (180.0 if (target == args.admin_chat
+            pending_settle = (public_question_settler.pending(target)
+                              if public_question_settler is not None else None)
+            settle_due = (pending_settle is not None
+                          and public_question_settler.due_trace(
+                              target, time.monotonic()) is not None)
+            verified_pending = (verified_rechecks is not None
+                                and target in verified_rechecks.pending)
+            verified_due = target in verified_recheck_targets
+            forced_due = ((sweep.due(target) if sweep is not None else False)
+                          or verified_due)
+            is_priv = _is_private_target(args, target)
+            verified_scope_open = False
+            priv_interval = (180.0 if (is_priv
                                        and target in current_signatures
                                        and wal_wake is not None)
                              else 60.0)
@@ -1807,16 +2814,22 @@ def main():
                 target in snapshots, last_scanned.get(target, 0),
                 time.monotonic(), full_scan_interval=priv_interval,
                 urgent_verified=(target == urgent_target))
-            if not (should_scan or forced_due):
+            if not (should_scan or forced_due or settle_due):
                 continue
             forced_done = False
+            verified_done = False
             if forced_due and not should_scan:
-                log("wal_sweep_scan", kind="private" if target == args.admin_chat else "group")
+                log("wal_sweep_scan", kind="private" if is_priv else "group")
             if (target == urgent_target and target in snapshots
                     and current_signatures.get(target) == last_sidebar.get(target)
                     and 8 <= now - last_scanned.get(target, 0) < 60):
-                log("wal_priority_scan", kind="private" if target == args.admin_chat else "group")
+                log("wal_priority_scan", kind="private" if is_priv else "group")
             poll_started = time.monotonic()
+            wal_source_at = None
+            if verified_pending and verified_rechecks is not None:
+                wal_source_at = verified_rechecks.source_at(target)
+            elif target == urgent_target:
+                wal_source_at = wal_message_at
             try:
                 deliver_ready(replies, args, health)
                 app = get_app()
@@ -1833,33 +2846,65 @@ def main():
                         health.update("client", blocked or "window_available")
                         if blocked == "login_required":
                             try_saved_login(app, expected_runtime)
+                    set_heartbeat_state(blocked is None, None)
                 if blocked:
                     continue
-                if target == args.admin_chat:
+                if _is_admin_chat(args, target):
                     if not (private_session_is_verified(args, app, target)
                             or open_account(app, target, args.admin_account)):
                         args._private_verified = None
                         continue
                     args._private_verified = target
                     args._private_verified_at = time.monotonic()
+                elif target in privates:
+                    args._private_verified = None
+                    if not open_private_chat(app, target, privates[target]):
+                        continue
                 else:
                     args._private_verified = None
-                    if not group_is_open(app, target) and not open_chat(app, target):
-                        continue
+                    if pending_settle is not None:
+                        # A settled candidate is never allowed to navigate back
+                        # to its former group; it must still be the open scope.
+                        if not keep_pending_settle_group_open(
+                                app, target, public_question_settler):
+                            continue
+                        verified_scope_open = True
+                    elif verified_due:
+                        # A queued recheck is valid only for the group that is
+                        # still independently open now. It never navigates.
+                        verified_scope_open = group_is_open(app, target)
+                        if not verified_scope_open:
+                            if verified_rechecks is not None:
+                                verified_rechecks.cancel_empty_refresh(target)
+                            continue
+                    else:
+                        verified_scope_open = group_is_open(app, target)
+                        if not verified_scope_open and not open_chat(app, target):
+                            continue
                 bounds, rows = read_messages(app)
                 if bounds is None or chat_title(app) != target:
+                    if pending_settle is not None and settle_due:
+                        public_question_settler.cancel(target)
                     continue
                 if not args.dry_run and time.monotonic() >= next_heartbeat:
                     next_heartbeat = time.monotonic() + 20
-                    ask_core({"platform": "wechat", "listener": True, "uia": bool(composer(app)[0])},
-                             token, timeout=3, path="/api/bridge/heartbeat")
+                    # 心跳由独立线程发送；这里只刷新它携带的现场值。
+                    set_heartbeat_state(True, bool(composer(app)[0]))
+                previous_snapshot = snapshots.get(target)
                 current = baseline(rows)
                 if not current and snapshots.get(target):
+                    if pending_settle is not None and settle_due:
+                        public_question_settler.cancel(target)
                     continue
                 def mark_gap():
+                    gap_detected[0] = True
                     record(health, "receive", "viewport_gap", str(uuid.uuid4()), failed=True)
 
+                gap_detected = [False]
                 appended = new_rows(snapshots.get(target), current, on_gap=mark_gap)
+                if verified_pending:
+                    log("wal_ingress_diag", **_wal_ingress_diagnostic(
+                        rows, len(previous_snapshot or ()), appended, bounds, args.bots))
                 if target not in snapshots:
                     if target in args.group:
                         print(f"baseline kind=group name={target!r} rows={len(rows)}", flush=True)
@@ -1869,29 +2914,94 @@ def main():
                 last_scanned[target] = time.monotonic()
                 if target in current_signatures:
                     last_sidebar[target] = current_signatures[target]
-                if appended:
-                    accepted = handle_rows(app, rows, len(rows) - len(appended), bounds, target, args, jobs, health)
-                    if accepted and not args.dry_run:
-                        # Core runs in a worker thread. Stay on the already-verified
-                        # conversation until its reply is ready instead of spending
-                        # 10-15 seconds switching through unrelated Qt chat windows.
-                        # A bounded wait maintains fairness if model generation stalls.
-                        ready_signal.wait(timeout=12.0)
-                        ready_signal.clear()
-                        deliver_ready(replies, args, health)
+                accepted = False
+                due_trace = (public_question_settler.due_trace(target, time.monotonic())
+                             if public_question_settler is not None else None)
+                if due_trace is not None:
+                    latest_index = len(rows) - 1
+                    def trace_at(index):
+                        return stable_message_trace(
+                            target, rows, index,
+                            account=os.environ.get("DAFEIYU_WECHAT_ACCOUNT", ""))
+                    latest_matches = latest_candidate_matches(
+                        rows, due_trace, trace_at,
+                        lambda text: eligible_auto_text(text)
+                        and mention_body(text, args.bots) is None)
+                    public_question_settler.cancel(target)
+                    if latest_matches:
+                        accepted = handle_rows(
+                            app, rows, latest_index, bounds, target, args, jobs, health,
+                            public_question_settler=public_question_settler,
+                            public_question_settled_trace=due_trace)
+                    else:
+                        log("public_question_settle", result="candidate_changed")
+                        if appended:
+                            accepted = handle_rows(
+                                app, rows, len(rows) - len(appended), bounds,
+                                target, args, jobs, health,
+                                public_question_settler=public_question_settler)
+                elif appended:
+                    accepted = handle_rows(
+                        app, rows, len(rows) - len(appended), bounds, target,
+                        args, jobs, health,
+                        public_question_settler=public_question_settler)
+                if wal_source_at is not None:
+                    log("wal_ingress_stage", stage="scan", role="message",
+                        event_to_queue_ms=max(0, int((time.monotonic() - wal_source_at) * 1000)),
+                        scan_ms=max(0, int((time.monotonic() - poll_started) * 1000)),
+                        appended_rows=len(appended), queued=bool(accepted))
+                if accepted and not args.dry_run:
+                    # Core runs in a worker thread. Stay on the already-verified
+                    # conversation until its reply is ready instead of spending
+                    # 10-15 seconds switching through unrelated Qt chat windows.
+                    # A bounded wait maintains fairness if model generation stalls.
+                    ready_signal.wait(timeout=12.0)
+                    ready_signal.clear()
+                    deliver_ready(replies, args, health)
+                if (verified_wal_scan_may_ack(
+                        forced_due=forced_due, verified_pending=verified_pending,
+                        viewport_gap=gap_detected[0])
+                        and verified_rechecks is not None):
+                    short_refresh = False
+                    if verified_wal_scan_may_short_refresh(
+                            verified_due=verified_due,
+                            verified_pending=verified_pending,
+                            viewport_gap=gap_detected[0]):
+                        short_refresh = schedule_verified_wal_empty_refresh(
+                            verified_rechecks, target, now=time.monotonic(),
+                            verified_pending=True, scope_open=verified_scope_open,
+                            had_previous_snapshot=previous_snapshot is not None,
+                            appended=bool(appended), viewport_gap=gap_detected[0],
+                            settled=pending_settle is not None, source_at=wal_source_at)
+                    if short_refresh:
+                        log("wal_verified_empty_refresh_queued",
+                            delay_ms=int(VERIFIED_WAL_EMPTY_REFRESH_SECONDS * 1000))
+                    else:
+                        verified_rechecks.completed(target)
+                    verified_done = True
                 if forced_due:
-                    # Acknowledge only after authenticated UI read and row handling.
-                    sweep.completed(target)
+                    # Acknowledge generic sweeps only after authenticated UI read
+                    # and row handling. Verified WAL rechecks are handled above.
+                    if sweep is not None and sweep.due(target):
+                        sweep.completed(target)
                     forced_done = True
             except Exception as error:
-                log("poll_error", target=target, type=type(error).__name__)
+                log("poll_error", target="private" if _is_private_target(args, target) else target, type=type(error).__name__)
             finally:
+                # A verified recheck remains pending after an incomplete read
+                # (including a viewport gap), even if the generic sweep path
+                # considered its own attempt handled.
+                if verified_due and verified_rechecks is not None and not verified_done:
+                    verified_rechecks.failed(target)
                 if forced_due and not forced_done:
-                    sweep.failed(target)
+                    if sweep is not None and sweep.due(target):
+                        sweep.failed(target)
                 elapsed = time.monotonic() - poll_started
                 if elapsed >= 4.0:
-                    log("poll_slow", target="private" if target == args.admin_chat else target,
+                    log("poll_slow", target="private" if _is_private_target(args, target) else target,
                         elapsed_ms=int(elapsed * 1000))
+            if public_question_settler is not None and public_question_settler.has_pending:
+                break
         try:
             deliver_ready(replies, args, health)
         except Exception as error:
@@ -1902,7 +3012,14 @@ def main():
             return 0
         # Database-write hints only shorten idle wait; the sidebar and visible
         # message verification remain the sole authority for replying.
-        wake_signal.wait(timeout=max(1, args.interval))
+        idle_timeout = max(1, args.interval)
+        if public_question_settler is not None:
+            idle_timeout = public_question_settler.wait_timeout(
+                idle_timeout, time.monotonic())
+        if verified_rechecks is not None:
+            idle_timeout = verified_rechecks.wait_timeout(
+                idle_timeout, time.monotonic())
+        wake_signal.wait(timeout=idle_timeout)
         wake_signal.clear()
 
 

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 2,
+  "defaultForm": "adult",
+  "packs": {
+    "adult": {
+      "id": "dafeiyu-adult",
+      "manifest": "home/packs/dafeiyu-adult/manifest.json",
+      "totalBytes": 927922,
+      "statesCount": 8
+    },
+    "chibi": {
+      "id": "dafeiyu-chibi",
+      "manifest": "home/packs/dafeiyu-chibi/manifest.json",
+      "totalBytes": 937026,
+      "statesCount": 8
+    },
+    "video": {
+      "id": "fish-house-video",
+      "manifest": "home/packs/fish-house-video/manifest.json",
+      "statesCount": 8
+    }
+  }
+}

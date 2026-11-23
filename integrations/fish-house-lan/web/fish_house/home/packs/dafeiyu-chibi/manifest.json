@@ -1,0 +1,483 @@
+{
+  "schemaVersion": 2,
+  "id": "dafeiyu-chibi",
+  "form": "chibi",
+  "name": "Q版幼年大肥鱼",
+  "shortName": "Q版形态",
+  "version": "2.0.0",
+  "author": "gosomea/dsh-bigfish community sprites, adapted for DaFeiYu Home",
+  "license": "Code MIT; Artwork personal/LAN reuse with upstream NOTICE preserved (see ASSET_PROVENANCE.md)",
+  "notice": "home/packs/dafeiyu-chibi/NOTICE.txt",
+  "poster": "home/packs/dafeiyu-chibi/poster.png",
+  "format": "webp-sprite-atlas",
+  "minRequirements": {
+    "chrome": 66,
+    "webpAlpha": true,
+    "ramMb": 256
+  },
+  "frameSize": {
+    "width": 260,
+    "height": 260
+  },
+  "anchor": {
+    "feetRatioY": 0.94,
+    "pc": {
+      "x": 0.5,
+      "feetY": 0.885,
+      "heightRatio": 0.46
+    },
+    "mobile": {
+      "x": 0.5,
+      "feetY": 0.815,
+      "heightRatio": 0.40
+    }
+  },
+  "atlases": {
+    "classic": {
+      "src": "home/packs/dafeiyu-chibi/classic.webp",
+      "width": 1043,
+      "height": 782,
+      "origWidth": 1448,
+      "origHeight": 1086,
+      "bytes": 299570,
+      "sha256": "e1a7d0a52cb950e052001f2bbb62262496b1590e16312598d4b52702e7336d4b"
+    },
+    "motions": {
+      "src": "home/packs/dafeiyu-chibi/motions.webp",
+      "width": 903,
+      "height": 903,
+      "origWidth": 1254,
+      "origHeight": 1254,
+      "bytes": 322412,
+      "sha256": "2042960d7710f689e29919ae61a70fa664388fa8e2d20bb84e790a42b21bad58"
+    },
+    "signs": {
+      "src": "home/packs/dafeiyu-chibi/signs.webp",
+      "width": 886,
+      "height": 920,
+      "origWidth": 1230,
+      "origHeight": 1278,
+      "bytes": 315044,
+      "sha256": "e77bd7c374bb6bddea83ce352b066addb135908d777965cabba7d6fa92b61e39"
+    }
+  },
+  "states": {
+    "idle": {
+      "label": "待机中",
+      "loop": true,
+      "bobAmp": 3.2,
+      "bobSpeed": 0.0026,
+      "frames": [
+        {
+          "asset": "classic",
+          "rect": [
+            0,
+            0,
+            269,
+            259
+          ],
+          "durationMs": 2100
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            0,
+            663,
+            226,
+            240
+          ],
+          "durationMs": 1600
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            0,
+            0,
+            269,
+            259
+          ],
+          "durationMs": 1800
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            782,
+            518,
+            261,
+            264
+          ],
+          "durationMs": 1400
+        }
+      ]
+    },
+    "received": {
+      "label": "收到消息",
+      "loop": true,
+      "bobAmp": 5.0,
+      "bobSpeed": 0.0052,
+      "frames": [
+        {
+          "asset": "classic",
+          "rect": [
+            526,
+            259,
+            256,
+            258
+          ],
+          "durationMs": 460
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            226,
+            663,
+            226,
+            240
+          ],
+          "durationMs": 460
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            0,
+            663,
+            226,
+            240
+          ],
+          "durationMs": 340
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            226,
+            663,
+            226,
+            240
+          ],
+          "durationMs": 480
+        }
+      ]
+    },
+    "thinking": {
+      "label": "思考中",
+      "loop": true,
+      "bobAmp": 2.0,
+      "bobSpeed": 0.0024,
+      "frames": [
+        {
+          "asset": "classic",
+          "rect": [
+            782,
+            0,
+            261,
+            259
+          ],
+          "durationMs": 1050
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            530,
+            0,
+            252,
+            259
+          ],
+          "durationMs": 850
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            782,
+            0,
+            261,
+            259
+          ],
+          "durationMs": 950
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            0,
+            259,
+            261,
+            258
+          ],
+          "durationMs": 520
+        }
+      ]
+    },
+    "replying": {
+      "label": "正在回复",
+      "loop": true,
+      "bobAmp": 3.4,
+      "bobSpeed": 0.0065,
+      "frames": [
+        {
+          "asset": "motions",
+          "rect": [
+            0,
+            225,
+            226,
+            223
+          ],
+          "durationMs": 240
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            226,
+            225,
+            229,
+            223
+          ],
+          "durationMs": 220
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            455,
+            225,
+            225,
+            223
+          ],
+          "durationMs": 220
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            680,
+            225,
+            222,
+            223
+          ],
+          "durationMs": 260
+        }
+      ]
+    },
+    "sent": {
+      "label": "回复已送达",
+      "loop": true,
+      "bobAmp": 5.2,
+      "bobSpeed": 0.0052,
+      "frames": [
+        {
+          "asset": "motions",
+          "rect": [226, 678, 225, 225],
+          "durationMs": 460
+        },
+        {
+          "asset": "motions",
+          "rect": [451, 678, 225, 225],
+          "durationMs": 480
+        },
+        {
+          "asset": "motions",
+          "rect": [677, 678, 226, 225],
+          "durationMs": 540
+        }
+      ]
+    },
+    "happy": {
+      "label": "开心互动",
+      "loop": true,
+      "bobAmp": 6.0,
+      "bobSpeed": 0.0058,
+      "frames": [
+        {
+          "asset": "classic",
+          "rect": [
+            269,
+            0,
+            261,
+            259
+          ],
+          "durationMs": 480
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            452,
+            663,
+            225,
+            240
+          ],
+          "durationMs": 480
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            226,
+            663,
+            226,
+            240
+          ],
+          "durationMs": 420
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            677,
+            663,
+            226,
+            240
+          ],
+          "durationMs": 580
+        }
+      ]
+    },
+    "confused": {
+      "label": "有点困惑",
+      "loop": true,
+      "bobAmp": 2.0,
+      "bobSpeed": 0.0028,
+      "frames": [
+        {
+          "asset": "classic",
+          "rect": [
+            530,
+            0,
+            252,
+            259
+          ],
+          "durationMs": 1000
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            0,
+            259,
+            261,
+            258
+          ],
+          "durationMs": 680
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            261,
+            259,
+            266,
+            258
+          ],
+          "durationMs": 780
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            530,
+            0,
+            252,
+            259
+          ],
+          "durationMs": 900
+        }
+      ]
+    },
+    "rest": {
+      "label": "小憩休息",
+      "loop": true,
+      "bobAmp": 1.6,
+      "bobSpeed": 0.0014,
+      "frames": [
+        {
+          "asset": "signs",
+          "rect": [
+            0,
+            469,
+            222,
+            206
+          ],
+          "durationMs": 2400
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            782,
+            518,
+            261,
+            264
+          ],
+          "durationMs": 2200
+        },
+        {
+          "asset": "classic",
+          "rect": [
+            0,
+            518,
+            271,
+            264
+          ],
+          "durationMs": 1500
+        },
+        {
+          "asset": "signs",
+          "rect": [
+            0,
+            469,
+            222,
+            206
+          ],
+          "durationMs": 2400
+        }
+      ]
+    },
+    "error": {
+      "label": "遇到异常",
+      "loop": true,
+      "bobAmp": 4.0,
+      "bobSpeed": 0.0072,
+      "frames": [
+        {
+          "asset": "classic",
+          "rect": [
+            271,
+            518,
+            251,
+            264
+          ],
+          "durationMs": 480
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            0,
+            449,
+            228,
+            215
+          ],
+          "durationMs": 320
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            228,
+            449,
+            230,
+            215
+          ],
+          "durationMs": 360
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            459,
+            449,
+            218,
+            215
+          ],
+          "durationMs": 560
+        },
+        {
+          "asset": "motions",
+          "rect": [
+            677,
+            449,
+            226,
+            215
+          ],
+          "durationMs": 520
+        }
+      ]
+    }
+  }
+}

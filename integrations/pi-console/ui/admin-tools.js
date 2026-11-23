@@ -48,6 +48,7 @@
 
   let mounted = false;
   let busy = false;
+  let resetEpoch = 0;
   let data = {
     status: null, qr: null, login: null, onebot: null, recovery: null, logs: null,
     config: null, plugins: null, capabilities: null, original: null, files: null,
@@ -60,6 +61,12 @@
 
   // ---- 网络 ---------------------------------------------------------------- //
   async function api(path, method, body) {
+    const epoch = resetEpoch;
+    const stale = () => {
+      const error = new Error('会话已变更，已忽略旧请求结果。');
+      error.stale = true;
+      return error;
+    };
     const opts = { method: method || 'GET', credentials: 'same-origin',
       cache: 'no-store', headers: {} };
     if (body !== undefined) {
@@ -70,10 +77,12 @@
     try {
       res = await fetch(path, opts);
     } catch (e) {
+      if (epoch !== resetEpoch) throw stale();
       throw new Error('无法连接控制台服务，请检查网络后重试。');
     }
     let payload = null;
     try { payload = await res.json(); } catch (e) { payload = null; }
+    if (epoch !== resetEpoch) throw stale();
     if (!res.ok) {
       const reason = payload && typeof payload.error === 'string' && payload.error.trim()
         ? payload.error.trim()
@@ -97,20 +106,27 @@
   }
   async function withBusy(label, fn) {
     if (busy) return;
+    const epoch = resetEpoch;
     busy = true;
     syncDisabled();
     setNote(label, 'busy');
     try {
       await fn();
     } catch (e) {
+      if (e.stale || epoch !== resetEpoch) return;
       if (e.status === 401) {
         setNote('登录已失效，请在本页重新登录后再使用工具面板。', 'error');
+        const event = document.createEvent('Event');
+        event.initEvent('fh-qq-admin-unauthorized', true, false);
+        document.dispatchEvent(event);
         return;
       }
       setNote(e.message, 'error');
     } finally {
-      busy = false;
-      syncDisabled();
+      if (epoch === resetEpoch) {
+        busy = false;
+        syncDisabled();
+      }
     }
   }
   // 危险动作：只在本页确认一次（不弹第二次密码，也不跳转登录）。
@@ -179,8 +195,6 @@
       ['QQ 版本', nap.qqVersion || '—', ''],
       ['WebUI 令牌', nap.tokenConfigured ? '已配置' : '未配置', '只报是否配置'],
       ['OneBot 令牌', nap.onebotTokenConfigured ? '已配置' : '未配置', '只报是否配置'],
-      ['旧 systemd 单元', '未使用',
-        'napcat-qq.service 未运行；qq 进程不属于任何单元，不会据此另起客户端'],
     ];
     box.appendChild(table(['项目', '值', '说明'], rows, { minWidth: false }));
     if (gate.message) {
@@ -584,8 +598,17 @@
 
   // ---- 数据流 -------------------------------------------------------------- //
   async function reload(what) {
+    const epoch = resetEpoch;
+    const partialFailures = [];
     const need = what || null;
-    const get = (name, path) => (need && need.indexOf(name) === -1 ? null : api(path));
+    const get = (name, path) => {
+      if (need && need.indexOf(name) === -1) return Promise.resolve(null);
+      return api(path).catch((e) => {
+        if (e.status === 401 || e.stale) throw e;
+        partialFailures.push(name);
+        return { __toolReadFailed: true };
+      });
+    };
     const res = await Promise.all([
       get('status', PREFIX + '/status'),
       get('login', PREFIX + '/login'),
@@ -598,24 +621,42 @@
         + (filePath ? '&path=' + encodeURIComponent(filePath) : '')),
       get('restart', PREFIX + '/restart/plan'),
     ]);
+    if (epoch !== resetEpoch) return;
     const names = ['status', 'login', 'onebot', 'recovery', 'config',
       'plugins', 'capabilities', 'files', 'restartPlan'];
-    names.forEach((n, i) => { if (res[i] !== null) data[n] = res[i]; });
-    await loadLogs();
+    names.forEach((n, i) => {
+      if (res[i] !== null) data[n] = res[i] && res[i].__toolReadFailed ? null : res[i];
+    });
+    try {
+      await loadLogs();
+    } catch (e) {
+      if (e.status === 401 || e.stale) throw e;
+      data.logs = null;
+      partialFailures.push('logs');
+    }
+    if (epoch !== resetEpoch) return;
     renderAll();
+    if (partialFailures.length) setNote('部分 QQ 管理信息暂不可用，可重新读取。', 'error');
+    return partialFailures.length > 0;
   }
 
   async function loadAll() {
-    await reload(null);
-    setNote('已更新。', 'ok');
+    const partial = await reload(null);
+    if (!partial) setNote('已更新。', 'ok');
   }
   async function loadLogs() {
-    data.logs = await api(PREFIX + '/logs?source=' + encodeURIComponent(logSource) + '&lines=80');
+    const epoch = resetEpoch;
+    const result = await api(PREFIX + '/logs?source=' + encodeURIComponent(logSource) + '&lines=80');
+    if (epoch !== resetEpoch) return;
+    data.logs = result;
     renderLogs();
   }
   async function loadFiles() {
-    data.files = await api(PREFIX + '/files?root=' + encodeURIComponent(fileRoot)
+    const epoch = resetEpoch;
+    const result = await api(PREFIX + '/files?root=' + encodeURIComponent(fileRoot)
       + (filePath ? '&path=' + encodeURIComponent(filePath) : ''));
+    if (epoch !== resetEpoch) return;
+    data.files = result;
     renderFiles();
   }
 
@@ -638,11 +679,11 @@
   function build(mount) {
     clear(mount);
     const head = node('div', 'tools-head');
-    head.appendChild(node('p', 'eyebrow', '原版工具'));
-    head.appendChild(node('h2', 'section-title', '原版工具'));
+    head.appendChild(node('p', 'eyebrow', '统一控制台'));
+    head.appendChild(node('h2', 'section-title', 'QQ 管理'));
     mount.appendChild(head);
     mount.appendChild(node('p', 'section-lead',
-      '原版工具统一入口，和本页共用同一次登录。危险操作（重启、改写配置、导入）'
+      '与统一控制台共用当前登录会话。危险操作（重启、改写配置、导入）'
       + '需要在本页确认一次。终端、更新等尚未接入的功能，在「能力与限制」'
       + '里写明原因。'));
 
@@ -659,7 +700,7 @@
     mount.appendChild(bar);
 
     mount.appendChild(card('status', 'QQ 状态', '账号已掩码；令牌只报是否配置。'));
-    mount.appendChild(card('qr', '扫码登录', '已登录时原版会拒绝再出码，这里如实说明。'));
+    mount.appendChild(card('qr', '扫码登录', 'QQ 离线时可在这里扫码登录。'));
     mount.appendChild(card('onebot', 'OneBot', '端口与令牌配置状态。'));
     mount.appendChild(card('plugins', '插件', '原版插件管理器状态。'));
     mount.appendChild(card('config', '设备配置', '白名单字段可改，提交需确认一次。'));
@@ -681,11 +722,22 @@
   window.DaFeiYuAdminTools = {
     mount: mount,
     refresh: () => withBusy('正在重新读取…', loadAll),
+    reset: () => {
+      resetEpoch += 1;
+      const host = document.getElementById(MOUNT_ID);
+      if (host) clear(host);
+      mounted = false;
+      busy = false;
+      data = { status: null, qr: null, login: null, onebot: null, recovery: null,
+        logs: null, config: null, plugins: null, capabilities: null, original: null,
+        files: null, restartPlan: null };
+      filePath = '';
+    },
   };
 
   function boot() {
     const details = document.getElementById('maintenanceTools');
-    if (!details) { mount(); return; }
+    if (!details) return;
     details.addEventListener('toggle', () => { if (details.open) mount(); });
   }
 

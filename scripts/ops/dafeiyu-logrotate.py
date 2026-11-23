@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """大肥鱼引擎日志按大小轮转（copytruncate）。
 
-- 目标：~/dafeiyu-test/run/qq-bot.log（启动器以追加模式写入）
+- 目标：${DAFEIYU_ROOT}/run/qq-bot.log（启动器以追加模式写入）
 - 阈值：单文件 > 5 MiB 时轮转，保留 qq-bot.log.1 / qq-bot.log.2
 - 权限：始终 0600（日志内含本机面板控制 URL，绝不外泄）
 """

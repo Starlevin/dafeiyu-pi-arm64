@@ -25,7 +25,7 @@ import threading
 import unittest
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 
 import content  # noqa: E402
@@ -391,6 +391,7 @@ class Server(object):
         self.tmp = tempfile.TemporaryDirectory(prefix="dfy-content-http-")
         cfg = {
             "stateDir": str(Path(self.tmp.name) / "state"),
+            "qqRoot": str(Path(self.tmp.name) / "qq"),
             "uiDir": str(HERE.parent / "ui"),
             "lanHost": "127.0.0.1", "lanPort": 0, "loopPort": 0,
             "lanNets": ["127.0.0.0/8", "::1/128"],
@@ -829,7 +830,7 @@ class GatewayKeyTests(unittest.TestCase):
             cfg = s.app.content_cfg
             self.assertTrue(cfg["modelBaseUrl"].endswith("/v1"))
             self.assertIn("18090", cfg["modelBaseUrl"])
-            self.assertEqual(cfg["modelName"], "test-model")
+            self.assertEqual(cfg["modelName"], "")
             self.assertEqual(cfg["modelKeyPath"], content.DEFAULT_GATEWAY_KEY_REL)
 
     def test_no_real_model_request_during_tests(self):

@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
+<meta name="theme-color" content="#e8f2fb" />
+<title>大肥鱼的小屋</title>
+<!--
+  兼容基线：目标设备 Root 手机 WebView = Chrome/66（com.android.webview 66.0.3359.158）。
+  因此这里**禁止**使用：aspect-ratio / inset / min() / max() / clamp() / env() /
+  backdrop-filter / 可选链 ?. / 空值合并 ??。旧版正是踩了 aspect-ratio + inset，
+  frame 高度塌成 0，手机整屏只剩灰底（P0 灰屏）。
+-->
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    overflow: hidden; background: #dfeef9;
+  }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 舞台铺满，不再依赖 aspect-ratio：靠 object-fit 保证主体不裁切。 */
+  #stage {
+    position: fixed; top: 0; right: 0; bottom: 0; left: 0;
+    overflow: hidden; background: #cfe3f3;
+  }
+  .frame {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+    overflow: hidden; background: #cfe3f3;
+  }
+  .frame.portrait { display: none; }
+  @media (orientation: portrait) {
+    .frame.landscape { display: none; }
+    .frame.portrait { display: block; }
+  }
+
+  /* 两层叠放做交叉淡化；Chrome 66 支持 opacity 过渡。 */
+  .layer {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+    opacity: 0;
+    -webkit-transition: opacity .7s ease; transition: opacity .7s ease;
+  }
+  .layer.show { opacity: 1; }
+  .layer img {
+    width: 100%; height: 100%;
+    -o-object-fit: contain; object-fit: contain;
+    object-position: 50% 50%;
+    display: block;
+    background: #cfe3f3;
+  }
+
+  #badge {
+    position: fixed; top: 14px; left: 14px; z-index: 10;
+    display: inline-block;
+    padding: 7px 13px;
+    border-radius: 999px;
+    background: #f4f9fe; border: 1px solid rgba(84,116,148,.22);
+    font-size: 12.5px; color: #66788d;
+    box-shadow: 0 8px 24px rgba(40,70,100,.14);
+    opacity: 0; -webkit-transition: opacity .45s ease; transition: opacity .45s ease;
+    pointer-events: none;
+  }
+  #badge.on { opacity: 1; }
+  #badge .dot {
+    display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+    border-radius: 50%; background: #6fc7a4; vertical-align: 1px;
+  }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 20px; z-index: 10;
+    margin-left: -80px; width: 160px; text-align: center;
+    padding: 6px 10px;
+    border-radius: 999px;
+    background: #f4f9fe; border: 1px solid rgba(84,116,148,.22);
+    font-size: 11.5px; color: #66788d;
+    opacity: 0; -webkit-transition: opacity .5s ease; transition: opacity .5s ease;
+    pointer-events: none;
+  }
+  #hint.on { opacity: .92; }
+
+  /* 兜底：图片解码失败时给出可读提示，绝不留一整屏死灰。 */
+  #fallback {
+    position: absolute; top: 0; right: 0; bottom: 0; left: 0;
+    display: none; z-index: 5;
+    padding: 24px; text-align: center; color: #48627c;
+    background: #eaf4fc; font-size: 13px; line-height: 1.7;
+  }
+  #fallback b { display: block; font-size: 15px; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+  <main id="stage" aria-label="大肥鱼的小屋">
+    <div class="frame landscape" data-orient="landscape">
+      <div class="layer show" data-char="whale">
+        <img src="characters/whale-pc.png" alt="鲸鱼娘 · 大肥鱼人格" />
+      </div>
+      <div class="layer" data-char="cat">
+        <img src="characters/cat-pc.png" alt="哈基米 · Gemini 人格" />
+      </div>
+    </div>
+    <div class="frame portrait" data-orient="portrait">
+      <div class="layer show" data-char="whale">
+        <img src="characters/whale-android.png" alt="鲸鱼娘 · 大肥鱼人格" />
+      </div>
+      <div class="layer" data-char="cat">
+        <img src="characters/cat-android.png" alt="哈基米 · Gemini 人格" />
+      </div>
+    </div>
+    <div id="fallback"><b>小屋画面载入失败</b><span id="fallback-why"></span></div>
+  </main>
+
+  <div id="badge"><span class="dot"></span><span id="badge-text">正在连接</span></div>
+  <div id="hint">轻触画面查看当前人格</div>
+
+<script>
+(function () {
+  // 真机自诊断：记住 UA / 视口 / 图片解码 / 可见尺寸 / JS 错误，回传给 Pi。
+  // 只上报渲染所需字段，不含任何聊天或凭据。
+  var d = { ua: String(navigator.userAgent || ""), w: 0, h: 0, dpr: 0,
+            errors: [], imgs: {}, frames: {}, fallback: "", sent: 0 };
+  window.__fhDiag = d;
+  var sentOnce = false;
+
+  function send() {
+    try {
+      d.w = window.innerWidth; d.h = window.innerHeight;
+      d.dpr = window.devicePixelRatio || 1;
+      d.page = location.href;
+      var x = new XMLHttpRequest();
+      x.open("POST", "/api/diag", true);
+      x.setRequestHeader("Content-Type", "application/json");
+      x.send(JSON.stringify(d));
+      d.sent += 1;
+    } catch (e) { /* 诊断失败不能影响画面 */ }
+  }
+
+  window.addEventListener("error", function (ev) {
+    try {
+      d.errors.push(String((ev.message || ev.type) + " @" + (ev.filename || "?") +
+                           ":" + (ev.lineno || 0)));
+    } catch (e) {}
+  }, true);
+
+  function probe() {
+    try {
+      var imgs = document.querySelectorAll(".layer img");
+      for (var i = 0; i < imgs.length; i++) {
+        var im = imgs[i];
+        var key = String(im.getAttribute("src") || "");
+        var state;
+        if (!im.complete) state = "pending";
+        else if (im.naturalWidth > 0) state = "ok " + im.naturalWidth + "x" + im.naturalHeight;
+        else state = "decode_fail";
+        d.imgs[key] = state;
+      }
+      var frames = document.querySelectorAll(".frame");
+      for (var j = 0; j < frames.length; j++) {
+        var f = frames[j];
+        d.frames[String(f.getAttribute("data-orient"))] =
+          String(f.className) + " / " + f.offsetWidth + "x" + f.offsetHeight;
+      }
+      // 本体判定：至少一张当前角色的图真的解码成功，且所在 frame 有可见面积。
+      var orientation = window.matchMedia("(orientation: portrait)").matches ? "portrait" : "landscape";
+      var on = document.querySelector(".frame." + orientation);
+      var shown = on ? on.querySelector(".layer.show img") : null;
+      var visible = !!(on && on.offsetWidth > 0 && on.offsetHeight > 0);
+      var decoded = !!(shown && shown.complete && shown.naturalWidth > 0);
+      var fb = document.getElementById("fallback");
+      if (fb) fb.style.display = visible && decoded ? "none" : "block";
+      if (visible && decoded) {
+        d.fallback = "";
+      } else {
+        var why = document.getElementById("fallback-why");
+        if (why) why.textContent = "已收到页面但没有可用画面（frame " +
+          (on ? on.offsetWidth + "x" + on.offsetHeight : "缺失") + "）。请把这张截图发回来。";
+        d.fallback = visible ? "frame_visible_no_image" : "frame_collapsed";
+      }
+    } catch (e) {
+      d.errors.push("probe:" + (e && e.message ? e.message : e));
+    }
+  }
+
+  window.addEventListener("load", function () {
+    setTimeout(function () { probe(); send(); sentOnce = true; }, 2500);
+    setTimeout(function () { probe(); }, 6000);
+  }, false);
+})();
+</script>
+<script src="./persona.js?v=3"></script>
+</body>
+</html>

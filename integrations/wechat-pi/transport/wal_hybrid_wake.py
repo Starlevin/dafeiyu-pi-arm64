@@ -15,6 +15,7 @@ class WalWake:
         self.notify=notify
         self._pending_lock=threading.Lock()
         self._pending_roles=set()
+        self._pending_since={}
         self.min_gap_s=max(0.2,float(min_gap_s))
         self.startup_log=startup_log or (lambda *_args:None)
         self.paths=list(paths) if paths is not None else find_active_wal_files()
@@ -41,15 +42,23 @@ class WalWake:
                 self.startup_log("wal_hints_listening",len(self.paths))
                 while not self.stop.is_set():
                     roles=watcher.poll(timeout=0.25)
-                    if not roles:
-                        continue
-                    self.events+=1
-                    # Preserve the coarse event role across burst coalescing.
-                    # It is a hint, not a message or a chat identifier.
+                    if roles:
+                        self.events+=1
+                        now=time.monotonic()
+                        # Preserve the coarse event role across burst coalescing.
+                        # It is a hint, not a message or a chat identifier.
+                        with self._pending_lock:
+                            for role in roles:
+                                if role in ('message', 'session'):
+                                    self._pending_roles.add(role)
+                                    self._pending_since.setdefault(role, now)
+                    # The consumer clears its Event after wait(). If another
+                    # file event races with that clear, pending roles remain
+                    # here; re-pulse them until the main loop drains the roles.
                     with self._pending_lock:
-                        self._pending_roles.update(r for r in roles if r in ('message', 'session'))
+                        pending=bool(self._pending_roles)
                     now=time.monotonic()
-                    if now-self._last_pulse>=self.min_gap_s:
+                    if pending and now-self._last_pulse>=self.min_gap_s:
                         self._last_pulse=now
                         self.pulses+=1
                         self.notify.set()
@@ -61,10 +70,17 @@ class WalWake:
 
     def take_pending(self):
         """Atomically drain pending coarse WAL roles; no message access."""
+        roles, _ = self.take_pending_with_timing()
+        return roles
+
+    def take_pending_with_timing(self):
+        """Drain roles and their first monotonic event times; no identifiers."""
         with self._pending_lock:
             result=set(self._pending_roles)
+            first_seen=dict(self._pending_since)
             self._pending_roles.clear()
-        return result
+            self._pending_since.clear()
+        return result, first_seen
 
     def close(self):
         self.stop.set()

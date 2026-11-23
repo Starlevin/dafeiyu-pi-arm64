@@ -1,0 +1,582 @@
+{
+  "schemaVersion": 2,
+  "id": "dafeiyu-adult",
+  "form": "adult",
+  "name": "成年大肥鱼",
+  "shortName": "成年形态",
+  "version": "2.0.0",
+  "author": "Bigfish Studio (gosomea/dsh-bigfish), adapted for DaFeiYu Home",
+  "license": "Code MIT; Artwork personal/LAN reuse with upstream NOTICE preserved (see ASSET_PROVENANCE.md)",
+  "notice": "home/packs/dafeiyu-adult/NOTICE.txt",
+  "poster": "home/packs/dafeiyu-adult/poster.png",
+  "format": "webp-sprite-atlas",
+  "minRequirements": {
+    "chrome": 66,
+    "webpAlpha": true,
+    "ramMb": 256
+  },
+  "frameSize": {
+    "width": 268,
+    "height": 369
+  },
+  "anchor": {
+    "feetRatioY": 0.96,
+    "pc": {
+      "x": 0.5,
+      "feetY": 0.885,
+      "heightRatio": 0.65
+    },
+    "mobile": {
+      "x": 0.5,
+      "feetY": 0.815,
+      "heightRatio": 0.54
+    }
+  },
+  "atlases": {
+    "daily": {
+      "src": "home/packs/dafeiyu-adult/daily.webp",
+      "width": 1106,
+      "height": 737,
+      "origWidth": 1536,
+      "origHeight": 1024,
+      "bytes": 236098,
+      "sha256": "e318237ac005487037fdbfcb9d39830454d0637d9e5d2ebfe121114350993f4c"
+    },
+    "attention": {
+      "src": "home/packs/dafeiyu-adult/attention.webp",
+      "width": 1106,
+      "height": 737,
+      "origWidth": 1536,
+      "origHeight": 1024,
+      "bytes": 224756,
+      "sha256": "28aba040f74fb0675f52cbd3145dbf37576e9c49149b731220b29265e3bf10c0"
+    },
+    "social": {
+      "src": "home/packs/dafeiyu-adult/social.webp",
+      "width": 1106,
+      "height": 737,
+      "origWidth": 1536,
+      "origHeight": 1024,
+      "bytes": 233710,
+      "sha256": "a4d6142388db86b3d5a0eb9e6b79e9571d517a3b486379e3b2872a33eb8071b6"
+    },
+    "tasks": {
+      "src": "home/packs/dafeiyu-adult/tasks.webp",
+      "width": 1106,
+      "height": 737,
+      "origWidth": 1536,
+      "origHeight": 1024,
+      "bytes": 233358,
+      "sha256": "a8bc024a64abe9bfc655fd6135ad90ffa086f77cb0bcaa650e552005a1ed9c7d"
+    }
+  },
+  "states": {
+    "idle": {
+      "label": "待机中",
+      "loop": true,
+      "bobAmp": 2.2,
+      "bobSpeed": 0.002,
+      "frames": [
+        {
+          "asset": "daily",
+          "rect": [
+            27,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 2200
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 140
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            580,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 200
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 140
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            857,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 1900
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            27,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 1400
+        }
+      ]
+    },
+    "received": {
+      "label": "收到消息",
+      "loop": true,
+      "bobAmp": 3.5,
+      "bobSpeed": 0.0042,
+      "frames": [
+        {
+          "asset": "social",
+          "rect": [
+            27,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 420
+        },
+        {
+          "asset": "social",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 380
+        },
+        {
+          "asset": "social",
+          "rect": [
+            580,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 460
+        },
+        {
+          "asset": "social",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 360
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            27,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 620
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 520
+        }
+      ]
+    },
+    "thinking": {
+      "label": "思考中",
+      "loop": true,
+      "bobAmp": 1.8,
+      "bobSpeed": 0.0022,
+      "frames": [
+        {
+          "asset": "tasks",
+          "rect": [
+            27,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 950
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 680
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 680
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            857,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 880
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 620
+        }
+      ]
+    },
+    "replying": {
+      "label": "正在回复",
+      "loop": true,
+      "bobAmp": 2.5,
+      "bobSpeed": 0.0055,
+      "frames": [
+        {
+          "asset": "daily",
+          "rect": [
+            27,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 280
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 210
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 210
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            857,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 240
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 200
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 220
+        }
+      ]
+    },
+    "sent": {
+      "label": "回复已送达",
+      "loop": true,
+      "bobAmp": 4.2,
+      "bobSpeed": 0.0046,
+      "frames": [
+        {
+          "asset": "tasks",
+          "rect": [27, 0, 268, 369],
+          "durationMs": 480
+        },
+        {
+          "asset": "tasks",
+          "rect": [304, 0, 268, 369],
+          "durationMs": 620
+        },
+        {
+          "asset": "tasks",
+          "rect": [580, 0, 268, 369],
+          "durationMs": 520
+        }
+      ]
+    },
+    "happy": {
+      "label": "开心互动",
+      "loop": true,
+      "bobAmp": 4.5,
+      "bobSpeed": 0.0048,
+      "frames": [
+        {
+          "asset": "tasks",
+          "rect": [
+            27,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 520
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 680
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            580,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 520
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 620
+        },
+        {
+          "asset": "social",
+          "rect": [
+            580,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 560
+        }
+      ]
+    },
+    "confused": {
+      "label": "有点困惑",
+      "loop": true,
+      "bobAmp": 1.5,
+      "bobSpeed": 0.0024,
+      "frames": [
+        {
+          "asset": "attention",
+          "rect": [
+            27,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 1050
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 720
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 820
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            857,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 900
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 650
+        }
+      ]
+    },
+    "rest": {
+      "label": "小憩休息",
+      "loop": true,
+      "bobAmp": 1.4,
+      "bobSpeed": 0.0013,
+      "frames": [
+        {
+          "asset": "daily",
+          "rect": [
+            580,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 2600
+        },
+        {
+          "asset": "tasks",
+          "rect": [
+            857,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 2200
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            580,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 2400
+        },
+        {
+          "asset": "daily",
+          "rect": [
+            304,
+            0,
+            268,
+            369
+          ],
+          "durationMs": 420
+        }
+      ]
+    },
+    "error": {
+      "label": "遇到异常",
+      "loop": true,
+      "bobAmp": 3.2,
+      "bobSpeed": 0.0065,
+      "frames": [
+        {
+          "asset": "social",
+          "rect": [
+            27,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 320
+        },
+        {
+          "asset": "social",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 420
+        },
+        {
+          "asset": "social",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 560
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            580,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 720
+        },
+        {
+          "asset": "attention",
+          "rect": [
+            304,
+            369,
+            268,
+            369
+          ],
+          "durationMs": 620
+        }
+      ]
+    }
+  }
+}

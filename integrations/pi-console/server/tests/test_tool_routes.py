@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "fixtures"))
 
@@ -113,6 +113,7 @@ class BridgeTests(unittest.TestCase):
             "napcatBase": "http://127.0.0.1:6099",
             "napcatRuntime": str(cls.root / "napcat"),
             "napcatWebUiConfig": str(cls.conf_dir / "webui.json"),
+            "qqEngineLog": str(cls.root / "fixture-engine.log"),
             "watchdogState": str(cls.root / "absent.json"),
         }
         cls.srv_app = uc.App(dict(cls.cfg), None)

@@ -5,12 +5,14 @@ All WRITE paths in these tests go to a fixture (no production calls, no real
 messages, no real secrets). Reads are served from the same fixture, so the
 tests never touch the live Pi control interfaces.
 
-Run:  python -m unittest test_unified_console -v
-  or: python test_unified_console.py
+Run (from the server directory):
+  python -m unittest discover -s tests -p 'test_unified_console.py' -v
+  or: python tests/test_unified_console.py
 """
 
 from __future__ import annotations
 
+import copy
 import http.client
 import json
 import os
@@ -23,11 +25,14 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+SERVER = HERE.parent          # console modules live one level above tests/
+UI_DIR = SERVER.parent / "ui"  # delivered UI lives next to the server/ dir
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(SERVER))
 
 import unified_console as uc  # noqa: E402
 
-FIXTURE = json.loads((HERE / "fixtures/fixture.json").read_text(encoding="utf-8"))
+FIXTURE = json.loads((SERVER / "fixtures/fixture.json").read_text(encoding="utf-8"))
 
 
 def parse_cookie_value(header):
@@ -43,7 +48,7 @@ def parse_cookie_value(header):
 def start_server(tmp: Path, extra=None):
     cfg = {
         "stateDir": str(tmp / "state"),
-        "uiDir": str(HERE.parent / "ui"),
+        "uiDir": str(UI_DIR),
         "lanHost": "127.0.0.1",
         "lanPort": 0,          # not used: TLS listener is not started in tests
         "loopPort": 0,
@@ -282,8 +287,11 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(set(m), {"id", "name", "platforms"})
             self.assertTrue(set(m["platforms"]) <= {"qq", "wechat"})
         for c in d["conversations"]:
-            self.assertEqual(set(c), {"platform", "id", "name", "kind", "enabled",
-                                      "style", "frequency", "limit", "capabilities"})
+            expected = {"platform", "id", "name", "kind", "enabled",
+                        "style", "frequency", "limit", "capabilities"}
+            if c["platform"] == "wechat":
+                expected.update({"enabledLabel", "enabledHint"})
+            self.assertEqual(set(c), expected)
             self.assertIn(c["platform"], ("qq", "wechat"))
             self.assertIn(c["kind"], ("group", "private"))
             self.assertEqual(set(c["capabilities"]),
@@ -513,8 +521,8 @@ class ContractTests(unittest.TestCase):
 
     def test_frontend_page_contract(self):
         """The delivered ../ui files are served and expose the expected hooks."""
-        html = (HERE.parent / "ui/index.html").read_text(encoding="utf-8")
-        js = (HERE.parent / "ui/app.js").read_text(encoding="utf-8")
+        html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        js = (UI_DIR / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="globalCard"', html)
         self.assertIn('id="globalBody"', html)
         self.assertIn("globalSettings", js)
@@ -543,7 +551,7 @@ class ContractTests(unittest.TestCase):
             (tls / "server.key").write_bytes(b"x")
             cfg = {
                 "stateDir": str(d / "state"),
-                "uiDir": str(HERE.parent / "ui"),
+                "uiDir": str(UI_DIR),
                 "lanHost": "203.0.113.200",
                 "lanPort": 0, "loopPort": 0,
                 "tlsCert": str(tls / "server.crt"),
@@ -711,7 +719,7 @@ class DegradationTests(unittest.TestCase):
         broken = {"qq": {}, "wechat": FIXTURE["wechat"]}
         cfg = {
             "stateDir": str(Path(cls.tmp.name) / "state"),
-            "uiDir": str(HERE.parent / "ui"),
+            "uiDir": str(UI_DIR),
             "lanHost": "127.0.0.1", "lanPort": 0, "loopPort": 0,
             "lanNets": ["127.0.0.0/8"],
         }
@@ -976,7 +984,7 @@ class StatusTruthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="dafeiyu-verify-") as tmp:
             cfg = {
                 "stateDir": str(Path(tmp) / "state"),
-                "uiDir": str(HERE.parent / "ui"),
+                "uiDir": str(UI_DIR),
                 "lanHost": "127.0.0.1", "lanPort": 0, "loopPort": 0,
                 "lanNets": ["127.0.0.0/8"], "extraHosts": ["127.0.0.1", "localhost"],
             }
@@ -1009,7 +1017,7 @@ class StatusTruthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="dafeiyu-broken-") as tmp:
             cfg = {
                 "stateDir": str(Path(tmp) / "state"),
-                "uiDir": str(HERE.parent / "ui"),
+                "uiDir": str(UI_DIR),
                 "lanHost": "127.0.0.1", "lanPort": 0, "loopPort": 0,
                 "lanNets": ["127.0.0.0/8"], "extraHosts": ["127.0.0.1", "localhost"],
             }
@@ -1033,6 +1041,279 @@ class StatusTruthTests(unittest.TestCase):
             finally:
                 srv.shutdown()
                 srv.server_close()
+
+
+class WeChatProactiveAllowlistTests(unittest.TestCase):
+    """Only the exact, unique bridge group title is changed; no live sends."""
+
+    def fixture(self, titles, groups=None):
+        fx = copy.deepcopy(FIXTURE)
+        fx["wechat"]["titles"] = titles
+        fx["wechat"]["/api/config"] = {
+            "ok": True, "config": {"group": {
+                "freeChat": False, "freeChatChance": 0.06,
+                "proactiveJudge": {"enabled": False, "groups": list(groups or [])},
+            }},
+        }
+        fx["wechat"]["writes"] = []
+        return fx
+
+    def test_toggle_persists_and_reads_back_only_exact_group(self):
+        import adapters
+
+        fx = self.fixture([
+            {"name": "原生群甲", "group": True},
+            {"name": "相邻群乙", "group": True},
+            {"name": "管理员", "group": False},
+        ], groups=["legacy-entry", "legacy-entry"])
+
+        class WriteThrough(adapters.WeChatAdapter):
+            def _post(self, path, body):
+                self.fixture["wechat"]["writes"].append((path, copy.deepcopy(body)))
+                if path == "/api/config":
+                    cur = self.fixture["wechat"]["/api/config"]
+                    groups = body["patch"]["group"]["proactiveJudge"]["groups"]
+                    cur["config"]["group"]["proactiveJudge"]["groups"] = groups
+                return {"ok": True}
+
+        console = adapters.Console({}, fx)
+        console.wechat = WriteThrough({}, fx)
+        before = console.wechat.conversations()
+        alpha = next(c for c in before if c["id"] == "wechat:group:原生群甲")
+        beta = next(c for c in before if c["id"] == "wechat:group:相邻群乙")
+        self.assertFalse(alpha["enabled"])
+        self.assertTrue(alpha["capabilities"]["enabled"])
+        self.assertEqual(alpha["enabledLabel"], "主动闲聊白名单")
+        self.assertIn("全局判别关闭时不会触发自动闲聊", alpha["enabledHint"])
+        self.assertFalse(beta["enabled"])
+        self.assertFalse(console.wechat.conversations()[2]["capabilities"]["enabled"])
+
+        # The per-group checkbox is only an allowlist setting. The global
+        # judge stays off and freeChat fields are untouched.
+        console.set_conversation("wechat", alpha["id"], "enabled", True)
+        self.assertEqual(console.wechat.conversations()[0]["enabled"], True)
+        self.assertEqual(fx["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"],
+                         {"enabled": False, "groups": [
+                             "legacy-entry", "legacy-entry", "原生群甲"]})
+        self.assertFalse(fx["wechat"]["/api/config"]["config"]["group"]["freeChat"])
+        self.assertEqual(fx["wechat"]["/api/config"]["config"]["group"]["freeChatChance"], 0.06)
+        self.assertEqual(len(fx["wechat"]["writes"]), 1)
+        console.set_conversation("wechat", alpha["id"], "enabled", False)
+        self.assertEqual(console.wechat.conversations()[0]["enabled"], False)
+        self.assertEqual(fx["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"],
+                         {"enabled": False, "groups": ["legacy-entry", "legacy-entry"]})
+
+    def test_duplicate_group_name_is_read_only_and_write_is_rejected(self):
+        import adapters
+
+        fx = self.fixture([
+            {"name": "重名群", "group": True},
+            {"name": "重名群", "group": True},
+        ])
+        console = adapters.Console({}, fx)
+        rows = console.wechat.conversations()
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["enabled"] is False for row in rows))
+        self.assertTrue(all(row["capabilities"]["enabled"] is False for row in rows))
+        with self.assertRaises(adapters.AdapterError):
+            console.set_conversation("wechat", "wechat:group:重名群", "enabled", True)
+        self.assertEqual(fx["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"]["groups"], [])
+        self.assertEqual(fx["wechat"]["writes"], [])
+
+    def test_missing_or_blank_group_title_is_read_only(self):
+        import adapters
+
+        titles = [
+            {"group": True}, {"name": None, "group": True},
+            {"name": "", "group": True}, {"name": "   ", "group": True},
+            {"name": 17, "group": True}, {"name": "fixture-valid", "group": True},
+        ]
+        fx = self.fixture(titles)
+        console = adapters.Console({}, fx)
+        rows = console.wechat.conversations()
+        self.assertEqual(len(rows), len(titles))
+        for row in rows[:-1]:
+            self.assertFalse(row["capabilities"]["enabled"])
+            with self.assertRaises(adapters.AdapterError):
+                console.set_conversation("wechat", row["id"], "enabled", True)
+        self.assertEqual(fx["wechat"]["writes"], [])
+        self.assertTrue(rows[-1]["capabilities"]["enabled"])
+
+    def test_full_list_readback_mismatch_fails_without_retry(self):
+        import adapters
+
+        fx = self.fixture([
+            {"name": "fixture-alpha", "group": True},
+            {"name": "fixture-beta", "group": True},
+        ], groups=["legacy-entry", "fixture-beta"])
+
+        class MismatchedReadback(adapters.WeChatAdapter):
+            def _post(self, path, body):
+                self.fixture["wechat"]["writes"].append((path, copy.deepcopy(body)))
+                self.fixture["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"]["groups"] = [
+                    "fixture-beta"]
+                return {"ok": True}
+
+        console = adapters.Console({}, fx)
+        console.wechat = MismatchedReadback({}, fx)
+        with self.assertRaisesRegex(adapters.AdapterError, "白名单与请求不一致"):
+            console.set_conversation("wechat", "wechat:group:fixture-alpha", "enabled", True)
+        self.assertEqual(len(fx["wechat"]["writes"]), 1)
+
+    def test_concurrent_group_toggles_preserve_both_updates(self):
+        import adapters
+
+        fx = self.fixture([
+            {"name": "fixture-alpha", "group": True},
+            {"name": "fixture-beta", "group": True},
+        ])
+        first_post_started = threading.Event()
+        release_first_post = threading.Event()
+        second_read_config = threading.Event()
+
+        class PausedWriteThrough(adapters.WeChatAdapter):
+            def __init__(self, cfg, fixture):
+                super().__init__(cfg, fixture)
+                self.post_count = 0
+                self.post_guard = threading.Lock()
+
+            def _get(self, path):
+                if path == "/api/config" and threading.current_thread().name == "second-toggle":
+                    second_read_config.set()
+                return super()._get(path)
+
+            def _post(self, path, body):
+                with self.post_guard:
+                    self.post_count += 1
+                    first = self.post_count == 1
+                if first:
+                    first_post_started.set()
+                    if not release_first_post.wait(timeout=5):
+                        raise RuntimeError("fixture gate timed out")
+                self.fixture["wechat"]["writes"].append((path, copy.deepcopy(body)))
+                groups = body["patch"]["group"]["proactiveJudge"]["groups"]
+                self.fixture["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"]["groups"] = groups
+                return {"ok": True}
+
+        console = adapters.Console({}, fx)
+        console.wechat = PausedWriteThrough({}, fx)
+        results = []
+
+        def toggle(name):
+            try:
+                console.set_conversation("wechat", "wechat:group:" + name, "enabled", True)
+                results.append((name, None))
+            except Exception as exc:  # captured so the test can release/join both threads
+                results.append((name, exc))
+
+        first = threading.Thread(target=toggle, name="first-toggle", args=("fixture-alpha",))
+        second = threading.Thread(target=toggle, name="second-toggle", args=("fixture-beta",))
+        first.start()
+        self.assertTrue(first_post_started.wait(timeout=2))
+        second.start()
+        self.assertTrue(second_read_config.wait(timeout=2))
+        # Second request has completed its UI capability read but cannot start
+        # its RMW write until the first has posted and read back.
+        self.assertEqual(len(fx["wechat"]["writes"]), 0)
+        release_first_post.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(results, [("fixture-alpha", None), ("fixture-beta", None)])
+        self.assertEqual(
+            fx["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"]["groups"],
+            ["fixture-alpha", "fixture-beta"])
+
+    def test_failed_patch_releases_group_lock_for_next_request(self):
+        import adapters
+
+        fx = self.fixture([
+            {"name": "fixture-alpha", "group": True},
+            {"name": "fixture-beta", "group": True},
+        ])
+
+        class FailOnce(adapters.WeChatAdapter):
+            def __init__(self, cfg, fixture):
+                super().__init__(cfg, fixture)
+                self.posts = 0
+
+            def _post(self, path, body):
+                self.posts += 1
+                if self.posts == 1:
+                    return {"ok": False}
+                self.fixture["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"]["groups"] = copy.deepcopy(
+                    body["patch"]["group"]["proactiveJudge"]["groups"])
+                return {"ok": True}
+
+        console = adapters.Console({}, fx)
+        console.wechat = FailOnce({}, fx)
+        with self.assertRaisesRegex(adapters.AdapterError, "内核拒绝保存"):
+            console.set_conversation("wechat", "wechat:group:fixture-alpha", "enabled", True)
+        console.set_conversation("wechat", "wechat:group:fixture-beta", "enabled", True)
+        self.assertEqual(
+            fx["wechat"]["/api/config"]["config"]["group"]["proactiveJudge"]["groups"],
+            ["fixture-beta"])
+
+
+class WeChatGlobalStyleTests(unittest.TestCase):
+    """The global WeChat persona is read from /api/persona, not from rows.
+
+    Regression: with no bridge titles `WeChatAdapter.conversations()` is empty,
+    and `Console._wechat_global_style()` used to pick the value out of that
+    list — so a readable /api/persona plus a successful write still surfaced as
+    `overview.globalSettings[0].value === null`.
+    """
+
+    def test_write_then_read_back_without_any_conversation(self):
+        import adapters
+
+        fx = copy.deepcopy(FIXTURE)
+        fx["wechat"]["titles"] = []  # no bridge titles -> no WeChat conversations
+
+        class WriteThrough(adapters.WeChatAdapter):
+            """Project fixture + the one global persona write the real core keeps."""
+
+            def _post(self, path, body):
+                result = super()._post(path, body)
+                if path == "/api/persona/preset":
+                    self.fixture["wechat"]["/api/persona"] = {
+                        "ok": True, "persona": {"sourcePreset": body["id"]}}
+                return result
+
+        console = adapters.Console({}, fx)
+        console.wechat = WriteThrough({}, fx)
+
+        before = console.overview()
+        self.assertEqual(
+            [c for c in before["conversations"] if c["platform"] == "wechat"], [])
+        # A readable /api/persona is reported even with zero conversations.
+        self.assertEqual(before["globalSettings"][0]["value"], "persona-dafeiyu")
+
+        # Write through the real global scope, then read the overview back.
+        console.set_conversation("wechat", "wechat:global", "style", "persona-tieba")
+
+        after = console.overview()
+        self.assertEqual(after["globalSettings"][0]["scope"], "wechat:global")
+        self.assertEqual(after["globalSettings"][0]["value"], "persona-tieba")
+
+    def test_global_style_falls_back_to_preset_field(self):
+        import adapters
+
+        fx = copy.deepcopy(FIXTURE)
+        # The real core reports `persona.preset` when `sourcePreset` is absent.
+        fx["wechat"]["/api/persona"] = {"ok": True,
+                                        "persona": {"preset": "persona-standard"}}
+        self.assertEqual(adapters.Console({}, fx).overview()["globalSettings"][0]["value"],
+                         "persona-standard")
+
+    def test_global_style_stays_unknown_when_persona_is_unreadable(self):
+        import adapters
+
+        # No /api/persona (or anything else): the value stays unknown, not guessed.
+        self.assertIsNone(
+            adapters.Console({}, {"qq": {}, "wechat": {}})
+            .overview()["globalSettings"][0]["value"])
 
 
 if __name__ == "__main__":

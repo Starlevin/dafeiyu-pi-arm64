@@ -1,19 +1,18 @@
-/* 大肥鱼统一控制台 — 暖白单色 / 编辑式排版 / 无外链字体与 CDN
-   设计约束：无渐变、无重阴影、细边框、8–12px 圆角、宽松留白。 */
+/* 大肥鱼统一控制台，无外链字体与 CDN。 */
 
 :root {
-  --bg:          #f7f6f3;
+  --bg:          #eef2f7;
   --surface:     #ffffff;
-  --surface-2:   #fbfaf8;
-  --ink:         #2f3437;
-  --ink-soft:    #55595c;
-  --muted:       #8c8c86;
-  --line:        #e7e5df;
-  --line-soft:   #f0eee9;
-  --accent:      #111111;
-  --accent-soft: #efede8;
+  --surface-2:   #f6f8fc;
+  --ink:         #17283a;
+  --ink-soft:    #425565;
+  --muted:       #576a7e;
+  --line:        #d8e1ec;
+  --line-soft:   #e8edf4;
+  --accent:      #16566a;
+  --accent-soft: #e0eef2;
   --btn-fg:      #ffffff;
-  --btn-hover:   #333333;
+  --btn-hover:   #11485a;
   --switch-knob: #ffffff;
   --code-bg:     rgba(0, 0, 0, .05);
   --focus-ring:  rgba(17, 17, 17, .18);
@@ -27,7 +26,7 @@
 
   --radius:    12px;
   --radius-sm: 8px;
-  --wrap:      1040px;
+  --wrap:      1330px;
   --safe-b:    env(safe-area-inset-bottom, 0px);
 }
 
@@ -368,7 +367,90 @@ main.wrap { padding-top: 40px; padding-bottom: 56px; }
   .chip { padding: 8px 12px; font-size: 12px; min-height: 36px; }
 }
 
-.console-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 24px; }
-.console-nav a { text-decoration: none; }
+.workspace { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 34px; align-items: start; }
+.workspace-body { min-width: 0; }
+.workspace .section { margin-bottom: 32px; }
+.workspace .section-head { align-items: center; margin-bottom: 14px; }
+.workspace .section-title { font-size: 30px; letter-spacing: -.025em; }
+.console-nav {
+  position: sticky;
+  top: 24px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.console-nav a {
+  display: flex;
+  align-items: center;
+  min-height: 43px;
+  padding: 7px 13px;
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  font-size: 14px;
+  text-decoration: none;
+}
+.console-nav a:hover { background: var(--surface-2); }
+.console-nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); font-weight: 700; }
+.console-nav a:focus-visible, .workspace-home:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.workspace-home {
+  display: block;
+  position: relative;
+  min-height: 148px;
+  margin-bottom: 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #203951;
+}
+.workspace-home img { display: block; width: 100%; height: 178px; object-fit: cover; object-position: 50% 56%; }
+.workspace-home > span {
+  position: absolute;
+  left: 18px;
+  bottom: 16px;
+  padding: 7px 12px;
+  border-radius: var(--radius-sm);
+  background: #17283a;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 650;
+}
+.workspace-home > span span { margin-left: 6px; }
+.channel-inventory { margin: 0 0 16px; color: var(--ink-soft); }
+.channel-row {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.channel-row strong { color: var(--ink); }
+.channel-meta { min-width: 0; overflow-wrap: break-word; }
+.channel-state { color: var(--ink-soft); font-size: 13px; white-space: nowrap; }
+.channel-state[data-state="ok"] { color: var(--ok-fg); }
+.channel-state[data-state="qr"] { color: var(--warn-fg); }
+@media (max-width: 760px) {
+  .workspace { display: block; padding-bottom: 70px; }
+  .workspace .section-title { font-size: 24px; }
+  .console-nav {
+    position: fixed;
+    z-index: 5;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    border-width: 1px 0 0;
+    border-radius: 0;
+    padding: 5px;
+    padding-bottom: calc(5px + var(--safe-b));
+  }
+  .console-nav a { justify-content: center; padding: 5px 2px; font-size: 13px; white-space: nowrap; }
+  .workspace-home img { height: 148px; }
+}
 .maintenance-tools > summary { cursor: pointer; font-weight: 650; padding: 5px 0; }
 .maintenance-tools[open] > summary { margin-bottom: 16px; }

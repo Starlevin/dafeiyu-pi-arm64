@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Fish House Live</title>
+  <link rel="stylesheet" href="./live.css">
+</head>
+<body>
+  <main id="stage" aria-label="动态桌面壁纸">
+    <img id="cover" alt="" aria-hidden="true">
+    <video id="videoA" class="pet-video" muted playsinline preload="auto"></video>
+    <video id="videoB" class="pet-video" muted playsinline preload="auto"></video>
+    <div id="bubble" class="bubble hidden" role="status" aria-live="polite"></div>
+  </main>
+  <script src="./live.js?v=2"></script>
+</body>
+</html>

@@ -26,6 +26,7 @@ Verified live surface (read-only reconnaissance, 2026-11-11):
   WeChat (core, 127.0.0.1:19301, loopback-only HTTP):
     GET  /api/status              -> {model,provider,gateways[],group{}}
     GET  /api/settings            -> {model,provider,providers{},group{}}
+    GET  /api/persona             -> {persona:{sourcePreset,preset}}  (global style)
     GET  /api/persona/presets     -> {presets:[{id,name,...}]}
     POST /api/settings            {model|provider|group{}}  (model / group rules)
     POST /api/config              {patch:{...}}             (whitelist fields)
@@ -573,6 +574,7 @@ class WeChatAdapter:
         self.cfg = cfg
         self.fixture = fixture
         self.base = cfg.get("wechatCoreUrl", "http://127.0.0.1:19301")
+        self._proactive_groups_lock = threading.Lock()
 
     def _get(self, path):
         if self.fixture is not None:
@@ -777,40 +779,50 @@ class WeChatAdapter:
         if not titles:
             return []
         try:
-            settings = self._get("/api/settings") or {}
             cfg = self._get("/api/config") or {}
-            persona = self._get("/api/persona") or {}
         except AdapterError:
-            settings, cfg, persona = {}, {}, {}
+            cfg = {}
         group = ((cfg.get("config") or {}).get("group") or {}) if isinstance(cfg, dict) else {}
-        enabled = bool(group.get("freeChat"))
+        judge = group.get("proactiveJudge") if isinstance(group, dict) else None
+        judge = judge if isinstance(judge, dict) else {}
+        allowed_groups = judge.get("groups") if isinstance(judge.get("groups"), list) else None
+        allowed_groups = ([x for x in allowed_groups if isinstance(x, str)]
+                          if allowed_groups is not None else None)
         chance = group.get("freeChatChance")
         frequency = self._chance_to_frequency(chance)
-        style = None
-        if isinstance(persona, dict):
-            p = persona.get("persona") or {}
-            style = p.get("sourcePreset") or p.get("preset") or None
-            if not isinstance(style, str):
-                style = None
+        style = self.global_style()
+        group_names = [t["name"] for t in titles
+                       if isinstance(t, dict) and t.get("group") is True
+                       and isinstance(t.get("name"), str) and t["name"].strip()]
         out = []
         for title in titles:
             kind = "group" if title.get("group") else "private"
+            raw_name = title.get("name")
+            valid_group_name = (kind == "group" and isinstance(raw_name, str)
+                                and bool(raw_name.strip()))
+            name = (raw_name if valid_group_name else str(raw_name or ""))
+            unique_group = valid_group_name and group_names.count(name) == 1
+            membership = (name in allowed_groups
+                          if valid_group_name and allowed_groups is not None else None)
             out.append({
                 "platform": "wechat",
-                "id": "wechat:" + ("group:" if title.get("group") else "private:") + title["name"],
-                "name": title["name"],
+                "id": "wechat:" + ("group:" if title.get("group") else "private:") + name,
+                "name": name,
                 "kind": kind,
-                # WeChat group rules are global, not per conversation. We expose
-                # them as the current value but mark them read-only where the
-                # underlying control has no per-conversation equivalent.
-                "enabled": enabled if kind == "group" else None,
+                # This checkbox manages only the existing exact-title proactive
+                # allowlist. It never toggles the global judge or random freeChat.
+                "enabled": membership,
+                "enabledLabel": "主动闲聊白名单" if kind == "group" else None,
+                "enabledHint": ("只增删该群名的白名单项；全局判别关闭时不会触发自动闲聊。"
+                                if kind == "group" else None),
                 "style": style,
                 "frequency": frequency if kind == "group" else None,
                 "limit": None,
                 "capabilities": {
-                    # Real global rule; writable via /api/config, but applies to
-                    # all groups, so per-conversation control is not honest.
-                    "enabled": False,
+                    # The core's existing judge groups list uses exact WeChat
+                    # titles. Duplicate titles cannot be safely controlled by
+                    # title, so keep those rows read-only.
+                    "enabled": bool(unique_group and allowed_groups is not None),
                     # Persona is one GLOBAL preset for the whole WeChat core.
                     # It is shown read-only here; the single writable control
                     # lives in globalSettings (scope wechat:global).
@@ -822,6 +834,76 @@ class WeChatAdapter:
                 },
             })
         return out
+
+    def set_enabled(self, conv_id, value):
+        """Add/remove one uniquely titled group in the core judge allowlist."""
+        if not isinstance(value, bool):
+            raise AdapterError("开关需要 true 或 false")
+        prefix = "wechat:group:"
+        if not isinstance(conv_id, str) or not conv_id.startswith(prefix):
+            raise AdapterError("主动闲聊白名单只支持微信群", 404)
+        name = conv_id[len(prefix):]
+        if not name.strip():
+            raise AdapterError("微信群标题为空，拒绝修改主动闲聊白名单", 404)
+        titles = self._bridge_titles()
+        group_names = [t["name"] for t in titles
+                       if isinstance(t, dict) and t.get("group") is True
+                       and isinstance(t.get("name"), str) and t["name"].strip()]
+        if group_names.count(name) == 0:
+            raise AdapterError("该微信群不在当前桥接名单中", 404)
+        if group_names.count(name) != 1:
+            raise AdapterError("存在同名微信群，无法按群名安全区分；未写入", 409)
+        # The console uses ThreadingHTTPServer, so serialize the core's
+        # read/modify/write/readback sequence per WeChat adapter instance.
+        # Re-read within the lock so concurrent changes to other groups survive.
+        with self._proactive_groups_lock:
+            current = self._get("/api/config")
+            config = current.get("config") if isinstance(current, dict) else None
+            group = config.get("group") if isinstance(config, dict) else None
+            judge = group.get("proactiveJudge") if isinstance(group, dict) else None
+            allowed = judge.get("groups") if isinstance(judge, dict) else None
+            if not isinstance(allowed, list) or any(not isinstance(x, str) for x in allowed):
+                raise AdapterError("微信主动闲聊白名单配置不可读或格式无效；未写入", 409)
+            updated = list(allowed)
+            if value and name not in updated:
+                updated.append(name)
+            elif not value:
+                updated = [x for x in updated if x != name]
+            result = self._post("/api/config", {
+                "patch": {"group": {"proactiveJudge": {"groups": updated}}},
+            })
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise AdapterError("微信内核拒绝保存主动闲聊白名单", 409)
+            reread = self._get("/api/config")
+            config = reread.get("config") if isinstance(reread, dict) else None
+            group = config.get("group") if isinstance(config, dict) else None
+            judge = group.get("proactiveJudge") if isinstance(group, dict) else None
+            observed = judge.get("groups") if isinstance(judge, dict) else None
+            if not isinstance(observed, list) or observed != updated:
+                raise AdapterError("保存后主动闲聊白名单与请求不一致；未确认成功", 409)
+            return None
+
+    def global_style(self):
+        """Read the one GLOBAL WeChat persona preset from the real /api/persona.
+
+        This is the exact same read `conversations()` uses for its per-chat
+        `style` view, so the two can never disagree. The preset is
+        `persona.sourcePreset`, falling back to `persona.preset`. It is read
+        directly, never via the conversation list: the bridge-title file being
+        empty/unreadable must not turn a known preset into null. A failed or
+        unusable read returns None (unknown), never a guessed value.
+        """
+        try:
+            persona = self._get("/api/persona")
+        except AdapterError:
+            return None
+        if not isinstance(persona, dict):
+            return None
+        p = persona.get("persona")
+        if not isinstance(p, dict):
+            return None
+        style = p.get("sourcePreset") or p.get("preset")
+        return style if isinstance(style, str) and style else None
 
     def _bridge_titles(self):
         if self.fixture is not None:
@@ -982,16 +1064,18 @@ class Console:
     def _wechat_global_style(self):
         """One global WeChat persona setting, not a per-conversation switch.
 
-        The value is read from the same real `/api/persona` summary. The UI
-        should render this as a single control; POST /api/conversation still
-        accepts the reserved id `wechat:global` for backwards compatibility with
-        already-saved configurations (it changes the same global preset).
+        The value comes from the same real `/api/persona` summary that feeds
+        `WeChatAdapter.conversations()` (`global_style()`), but it is read
+        directly rather than picked out of a conversation row: when the bridge
+        declares no conversation titles the list is empty, which must not hide
+        a preset that `/api/persona` is still reporting. An unreadable or
+        failed read stays None (unknown).
+        The UI should render this as a single control; POST /api/conversation
+        still accepts the reserved id `wechat:global` for backwards
+        compatibility with already-saved configurations (it changes the same
+        global preset).
         """
-        current = None
-        for c in self.wechat.conversations():
-            if isinstance(c.get("style"), str) and c["style"]:
-                current = c["style"]
-                break
+        current = self.wechat.global_style()
         return [{
             "scope": "wechat:global",
             "field": "style",

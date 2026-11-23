@@ -1,0 +1,276 @@
+{
+  "schema": 1,
+  "meta": {
+    "id": "7ce22364d7",
+    "name": "大肥鱼的小屋",
+    "author": "",
+    "description": "默认主题",
+    "version": "1.0.0",
+    "created_at": 1794233337.1821115,
+    "cover": "cover.jpg"
+  },
+  "config": {
+    "actions": [
+      {
+        "key": "rest",
+        "label": "休息循环",
+        "hint": "啥也不干时循环播放",
+        "loop": true
+      },
+      {
+        "key": "phone_pickup",
+        "label": "拿起手机",
+        "hint": "收到消息，伸手拿手机",
+        "loop": false
+      },
+      {
+        "key": "phone_loop",
+        "label": "玩手机 / 回消息",
+        "hint": "看手机、回消息时循环",
+        "loop": true
+      },
+      {
+        "key": "phone_putdown",
+        "label": "放下手机",
+        "hint": "回复完，把手机放回去",
+        "loop": false
+      },
+      {
+        "key": "computer_go",
+        "label": "去电脑",
+        "hint": "从休息处走到电脑前",
+        "loop": false
+      },
+      {
+        "key": "computer_loop",
+        "label": "玩电脑 / 干活",
+        "hint": "干活时循环",
+        "loop": true
+      },
+      {
+        "key": "computer_rest",
+        "label": "电脑回休息",
+        "hint": "干完活，从电脑回到休息",
+        "loop": false
+      }
+    ],
+    "videos": {
+      "rest": "videos/theme_91dd19b1cd_rest-c86e5b-6539c4-41bcd2.mp4",
+      "phone_pickup": "videos/theme_91dd19b1cd_phone_pickup-d9129a-d0a620-bf57ca.mp4",
+      "phone_loop": "videos/theme_91dd19b1cd_phone_loop-e85353-00fdec-603f5a.mp4",
+      "phone_putdown": "videos/theme_91dd19b1cd_phone_putdown-93c608-0166f1-eb782a.mp4",
+      "computer_go": "videos/theme_91dd19b1cd_computer_go-63a339-6381b2-c4dc57.mp4",
+      "computer_loop": "videos/theme_91dd19b1cd_computer_loop-c07166-70e55c-0cd346.mp4",
+      "computer_rest": "videos/theme_91dd19b1cd_computer_rest-08ff97-de9fad-77cfd0.mp4"
+    },
+    "audio": {
+      "rest": false,
+      "phone_pickup": false,
+      "phone_loop": false,
+      "phone_putdown": false,
+      "computer_go": false,
+      "computer_loop": true,
+      "computer_rest": false
+    },
+    "durations": {
+      "rest": 12.096,
+      "phone_pickup": 4.064,
+      "phone_loop": 8.064,
+      "phone_putdown": 3.042,
+      "computer_go": 5.175,
+      "computer_loop": 15.072,
+      "computer_rest": 10.08
+    },
+    "library": [
+      {
+        "id": "m_7953da58",
+        "name": "休息循环",
+        "video": "videos/theme_91dd19b1cd_rest-c86e5b-6539c4-41bcd2.mp4",
+        "duration": 12.096
+      },
+      {
+        "id": "m_11fe77a0",
+        "name": "拿起手机",
+        "video": "videos/theme_91dd19b1cd_phone_pickup-d9129a-d0a620-bf57ca.mp4",
+        "duration": 4.064
+      },
+      {
+        "id": "m_b6678b62",
+        "name": "玩手机 / 回消息",
+        "video": "videos/theme_91dd19b1cd_phone_loop-e85353-00fdec-603f5a.mp4",
+        "duration": 8.064
+      },
+      {
+        "id": "m_8c1fcbdf",
+        "name": "放下手机",
+        "video": "videos/theme_91dd19b1cd_phone_putdown-93c608-0166f1-eb782a.mp4",
+        "duration": 3.042
+      },
+      {
+        "id": "m_ee5e851b",
+        "name": "去电脑",
+        "video": "videos/theme_91dd19b1cd_computer_go-63a339-6381b2-c4dc57.mp4",
+        "duration": 5.175
+      },
+      {
+        "id": "m_1d2e8da6",
+        "name": "玩电脑 / 干活",
+        "video": "videos/theme_91dd19b1cd_computer_loop-c07166-70e55c-0cd346.mp4",
+        "duration": 15.072
+      },
+      {
+        "id": "m_83291b46",
+        "name": "电脑回休息",
+        "video": "videos/theme_91dd19b1cd_computer_rest-08ff97-de9fad-77cfd0.mp4",
+        "duration": 10.08
+      }
+    ],
+    "flow": {
+      "nodes": [
+        {
+          "id": "rest",
+          "label": "休息",
+          "video": "videos/theme_91dd19b1cd_rest-c86e5b-6539c4-41bcd2.mp4",
+          "loop": true,
+          "role": "wait",
+          "prompt": "",
+          "duration": 12.096,
+          "media_id": "m_7953da58",
+          "x": 80,
+          "y": 220
+        },
+        {
+          "id": "phone_pickup",
+          "label": "拿起手机",
+          "video": "videos/theme_91dd19b1cd_phone_pickup-d9129a-d0a620-bf57ca.mp4",
+          "loop": false,
+          "role": "action",
+          "prompt": "",
+          "duration": 4.064,
+          "media_id": "m_11fe77a0",
+          "x": 330,
+          "y": 80
+        },
+        {
+          "id": "phone_loop",
+          "label": "回消息",
+          "video": "videos/theme_91dd19b1cd_phone_loop-e85353-00fdec-603f5a.mp4",
+          "loop": true,
+          "role": "phone",
+          "prompt": "",
+          "duration": 8.064,
+          "media_id": "m_b6678b62",
+          "x": 580,
+          "y": 80
+        },
+        {
+          "id": "phone_putdown",
+          "label": "放下手机",
+          "video": "videos/theme_91dd19b1cd_phone_putdown-93c608-0166f1-eb782a.mp4",
+          "loop": false,
+          "role": "transition",
+          "prompt": "",
+          "duration": 3.042,
+          "media_id": "m_8c1fcbdf",
+          "x": 830,
+          "y": 80
+        },
+        {
+          "id": "computer_go",
+          "label": "去电脑",
+          "video": "videos/theme_91dd19b1cd_computer_go-63a339-6381b2-c4dc57.mp4",
+          "loop": false,
+          "role": "transition",
+          "prompt": "",
+          "duration": 5.175,
+          "media_id": "m_ee5e851b",
+          "x": 330,
+          "y": 380
+        },
+        {
+          "id": "computer_loop",
+          "label": "玩电脑",
+          "video": "videos/theme_91dd19b1cd_computer_loop-c07166-70e55c-0cd346.mp4",
+          "loop": true,
+          "role": "both",
+          "prompt": "",
+          "duration": 15.072,
+          "media_id": "m_1d2e8da6",
+          "x": 580,
+          "y": 380
+        },
+        {
+          "id": "computer_rest",
+          "label": "电脑回休息",
+          "video": "videos/theme_91dd19b1cd_computer_rest-08ff97-de9fad-77cfd0.mp4",
+          "loop": false,
+          "role": "transition",
+          "prompt": "",
+          "duration": 10.08,
+          "media_id": "m_83291b46",
+          "x": 830,
+          "y": 380
+        }
+      ],
+      "edges": [
+        {
+          "id": "e_rest_phone",
+          "from": "rest",
+          "to": "phone_pickup",
+          "label": "有人找、要回消息"
+        },
+        {
+          "id": "e_rest_comp",
+          "from": "rest",
+          "to": "computer_go",
+          "label": "要干活、查资料、刷抖音"
+        },
+        {
+          "id": "e_pick_loop",
+          "from": "phone_pickup",
+          "to": "phone_loop",
+          "label": ""
+        },
+        {
+          "id": "e_loop_put",
+          "from": "phone_loop",
+          "to": "phone_putdown",
+          "label": ""
+        },
+        {
+          "id": "e_put_rest",
+          "from": "phone_putdown",
+          "to": "rest",
+          "label": ""
+        },
+        {
+          "id": "e_go_loop",
+          "from": "computer_go",
+          "to": "computer_loop",
+          "label": ""
+        },
+        {
+          "id": "e_loop_rest",
+          "from": "computer_loop",
+          "to": "computer_rest",
+          "label": "活干完了"
+        },
+        {
+          "id": "e_crest_rest",
+          "from": "computer_rest",
+          "to": "rest",
+          "label": ""
+        },
+        {
+          "id": "e_put_computer",
+          "from": "phone_putdown",
+          "to": "computer_go",
+          "label": "去电脑干活"
+        }
+      ]
+    },
+    "settings": {
+      "crossfade_ms": 400
+    }
+  }
+}

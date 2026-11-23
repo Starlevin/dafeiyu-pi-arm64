@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 2,
+  "id": "fish-house-video",
+  "form": "adult",
+  "name": "原版夜色视频屋",
+  "shortName": "夜色视频",
+  "version": "1.0.0",
+  "author": "jiuchai/fish-house (MIT)",
+  "license": "MIT License (UPSTREAM_LICENSE)",
+  "poster": "themes/default/cover.jpg",
+  "format": "mp4-h264-video",
+  "minRequirements": {
+    "chrome": 66,
+    "h264": true,
+    "ramMb": 512
+  },
+  "clips": {
+    "rest": {
+      "src": "themes/default/videos/theme_91dd19b1cd_rest-c86e5b-6539c4-41bcd2.mp4",
+      "loop": true
+    },
+    "phone_pickup": {
+      "src": "themes/default/videos/theme_91dd19b1cd_phone_pickup-d9129a-d0a620-bf57ca.mp4",
+      "loop": false
+    },
+    "phone_loop": {
+      "src": "themes/default/videos/theme_91dd19b1cd_phone_loop-e85353-00fdec-603f5a.mp4",
+      "loop": true
+    },
+    "phone_putdown": {
+      "src": "themes/default/videos/theme_91dd19b1cd_phone_putdown-93c608-0166f1-eb782a.mp4",
+      "loop": false
+    },
+    "computer_go": {
+      "src": "themes/default/videos/theme_91dd19b1cd_computer_go-63a339-6381b2-c4dc57.mp4",
+      "loop": false
+    },
+    "computer_loop": {
+      "src": "themes/default/videos/theme_91dd19b1cd_computer_loop-c07166-70e55c-0cd346.mp4",
+      "loop": true
+    },
+    "computer_rest": {
+      "src": "themes/default/videos/theme_91dd19b1cd_computer_rest-08ff97-de9fad-77cfd0.mp4",
+      "loop": false
+    }
+  },
+  "stateToSequence": {
+    "idle": [
+      "rest"
+    ],
+    "rest": [
+      "rest"
+    ],
+    "received": [
+      "phone_pickup",
+      "phone_loop"
+    ],
+    "thinking": [
+      "computer_go",
+      "computer_loop"
+    ],
+    "replying": [
+      "phone_loop",
+      "phone_putdown"
+    ],
+    "happy": [
+      "phone_putdown",
+      "rest"
+    ],
+    "confused": [
+      "computer_loop"
+    ],
+    "error": [
+      "computer_rest",
+      "rest"
+    ]
+  }
+}

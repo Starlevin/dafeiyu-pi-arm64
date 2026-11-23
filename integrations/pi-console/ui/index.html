@@ -4,17 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151b26" media="(prefers-color-scheme: dark)">
 <title>大肥鱼统一控制台</title>
-<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="app.css?v=workspace-2">
 <link rel="stylesheet" href="usage.css">
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js"></script>
+<script src="app.js?v=workspace-3"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
+<script src="social.js" defer></script>
 <script src="admin-tools.js" defer></script>
 </head>
 <body>
@@ -24,14 +25,14 @@
   <div class="wrap header-inner">
     <div class="brand">
       <span class="avatar-slot">
-        <span class="avatar-fallback" aria-hidden="true">鱼</span>
+        <img class="avatar" data-avatar src="avatar.webp" alt="大肥鱼" width="38" height="38">
+        <span class="avatar-fallback" data-avatar-fallback hidden aria-hidden="true">鱼</span>
       </span>
       <span class="brand-copy">
         <span class="brand-title">大肥鱼统一控制台</span>
-        <span class="brand-sub">DaFeiYu Unified Console</span>
+        <span class="brand-sub">自托管工作台</span>
       </span>
     </div>
-    <span class="header-tag">本机控制台</span>
   </div>
 </header>
 
@@ -84,32 +85,36 @@
   </section>
 
   <!-- 主控制台 -->
-  <div id="console" hidden>
+  <div id="console" class="workspace" hidden>
     <nav class="console-nav" aria-label="控制台导航">
-      <a class="chip" href="#hOverview">概览</a>
-      <a class="chip" href="#hConversations">会话</a>
-      <a class="chip" href="#usagePane">Token 用量</a>
-      <a class="chip" href="#contentRoot">内容阅读</a>
-      <a class="chip" href="#hSettings">设置与维护</a>
+      <a href="#hOverview" data-workspace-view="hOverview">总览</a>
+      <a href="#hConversations" data-workspace-view="hConversations">会话</a>
+      <a href="#usagePane" data-workspace-view="usagePane">用量</a>
+      <a href="#contentRoot" data-workspace-view="contentRoot">内容</a>
+      <a href="#hDiagnostics" data-workspace-view="hDiagnostics">诊断</a>
+      <a href="#hSettings" data-workspace-view="hSettings">账号</a>
     </nav>
 
-    <section class="section" aria-labelledby="hOverview">
+    <div class="workspace-body">
+    <section class="section" data-workspace-pane="hOverview" aria-labelledby="hOverview">
       <div class="section-head">
         <div>
-          <p class="eyebrow">运行状态</p>
-          <h2 class="section-title" id="hOverview">概览</h2>
+          <h2 class="section-title" id="hOverview">运行总览</h2>
         </div>
         <button class="btn btn-quiet btn-sm" type="button" data-action id="refreshBtn">刷新</button>
       </div>
       <p class="section-lead" id="overviewLead">正在读取状态…</p>
+      <a class="workspace-home" href="/home">
+        <img src="/fish_house/themes/default/cover.jpg" alt="">
+        <span>打开动态家园 <span aria-hidden="true">↗</span></span>
+      </a>
       <div class="platform-grid" id="platformGrid"></div>
     </section>
 
-    <section class="section" aria-labelledby="hConversations">
+    <section class="section" data-workspace-pane="hConversations" aria-labelledby="hConversations">
       <div class="section-head">
         <div>
-          <p class="eyebrow">逐项配置</p>
-          <h2 class="section-title" id="hConversations">会话</h2>
+          <h2 class="section-title" id="hConversations">会话管理</h2>
         </div>
         <span class="count" id="convCount"></span>
       </div>
@@ -146,32 +151,58 @@
       </div>
     </section>
 
-    <section id="usagePane" class="section" aria-label="模型 Token 用量"></section>
+    <section id="usagePane" class="section" data-workspace-pane="usagePane" aria-label="模型 Token 用量"></section>
 
-    <section id="contentRoot" class="section" data-content-root aria-label="内容阅读"></section>
+    <section id="contentRoot" class="section" data-workspace-pane="contentRoot" data-content-root aria-label="内容阅读"></section>
+    <section class="section dc" data-workspace-pane="contentRoot" aria-labelledby="socialTitle">
+      <div class="dc-panel">
+        <div class="dc-subhead">
+          <h2 id="socialTitle" class="dc-subtitle">浏览平台</h2>
+        </div>
+        <form id="socialScan" class="dc-readbar">
+          <select id="socialMode" class="dc-input" aria-label="平台和查询方式">
+            <option value="bilibili/popular">B 站热门</option>
+            <option value="bilibili/search">B 站搜索</option>
+            <option value="douyin/hot">抖音热搜</option>
+            <option value="x/user">X 公开账号</option>
+            <option value="wechat/moments">微信朋友圈</option>
+          </select>
+          <input id="socialValue" type="search" class="dc-input" hidden maxlength="80">
+          <button class="dc-btn" type="submit">读取</button>
+        </form>
+        <p id="socialStatus" class="dc-note" role="status">显示平台公开的文字信息和原文链接。</p>
+        <ul id="socialResults" class="dc-break" hidden></ul>
+      </div>
+    </section>
 
-    <section class="section" aria-labelledby="hDiagnostics">
+    <section class="section" data-workspace-pane="hDiagnostics" aria-labelledby="hDiagnostics">
       <div class="section-head">
         <div>
-          <p class="eyebrow">系统提示</p>
           <h2 class="section-title" id="hDiagnostics">诊断</h2>
         </div>
         <span class="count" id="diagCount"></span>
       </div>
+      <div class="section-head">
+        <h3 class="card-title" id="deliveryTitle">消息发送回执</h3>
+        <button class="btn btn-quiet btn-sm" type="button" id="deliveryRefresh">刷新回执</button>
+      </div>
+      <div id="deliverySummary" class="platform-grid" aria-labelledby="deliveryTitle" aria-live="polite"></div>
       <ul class="diag-list" id="diagList"></ul>
       <p class="empty" id="diagEmpty" hidden>暂无诊断信息。</p>
     </section>
 
-    <section class="section" aria-labelledby="hSettings">
+    <section class="section" data-workspace-pane="hSettings" aria-labelledby="hSettings">
       <div class="section-head">
         <div>
-          <p class="eyebrow">本机与账户</p>
-          <h2 class="section-title" id="hSettings">设置与连接</h2>
+          <h2 class="section-title" id="hSettings">账号与连接</h2>
         </div>
+        <button class="btn btn-quiet btn-sm" type="button" id="channelRefresh">刷新连接</button>
       </div>
 
+      <div id="channelInventory" class="channel-inventory" aria-live="polite"></div>
+
       <details id="maintenanceTools" class="card maintenance-tools">
-        <summary>QQ 维护与原版工具</summary>
+        <summary>QQ 扫码与维护</summary>
         <div id="toolsMount"></div>
       </details>
 
@@ -230,9 +261,9 @@
     </section>
 
     <footer class="site-foot">
-      <span>大肥鱼统一控制台 · 本机运行</span>
-      <span class="muted">数据仅来自本机服务</span>
+      <span>大肥鱼 · 自托管</span>
     </footer>
+    </div>
   </div>
 </main>
 </body>

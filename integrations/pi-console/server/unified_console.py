@@ -51,6 +51,24 @@ import adapters
 import usage_adapter
 import content
 import tool_routes
+try:
+    import social_sidecar
+except ImportError:
+    social_sidecar = None
+try:
+    import moments_console
+except ImportError:
+    moments_console = None
+try:
+    import house_console_ext
+except ImportError:
+    house_console_ext = None
+try:
+    # QQ 空间（qq-qzone 模块）是叠加式可选接入：缺模块时控制台照常启动，
+    # 只是没有 /api/qzone/* 这组路由。
+    import tool_routes_qzone
+except ImportError:
+    tool_routes_qzone = None
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_UI = HERE.parent / "ui"
@@ -70,6 +88,11 @@ def default_state_dir() -> Path:
 def configured_qq_root(cfg) -> str:
     """The QQ data/key root is opt-in; never guess a deployment path."""
     return str(cfg.get("qqRoot") or os.environ.get("DAFEIYU_QQ_ROOT") or "").strip()
+
+
+def qzone_read_enabled() -> bool:
+    """QZone read API is an explicit deployment opt-in; default is off."""
+    return os.environ.get("DAFEIYU_QZONE_READ_ENABLED", "").strip() == "1"
 
 # --------------------------------------------------------------------------- #
 # Password store (strong salted KDF only)
@@ -382,19 +405,22 @@ STATIC = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "application/javascript; charset=utf-8"),
+    "/avatar.webp": ("avatar.webp", "image/webp"),
     "/usage.js": ("usage.js", "application/javascript; charset=utf-8"),
     "/usage.css": ("usage.css", "text/css; charset=utf-8"),
     "/content.css": ("content.css", "text/css; charset=utf-8"),
     "/content.js": ("content.js", "application/javascript; charset=utf-8"),
+    "/social.js": ("social.js", "application/javascript; charset=utf-8"),
     "/admin-tools.css": ("admin-tools.css", "text/css; charset=utf-8"),
     "/admin-tools.js": ("admin-tools.js", "application/javascript; charset=utf-8"),
-
+    "/qzone-panel.js": ("qzone-panel.js", "application/javascript; charset=utf-8"),
 }
 
 
 CONTENT_POST = ("/api/content/read", "/api/content/search",
                 "/api/content/subscribe", "/api/content/ask",
-                "/api/content/summary")
+                "/api/content/summary", "/api/content/platform-scan",
+                "/api/content/moments")
 
 
 class ConsoleServer(ThreadingHTTPServer):
@@ -647,6 +673,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.need_auth():
                     return
                 return self.json(200, self.app.usage.section())
+            if house_console_ext is not None and house_console_ext.resolve(self, "GET", path):
+                return
             if path == "/api/ca":
                 return self.api_ca()
             if path in ("/api/content/capabilities", "/api/content/feed"):
@@ -656,6 +684,9 @@ class Handler(BaseHTTPRequestHandler):
             if path in STATIC:
                 return self.static(path)
             if tool_routes.resolve(self, "GET", path):
+                return
+            if (qzone_read_enabled() and tool_routes_qzone is not None
+                    and tool_routes_qzone.resolve(self, "GET", path)):
                 return
             self.fail(404, "页面不存在")
         except (adapters.AdapterError, content.ContentError) as e:
@@ -712,6 +743,16 @@ class Handler(BaseHTTPRequestHandler):
             data = content.handle_ask(cfg, body)
         elif path == "/api/content/summary":
             data = content.handle_summary(cfg, body)
+        elif path == "/api/content/platform-scan":
+            if social_sidecar is None:
+                self.fail(503, "社媒巡检模块未部署")
+                return
+            data = social_sidecar.scan(body)
+        elif path == "/api/content/moments":
+            if moments_console is None:
+                self.fail(503, "朋友圈读取模块未部署")
+                return
+            data = moments_console.read(body)
         else:
             self.fail(404, "操作不存在")
             return
@@ -743,7 +784,10 @@ class Handler(BaseHTTPRequestHandler):
         name, ctype = STATIC[path]
         p = self.app.ui_dir / name
         if not p.is_file():
-            self.fail(404, "页面文件缺失")
+            if name == "avatar.webp":
+                self.fail(404, "没有头像文件")
+            else:
+                self.fail(404, "页面文件缺失")
             return
         try:
             data = p.read_bytes()
@@ -760,6 +804,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             path = urlsplit(self.path).path
             if tool_routes.resolve(self, "POST", path):
+                return
+            if house_console_ext is not None and house_console_ext.resolve(self, "POST", path):
+                return
+            if (qzone_read_enabled() and tool_routes_qzone is not None
+                    and tool_routes_qzone.resolve(self, "POST", path)):
                 return
             content_write = path in CONTENT_POST
             if path not in ("/api/setup", "/api/login", "/api/password",

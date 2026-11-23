@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<meta name="theme-color" content="#dfeefb" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%233d8be0'/%3E%3C/svg%3E" />
+<title>大肥鱼家园</title>
+<link rel="stylesheet" href="home/css/home.css?v=2.2.3" />
+</head>
+<body>
+  <!-- Full-bleed Living Anime Room Stage -->
+  <main id="fh-stage" aria-label="大肥鱼家园舞台">
+    <canvas id="fh-canvas-2d" class="fh-canvas"></canvas>
+    <canvas id="fh-canvas-gl" class="fh-canvas"></canvas>
+    <div id="fh-live-layer" aria-hidden="true"></div>
+  </main>
+
+  <!-- Static fallback if both canvas & packs fail -->
+  <div id="fh-fallback">
+    <img id="fh-fallback-img" src="home/assets/rooms/room-pc-day.jpg" alt="大肥鱼家园静态兜底画面" />
+    <p id="fh-fallback-msg" class="fh-note">家园动画资源加载失败，已自动切至静态兼容画面，控制台功能仍可正常使用。</p>
+  </div>
+
+  <!-- Minimal Top Status HUD -->
+  <header id="fh-hud">
+    <div class="fh-hud-left">
+      <span class="fh-chip">
+        <b id="fh-form-label">成年大肥鱼</b>
+        <span id="fh-state-label">待机中</span>
+        <span id="fh-source-tag" class="fh-tag demo">演示</span>
+      </span>
+      <span class="fh-chip"><span class="fh-dot off" id="fh-qq-dot"></span>QQ <span id="fh-qq-text">读取中</span></span>
+      <span class="fh-chip"><span class="fh-dot off" id="fh-wx-dot"></span>微信 <span id="fh-wx-text">读取中</span></span>
+    </div>
+    <div class="fh-hud-right">
+      <button id="fh-btn-theme-quick" class="fh-icon-btn" type="button" title="切换光线主题" aria-label="切换光线主题">☀</button>
+      <button id="fh-btn-drawer-top" class="fh-icon-btn" type="button" title="打开统一控制台与设置" aria-label="打开统一控制台与设置">☰</button>
+    </div>
+  </header>
+
+  <!-- Offline / Timeout Friendly Recovery Banner -->
+  <div id="fh-net-banner" role="alert">
+    <span id="fh-net-text">状态同步断开，已保留本地家园运行</span>
+    <button id="fh-net-retry" type="button">立即重连</button>
+  </div>
+
+  <!-- Desensitized Character Speech Bubble -->
+  <div id="fh-bubble" class="hidden" role="status" aria-live="polite"></div>
+
+  <!-- Bottom Floating Quick Action Dock -->
+  <nav id="fh-dock" aria-label="家园快捷操作">
+    <button id="fh-dock-morph" class="fh-dock-btn active" type="button">切换 Q版</button>
+    <button id="fh-dock-demo" class="fh-dock-btn" type="button">互动演练</button>
+    <button id="fh-dock-theme" class="fh-dock-btn" type="button">晴朗晨光</button>
+    <button id="fh-dock-console" class="fh-dock-btn primary" type="button">控制台</button>
+  </nav>
+
+  <!-- Toast Notice -->
+  <div id="fh-toast" role="alert"></div>
+
+  <!-- Slide-out / Swipe-dismissable Bottom-Sheet Unified Console Drawer -->
+  <div id="fh-drawer-mask"></div>
+  <aside id="fh-drawer" aria-label="大肥鱼家园统一控制台">
+    <div class="fh-grabber" aria-hidden="true"></div>
+    <div class="fh-drawer-head" id="fh-drawer-head">
+      <div>
+        <div class="fh-drawer-title">大肥鱼家园 · 统一控制台</div>
+        <div class="fh-drawer-sub" id="fh-drawer-sub">连接检查中…</div>
+      </div>
+      <div class="fh-head-actions">
+        <button id="fh-drawer-close" class="fh-close-btn" type="button" aria-label="返回家园">返回家园</button>
+      </div>
+    </div>
+
+    <div class="fh-tabs" role="tablist">
+      <button class="fh-tab active" type="button" data-tab="console">控制台</button>
+      <button class="fh-tab" type="button" data-tab="qq-admin">QQ 管理</button>
+      <button class="fh-tab" type="button" data-tab="appearance">外观形态</button>
+      <button class="fh-tab" type="button" data-tab="events">事件调试</button>
+      <button class="fh-tab" type="button" data-tab="diag">性能诊断</button>
+    </div>
+
+    <div class="fh-drawer-body">
+      <!-- Tab 1: Unified 9-Module Operational Console -->
+      <section class="fh-panel active" id="fh-panel-console">
+        <div id="fh-console-banner" class="fh-banner info">正在检查统一控制台接口…</div>
+        <div id="fh-save-bar" role="status"></div>
+
+        <!-- Auth Login Box (only when /api/session reports auth_required) -->
+        <div class="fh-card" id="fh-auth-box" style="display:none;">
+          <div class="fh-card-title">登录统一控制台</div>
+          <p class="fh-note">写入模型或群聊配置需要认证会话；凭据通过同源安全 Cookie 校验，不在本地明文存储。</p>
+          <input id="fh-login-pwd" class="fh-input" type="password" placeholder="输入控制台密码" autocomplete="current-password" />
+          <div id="fh-login-err" class="fh-note" style="color:#a83232;display:none;"></div>
+          <button id="fh-login-btn" class="fh-btn" type="button">登录控制台</button>
+        </div>
+
+        <!-- Module 1: QQ & WeChat Runtime Status -->
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>1. QQ / 微信运行状态</span>
+            <button id="fh-refresh-btn" class="fh-toggle-btn" type="button">刷新状态</button>
+          </div>
+          <div class="fh-row"><span class="fh-kv-k">QQ 通道</span><span class="fh-kv-v" id="fh-ov-qq">未读取</span></div>
+          <div class="fh-row"><span class="fh-kv-k">微信通道</span><span class="fh-kv-v" id="fh-ov-wx">未读取</span></div>
+          <div class="fh-row"><span class="fh-kv-k">事件传输通道</span><span class="fh-kv-v" id="fh-ov-transport">探测中</span></div>
+          <div class="fh-row"><span class="fh-kv-k">最近读取时间</span><span class="fh-kv-v" id="fh-ov-time">--</span></div>
+        </div>
+
+        <!-- Module 2: Current Model & Fallback Model -->
+        <div class="fh-card" id="fh-model-card">
+          <div class="fh-card-title">
+            <span>2. 当前模型与备用模型</span>
+            <span class="fh-tag" id="fh-model-verify-tag">待同步</span>
+          </div>
+          <p class="fh-note" id="fh-model-note">仅当控制台服务已认证连接时才可修改并执行 POST → re-GET 回读确认。</p>
+          <label class="fh-note" for="fh-select-qq-model">QQ 当前模型</label>
+          <select id="fh-select-qq-model" class="fh-select" disabled></select>
+          <label class="fh-note" for="fh-select-wx-model">微信当前模型</label>
+          <select id="fh-select-wx-model" class="fh-select" disabled></select>
+          <div class="fh-row"><span class="fh-kv-k">备用降级路由</span><span class="fh-kv-v" id="fh-ov-fallback">待后端提供</span></div>
+        </div>
+
+        <!-- Module 3, 4, 5: Auto-Reply, Proactive & Group Persona -->
+        <div class="fh-card" id="fh-conv-card">
+          <div class="fh-card-title">
+            <span>3-5. 自动回复 / 主动插话 / 群组人格</span>
+            <button id="fh-logout-btn" class="fh-toggle-btn" type="button" style="display:none;">退出登录</button>
+          </div>
+          <div id="fh-proactive-summary" class="fh-note">主动发言判断引擎：等待同步…</div>
+          <div id="fh-conv-list">
+            <p class="fh-note">暂未加载到会话列表。</p>
+          </div>
+        </div>
+
+        <!-- Module 6: Long-Term Memory & Database -->
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>6. 长期记忆与数据库</span>
+            <span class="fh-tag" id="fh-mem-tag">检测中</span>
+          </div>
+          <div id="fh-mem-body"><p class="fh-note">正在探测 `/api/memory/status`…</p></div>
+        </div>
+
+        <!-- Module 7: Sticker Pack Management -->
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>7. 表情包管理</span>
+            <span class="fh-tag" id="fh-sticker-tag">检测中</span>
+          </div>
+          <div id="fh-sticker-body"><p class="fh-note">正在探测 `/api/stickers`…</p></div>
+        </div>
+
+        <!-- Module 8: Extension Modules & Plugins -->
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>8. 扩展模块与插件状态</span>
+            <span class="fh-tag" id="fh-ext-tag">检测中</span>
+          </div>
+          <div id="fh-ext-body"><p class="fh-note">正在探测 `/api/tools/status` 与 `/api/tools/plugins`…</p></div>
+        </div>
+
+        <!-- Module 9: Runtime Logs, Performance & Shared Trace -->
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>9. 运行日志、性能与共享 Trace</span>
+            <span class="fh-tag" id="fh-trace-tag">检测中</span>
+          </div>
+          <div id="fh-trace-body"><p class="fh-note">正在探测 `/api/trace/summary` 与 `/api/tools/logs`…</p></div>
+        </div>
+      </section>
+
+      <section class="fh-panel" id="fh-panel-qq-admin" aria-label="QQ 管理">
+        <div class="fh-card fh-qq-admin-gate" id="fh-qq-admin-gate">
+          <div class="fh-card-title">QQ 管理</div>
+          <p class="fh-note" id="fh-qq-admin-gate-text">正在检查统一控制台会话…</p>
+          <a class="fh-btn" id="fh-qq-admin-console-link" href="/home" hidden>打开统一控制台</a>
+          <button class="fh-btn" id="fh-qq-admin-retry" type="button" hidden>重试加载</button>
+        </div>
+        <div id="toolsMount" class="fh-qq-admin-tools" hidden></div>
+      </section>
+
+      <!-- Tab 2: Character Dual-Form, Room Theme, Perf Modes & Default Homepage -->
+      <section class="fh-panel" id="fh-panel-appearance">
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>角色形态（成年 / Q版双形态）</span>
+            <span class="fh-tag" id="fh-morph-time-tag">就绪</span>
+          </div>
+          <p class="fh-note">切换前预加载目标素材，以镜头微推与水泡光晕柔和过渡，保持脚底位置与动作连续，设置自动持久化。</p>
+          <div class="fh-seg" id="fh-seg-form">
+            <button class="fh-seg-btn active" type="button" data-form="adult">成年大肥鱼</button>
+            <button class="fh-seg-btn" type="button" data-form="chibi">Q版幼年大肥鱼</button>
+          </div>
+        </div>
+
+        <div class="fh-card">
+          <div class="fh-card-title">房间光线与主题</div>
+          <div class="fh-seg" id="fh-seg-theme">
+            <button class="fh-seg-btn third" type="button" data-theme="auto">随时间自动</button>
+            <button class="fh-seg-btn third active" type="button" data-theme="day">晴朗晨光</button>
+            <button class="fh-seg-btn third" type="button" data-theme="sunset">暖阳午后</button>
+            <button class="fh-seg-btn" type="button" data-theme="night">星月夜色</button>
+            <button class="fh-seg-btn" type="button" data-theme="video">原版视频屋</button>
+          </div>
+        </div>
+
+        <div class="fh-card">
+          <div class="fh-card-title">性能模式（持久化保存）</div>
+          <p class="fh-note">自动模式按实测帧率动态调节；高画质启用完整日光/微风粒子；省电模式锁定 15 FPS 显著降低手机发热与 CPU。</p>
+          <div class="fh-seg" id="fh-seg-perf">
+            <button class="fh-seg-btn third active" type="button" data-perf="auto">自动</button>
+            <button class="fh-seg-btn third" type="button" data-perf="high">高画质</button>
+            <button class="fh-seg-btn third" type="button" data-perf="eco">省电</button>
+          </div>
+          <div class="fh-row" style="margin-top:8px;">
+            <span class="fh-kv-k">WebGL 1.0 实验对照渲染器</span>
+            <button id="fh-btn-webgl-toggle" class="fh-toggle-btn" type="button">关闭（默认 2D）</button>
+          </div>
+        </div>
+
+        <div class="fh-card">
+          <div class="fh-card-title">默认首页选择（持久化保存）</div>
+          <p class="fh-note">可自行固定打开页面时停留在「家园」或「轻量控制台」。</p>
+          <div class="fh-seg" id="fh-seg-home">
+            <button class="fh-seg-btn third active" type="button" data-home="auto">自动推荐</button>
+            <button class="fh-seg-btn third" type="button" data-home="home">家园</button>
+            <button class="fh-seg-btn third" type="button" data-home="console">轻量控制台</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Tab 3: Dev Event Replay & State Machine Inspector -->
+      <section class="fh-panel" id="fh-panel-events">
+        <div class="fh-banner warn">开发调试面板：手动触发与回放仅作用于本地动画状态机（标为「演示」），绝不向真实群发消息。</div>
+        <div class="fh-card">
+          <div class="fh-card-title">单态手动触发（完整 9 态动作）</div>
+          <div class="fh-seg" id="fh-seg-events">
+            <button class="fh-seg-btn third" type="button" data-ev="idle">待机 idle</button>
+            <button class="fh-seg-btn third" type="button" data-ev="received">收到 received</button>
+            <button class="fh-seg-btn third" type="button" data-ev="thinking">思考 thinking</button>
+            <button class="fh-seg-btn third" type="button" data-ev="replying">回复 replying</button>
+            <button class="fh-seg-btn third" type="button" data-ev="sent">送达 sent</button>
+            <button class="fh-seg-btn third" type="button" data-ev="happy">开心 happy</button>
+            <button class="fh-seg-btn third" type="button" data-ev="confused">困惑 confused</button>
+            <button class="fh-seg-btn third" type="button" data-ev="rest">休息 rest</button>
+            <button class="fh-seg-btn third" type="button" data-ev="error">异常 error</button>
+          </div>
+        </div>
+        <div class="fh-card">
+          <div class="fh-card-title">脚本化事件链路回放</div>
+          <button id="fh-btn-cycle" class="fh-btn" type="button">完整聊天周期</button>
+          <button id="fh-btn-codex-replay" class="fh-btn ghost" type="button">Codex Bridge 协议回放</button>
+          <button id="fh-btn-err-replay" class="fh-btn ghost" type="button">异常自愈回放</button>
+          <button id="fh-btn-resume-live" class="fh-btn ghost" type="button">恢复实时监听</button>
+          <button id="fh-btn-hotreload" class="fh-btn ghost" type="button">热刷新角色包</button>
+        </div>
+        <div class="fh-card">
+          <div class="fh-card-title">事件流实时观察器（含去重/优先级拦截）</div>
+          <div id="fh-event-log" class="fh-log-box">尚无事件记录。</div>
+        </div>
+      </section>
+
+      <!-- Tab 4: Live Performance & Compatibility Diagnostics -->
+      <section class="fh-panel" id="fh-panel-diag">
+        <div class="fh-card">
+          <div class="fh-card-title">
+            <span>实时端上性能指标</span>
+            <button id="fh-btn-send-diag" class="fh-toggle-btn" type="button">上报诊断</button>
+          </div>
+          <div class="fh-row"><span class="fh-kv-k">渲染引擎 / 性能档</span><span class="fh-kv-v" id="fh-d-renderer">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">事件传输 / 连接</span><span class="fh-kv-v" id="fh-d-transport">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">视口 / DPR</span><span class="fh-kv-v" id="fh-d-viewport">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">实时帧率 (均 / P10)</span><span class="fh-kv-v" id="fh-d-fps">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">首帧 / 角色就绪</span><span class="fh-kv-v" id="fh-d-first">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">形态切换 / 空帧数</span><span class="fh-kv-v" id="fh-d-morph">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">JS 堆内存占用</span><span class="fh-kv-v" id="fh-d-mem">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">掉帧 / 后台暂停</span><span class="fh-kv-v" id="fh-d-drops">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">去重 / 优先级拦截 / 过期</span><span class="fh-kv-v" id="fh-d-events">--</span></div>
+        </div>
+        <div class="fh-card">
+          <div class="fh-card-title">素材包与浏览器能力检测</div>
+          <div class="fh-row"><span class="fh-kv-k">当前素材包</span><span class="fh-kv-v" id="fh-d-pack">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">体积 / WebP / H.264 / Cache</span><span class="fh-kv-v" id="fh-d-caps">--</span></div>
+          <div class="fh-row"><span class="fh-kv-k">浏览器内核</span><span class="fh-kv-v" id="fh-d-ua">--</span></div>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <script src="home/js/event-engine.js?v=2.2.0"></script>
+  <script src="home/js/event-adapter.js?v=2.2.0"></script>
+  <script src="home/js/pack-loader.js?v=2.2.0"></script>
+  <script src="home/js/stage-renderer.js?v=2.2.0"></script>
+  <script src="home/js/api-adapter.js?v=2.2.1"></script>
+  <script src="home/js/app.js?v=2.2.4"></script>
+</body>
+</html>

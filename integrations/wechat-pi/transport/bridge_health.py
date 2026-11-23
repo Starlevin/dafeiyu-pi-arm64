@@ -5,8 +5,10 @@ an OS flock, so two bridge processes cannot reserve the same trace together.
 Uncertain sends are never automatically replayed.
 """
 import fcntl
+import hashlib
 import json
 import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
@@ -16,6 +18,7 @@ import time
 class Health:
     MAX_TRACES = 2048
     TRACE_RETENTION_SECONDS = 30 * 86400
+    INGRESS_RETENTION_SECONDS = 0.9
     VALID_STATUSES = frozenset(("submitting", "unknown", "confirmed"))
 
     def __init__(self, path):
@@ -40,6 +43,18 @@ class Health:
                       "last_success", "last_unknown"):
             if isinstance(prior.get(field), dict):
                 self.state[field] = prior[field]
+        self.state.pop("last_ingress", None)
+        ingress = prior.get("last_ingress")
+        if (isinstance(ingress, dict)
+                and isinstance(ingress.get("time"), (int, float))
+                and not isinstance(ingress.get("time"), bool)
+                and 0 <= ingress["time"] <= 4102444800
+                and isinstance(ingress.get("fingerprint"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", ingress["fingerprint"])):
+            self.state["last_ingress"] = {
+                "time": float(ingress["time"]),
+                "fingerprint": ingress["fingerprint"],
+            }
         rows = prior.get("outbound_traces", {})
         if not isinstance(rows, dict):
             return False
@@ -66,15 +81,27 @@ class Health:
             os.close(fd)
 
     def _prune(self):
+        # Preserve the existing integer-second retention semantics for the
+        # outbound receipt ledger; it can contain up to MAX_TRACES entries.
         now = int(time.time())
         self.outbound = {
             key: value for key, value in self.outbound.items()
             if 0 <= now - value["time"] <= self.TRACE_RETENTION_SECONDS
         }
+        self._prune_ingress()
         if len(self.outbound) > self.MAX_TRACES:
             latest = sorted(self.outbound.items(),
                             key=lambda entry: entry[1]["time"], reverse=True)
             self.outbound = dict(latest[:self.MAX_TRACES])
+
+    def _prune_ingress(self):
+        """Expire the single ingress hint in O(1), independent of send history."""
+        ingress = self.state.get("last_ingress")
+        if isinstance(ingress, dict):
+            now = time.time()
+            age = now - ingress.get("time", now)
+            if age < 0 or age > self.INGRESS_RETENTION_SECONDS:
+                self.state.pop("last_ingress", None)
 
     def _save_unlocked(self):
         """Caller must hold the process lock and the on-disk flock."""
@@ -164,6 +191,7 @@ class Health:
                     if not self._reload_unlocked():
                         print("bridge_health_read_failed", flush=True)
                         return
+                    self._prune_ingress()
                     if trace:
                         self.state["last_event"] = event
                     else:
@@ -174,6 +202,20 @@ class Health:
                         self.state["last_success"] = event
                     if unknown:
                         self.state["last_unknown"] = event
+                    # Only the post-guard queue acceptance is eligible. Keep a
+                    # short-lived digest so /live can observe ingress if a fast
+                    # generation update replaces last_event before its next tick.
+                    # Never persist the source trace, text, account, or user ID here.
+                    if (phase == "queue" and reason == "accepted"
+                            and isinstance(trace, str)
+                            and re.fullmatch(r"[0-9a-fA-F]{64}", trace)):
+                        fingerprint = hashlib.sha256(trace.lower().encode("ascii")).hexdigest()
+                        previous = self.state.get("last_ingress")
+                        if not (isinstance(previous, dict)
+                                and previous.get("fingerprint") == fingerprint):
+                            self.state["last_ingress"] = {
+                                "time": time.time(), "fingerprint": fingerprint
+                            }
                     self._save_unlocked()
             except OSError:
                 print("bridge_health_write_failed", flush=True)

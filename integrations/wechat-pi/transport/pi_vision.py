@@ -16,12 +16,97 @@ import base64
 import ctypes as c
 import hashlib
 import json
+import os
+from pathlib import Path
+import re
 import struct
-import urllib.error
 import urllib.request
 import zlib
 
 CORE = "http://127.0.0.1:19301"
+MODEL_HUB = "http://127.0.0.1:18090/v1/chat/completions"
+MODEL_HUB_MAX_RESPONSE = 1024 * 1024
+MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+TRACE_ID_RE = re.compile(
+    r"^(?:[0-9a-f]{64}|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$", re.I)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep 30x responses local so credentials never follow a Location header."""
+    @staticmethod
+    def _return_response(_req, response, _code, _msg, _headers):
+        return response
+
+    http_error_301 = http_error_302 = http_error_303 = _return_response
+    http_error_307 = http_error_308 = _return_response
+
+
+def _model_hub_config():
+    """Resolve the configured local vision route; never infer a text model."""
+    model = os.environ.get("DAFEIYU_WECHAT_VISION_HUB_MODEL", "").strip()
+    if not MODEL_NAME_RE.fullmatch(model):
+        return None
+    key_path = (os.environ.get("DAFEIYU_WECHAT_VISION_HUB_KEY_FILE", "").strip()
+                or os.environ.get("DAFEIYU_WECHAT_JUDGE_KEY_FILE", "").strip())
+    path = Path(key_path).expanduser() if key_path else (
+        Path.home() / "dafeiyu-test" / "secrets" / "model-hub" / "gateway.key")
+    try:
+        key = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return None
+    return {"model": model, "key": key} if key else None
+
+
+def _describe_model_hub(png: bytes, prompt: str, timeout: int,
+                        trace_id: str | None = None) -> str | None:
+    config = _model_hub_config()
+    if config is None:
+        return None
+    body = {
+        "model": config["model"],
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {
+                "url": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}},
+            {"type": "text", "text": prompt},
+        ]}],
+        "temperature": 0.1,
+        "max_tokens": 1000,
+        "stream": False,
+    }
+    headers = {"content-type": "application/json",
+               "authorization": "Bearer " + config["key"]}
+    # This gateway records the selected/fallback profile only when a recognized
+    # trace id is supplied. Never forward arbitrary values in this correlation header.
+    if isinstance(trace_id, str) and TRACE_ID_RE.fullmatch(trace_id):
+        headers["X-Dafeiyu-Trace-Id"] = trace_id
+    req = urllib.request.Request(
+        MODEL_HUB,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers=headers,
+    )
+    try:
+        # Bypass ambient HTTP proxies: this adapter has one fixed IPv4 loopback destination.
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoRedirectHandler())
+        with opener.open(req, timeout=max(1, min(int(timeout), 120))) as response:
+            if response.status != 200:
+                return None
+            raw = response.read(MODEL_HUB_MAX_RESPONSE + 1)
+        if len(raw) > MODEL_HUB_MAX_RESPONSE:
+            return None
+        result = json.loads(raw.decode("utf-8"))
+        choices = result.get("choices") if isinstance(result, dict) else None
+        if not isinstance(choices, list) or len(choices) != 1:
+            return None
+        choice = choices[0]
+        if not isinstance(choice, dict) or choice.get("finish_reason") not in (None, "stop"):
+            return None
+        message = choice.get("message")
+        text = message.get("content") if isinstance(message, dict) else None
+        return text.strip() if isinstance(text, str) and text.strip() else None
+    except Exception:
+        return None
 
 
 def _lib():
@@ -112,8 +197,16 @@ def sample_avatar(x, y, w, h):
     return len(pixels) >= 16, hashlib.sha256(rows).digest()
 
 
-def describe(png: bytes, prompt: str, timeout: int = 120) -> str | None:
-    """把 PNG 交给 core 的 /api/vision，返回文字描述。"""
+def describe(png: bytes, prompt: str, timeout: int = 120,
+             trace_id: str | None = None) -> str | None:
+    """把 PNG 交给当前显式配置的视觉路线；默认兼容 core `/api/vision`。"""
+    backend = os.environ.get("DAFEIYU_WECHAT_VISION_BACKEND", "").strip().lower()
+    if backend == "model-hub":
+        return _describe_model_hub(png, prompt, timeout, trace_id)
+    if backend:
+        # A typo or unsupported backend is a configuration failure, not permission
+        # to send the image through a different upstream.
+        return None
     body = {"image": base64.b64encode(png).decode(),
             "mime": "image/png",
             "prompt": prompt}
@@ -131,11 +224,11 @@ def describe(png: bytes, prompt: str, timeout: int = 120) -> str | None:
         return None
 
 
-def describe_rect(x, y, w, h, prompt, timeout=120) -> str | None:
+def describe_rect(x, y, w, h, prompt, timeout=120, trace_id=None) -> str | None:
     png = crop(x, y, w, h)
     if not png:
         return None
-    return describe(png, prompt, timeout)
+    return describe(png, prompt, timeout, trace_id)
 
 
 if __name__ == "__main__":

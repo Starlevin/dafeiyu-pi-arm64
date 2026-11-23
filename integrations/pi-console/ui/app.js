@@ -248,8 +248,10 @@
         reset = p.get('reset') === '1';
       } catch (e) { /* 片段格式异常时忽略 */ }
     }
-    // 立刻抹掉片段：令牌不再出现在地址栏 / 历史 / 引荐头。
-    if (window.location.hash) {
+    // Only fixed navigation fragments survive; pairing tokens never do.
+    const workspaceLink = Array.from(document.querySelectorAll('[data-workspace-view]'))
+      .some((link) => link.hash === hash);
+    if (hash && !workspaceLink) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
     }
     return { token: token, reset: reset };
@@ -308,6 +310,8 @@
   function showConsole() {
     $('authCard').hidden = true;
     $('console').hidden = false;
+    if (window.location.hash === '#hSettings') refreshChannels();
+    if (window.location.hash === '#hDiagnostics') refreshDelivery();
   }
   function applySession(s) {
     renderSessionMeta(s);
@@ -516,6 +520,8 @@
           name: str(c.name) || String(c.id),
           kind: (c.kind === 'group' || c.kind === 'private') ? c.kind : null,
           enabled: bool(c.enabled),
+          enabledLabel: str(c.enabledLabel),
+          enabledHint: str(c.enabledHint),
           style: str(c.style),
           frequency: str(c.frequency),
           limit: num(c.limit),
@@ -816,13 +822,11 @@
     const unknown = PLATFORM_KEYS.filter((k) => o[k].connected === null);
     const down = PLATFORM_KEYS.filter((k) => o[k].connected === false);
     if (unknown.length) {
-      $('overviewLead').textContent =
-        '部分平台状态未确认（没有读到数据），这不等于不可用；其余平台照常显示。';
+      $('overviewLead').textContent = unknown.map((key) => PLATFORM_NAME[key]).join('、') + '状态待确认';
     } else if (down.length) {
-      $('overviewLead').textContent =
-        '平台未连接，界面如实显示；未连接不等于设置项失效。';
+      $('overviewLead').textContent = down.map((key) => PLATFORM_NAME[key]).join('、') + '连接待处理';
     } else {
-      $('overviewLead').textContent = '两个平台的连接、自动回复、客户端与模型分开显示如下。';
+      $('overviewLead').textContent = 'QQ 和微信均已连接';
     }
   }
 
@@ -868,13 +872,14 @@
 
     if (field === 'enabled') {
       const label = node('label', 'switch' + (c.enabled === null ? ' is-unknown' : ''));
+      if (c.enabledHint) label.title = c.enabledHint;
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = (c.enabled === true);
       const track = node('span', 'track');
       const st = node('span', 'state', c.enabled === true ? '开' : (c.enabled === false ? '关' : '未配置'));
       label.appendChild(input); label.appendChild(track); label.appendChild(st);
-      control = input;
+      control = label;
       enable(input, true);
       get = () => input.checked;
       revert = () => {
@@ -889,6 +894,7 @@
       });
       validate = (v) => typeof v === 'boolean';
       invalidMsg = '开关值无效。';
+      hintText = c.enabledHint || '';
     } else if (field === 'style' || field === 'frequency') {
       const source = field === 'style' ? o.styleOptions : frequencyOptions(o, c.platform);
       // 按当前会话平台过滤，避免把微信人设 id 提交给 QQ 会话（服务端会拒绝）。
@@ -957,11 +963,7 @@
       if (!validate(value)) { showCellError(err, invalidMsg); return; }
       run('正在保存…', async () => {
         try {
-          await apiPost('/api/conversation', {
-            platform: c.platform, id: c.id, field: field, value: value,
-          });
-          const ok = await loadOverview({ silent: true }); // POST 成功后重新 GET overview
-          if (ok) setStatus('已保存', 'ok', { at: state.lastLoadedAt });
+          await saveConversationSetting(c.platform, c.id, field, value, false);
         } catch (e) {
           revert();
           enable(saveBtn, false);
@@ -977,7 +979,25 @@
     td.appendChild(err);
     return td;
   }
-  // 微信人设是全局预设：一个控件管所有会话，不能伪装成逐会话独立。
+  async function saveConversationSetting(platform, id, field, value, isGlobal) {
+    await apiPost('/api/conversation', { platform, id, field, value });
+    if (!await loadOverview({ silent: true })) return;
+    const overview = state.overview;
+    const saved = isGlobal
+      ? overview.globalSettings.find((g) => g.platform === platform && g.scope === id && g.field === field)
+      : overview.conversations.find((c) => c.platform === platform && c.id === id);
+    const observed = saved ? saved[isGlobal ? 'value' : field] : null;
+    const stamp = { at: state.lastLoadedAt };
+    if (observed === value) {
+      setStatus('已保存并回读确认', 'ok', stamp);
+    } else if (observed == null) {
+      setStatus('已提交，未能确认当前设置值', 'warning', stamp);
+    } else {
+      setStatus('提交后读到的设置值与选择不一致', 'warning', stamp);
+    }
+  }
+
+  // 微信人设是全局预设：一个控件管所有会话。
   function renderGlobalSettings() {
     const card = $('globalCard');
     const body = $('globalBody');
@@ -1005,12 +1025,7 @@
         if (typeof value !== 'string' || !value) { showCellError(err, '请先选择一个有效选项。'); return; }
         run('正在保存…', async () => {
           try {
-            // 保留既有 POST /api/conversation 合同，只是 id 用全局 scope。
-            await apiPost('/api/conversation', {
-              platform: g.platform, id: g.scope, field: 'style', value: value,
-            });
-            const ok = await loadOverview({ silent: true }); // POST 后重新 GET
-            if (ok) setStatus('已保存（对所有会话生效）', 'ok', { at: state.lastLoadedAt });
+            await saveConversationSetting(g.platform, g.scope, 'style', value, true);
           } catch (e) {
             sel.value = (g.value === null ? '' : String(g.value));
             enable(saveBtn, false);
@@ -1069,7 +1084,8 @@
         target = document.createElement('td');
       } else {
         target = node('div', 'field-row');
-        target.appendChild(node('span', 'field-key', FIELD_NAME[field]));
+        target.appendChild(node('span', 'field-key',
+          field === 'enabled' && c.enabledLabel ? c.enabledLabel : FIELD_NAME[field]));
       }
       if (c.capabilities[field]) {
         const ctl = buildEditableCell(c, field, o);
@@ -1247,6 +1263,101 @@
     }
   }
 
+  async function refreshChannels() {
+    const mount = $('channelInventory');
+    const button = $('channelRefresh');
+    if (!mount || !button || button.disabled || !state.session || !state.session.authenticated) return;
+    button.disabled = true;
+    try {
+      const data = await apiGet('/api/channels');
+      const channels = Array.isArray(data.channels) ? data.channels : [];
+      const labels = { ok: '在线', offline: '离线', qr: '待扫码', disabled: '已停用', unknown: '未确认' };
+      clear(mount);
+      channels.forEach((channel) => {
+        if (!channel || !['qq', 'wechat'].includes(channel.platform)) return;
+        const title = node('strong', '', PLATFORM_NAME[channel.platform]);
+        const meta = node('span', 'channel-meta', channel.client || '客户端未报告');
+        const label = node('span', 'channel-state', labels[channel.state] || labels.unknown);
+        label.dataset.state = ['ok', 'offline', 'qr', 'disabled', 'unknown'].includes(channel.state)
+          ? channel.state : 'unknown';
+        const row = node('div', 'channel-row');
+        row.append(title, meta, label);
+        mount.appendChild(row);
+      });
+      if (!mount.firstChild) mount.textContent = '暂未读到平台连接状态。';
+    } catch (error) {
+      if (error.status === 401) { handleUnauthorized(); return; }
+      mount.textContent = '连接状态读取失败，稍后可重试。';
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function refreshDelivery() {
+    const mount = $('deliverySummary');
+    const button = $('deliveryRefresh');
+    if (!mount || !button || button.disabled || !state.session || !state.session.authenticated) return;
+    button.disabled = true;
+    try {
+      const report = await apiGet('/api/delivery/summary');
+      clear(mount);
+      const observation = { partial: '部分数据可读', unavailable: '暂未读到回执' };
+      const rows = [
+        ['qq', 'QQ 核心当前计数', [
+          ['当前待处理', 'queueDepth'], ['OneBot 已确认', 'confirmed'], ['结果未知', 'unknown'],
+        ]],
+        ['wechat', '微信桥接最近 24 小时', [
+          ['会话内确认', 'confirmed'], ['结果未知', 'unknown'], ['提交待核验', 'pending'],
+        ]],
+      ];
+      rows.forEach(([platform, scope, metrics]) => {
+        const data = report[platform] || {};
+        const card = node('article', 'card');
+        const list = node('dl', 'meta-list');
+        metrics.forEach(([label, key]) => {
+          const row = node('div', 'meta-row');
+          const count = Number.isSafeInteger(data[key]) && data[key] >= 0 ? String(data[key]) : '—';
+          row.append(node('dt', '', label), node('dd', '', count));
+          list.appendChild(row);
+        });
+        card.append(node('h4', 'card-title', PLATFORM_NAME[platform]), node('p', 'card-note', scope), list);
+        if (observation[data.status]) card.appendChild(node('p', 'card-note', observation[data.status]));
+        mount.appendChild(card);
+      });
+    } catch (error) {
+      if (error.status === 401) { handleUnauthorized(); return; }
+      mount.textContent = '回执读取失败，稍后可重试。';
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function wireWorkspace() {
+    const links = Array.from(document.querySelectorAll('[data-workspace-view]'));
+    const panes = Array.from(document.querySelectorAll('[data-workspace-pane]'));
+    function displayView() {
+      const requested = window.location.hash.slice(1);
+      const target = links.some((link) => link.dataset.workspaceView === requested)
+        ? requested : 'hOverview';
+      links.forEach((link) => {
+        if (link.dataset.workspaceView === target) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
+      });
+      panes.forEach((pane) => { pane.hidden = pane.dataset.workspacePane !== target; });
+      if (target === 'hSettings') refreshChannels();
+      if (target === 'hDiagnostics') refreshDelivery();
+    }
+    window.addEventListener('hashchange', displayView);
+    links.forEach((link) => link.addEventListener('click', () => {
+      if (window.location.hash === link.hash) displayView();
+    }));
+    const refreshButton = $('channelRefresh');
+    if (refreshButton) refreshButton.addEventListener('click', refreshChannels);
+    const deliveryButton = $('deliveryRefresh');
+    if (deliveryButton) deliveryButton.addEventListener('click', refreshDelivery);
+    displayView();
+  }
+
   function init() {
     wireAvatar();
     wireThemePicker();
@@ -1263,6 +1374,7 @@
     // 先捕获并立刻移除 #pair= 片段，再决定屏幕。令牌只留在内存里。
     const frag = captureFragment();
     if (frag.token) storePair(frag.token, frag.reset);
+    wireWorkspace();
     loadSession();
   }
 
