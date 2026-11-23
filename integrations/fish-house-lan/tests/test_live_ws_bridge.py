@@ -20,6 +20,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -266,6 +267,19 @@ class EvidenceTests(unittest.TestCase):
         live = self.live(qq={"service_running": True})
         snap = live_ws.qq_evidence(live, panel, now=NOW)
         self.assertNotIn(snap.phase, ("received", "thinking"))
+
+    def test_qq_active_phase_requires_matching_marker_and_expires(self):
+        live = self.live(qq={"service_running": True})
+        for state, (marker, phase, window) in live_ws.QQ_ACTIVE_CHAT.items():
+            def evidence(detail, at):
+                item = {"state": state, "timestamp": at, "detail": detail}
+                return live_ws.qq_evidence(live, {"runtimeRecords": [item]}, now=NOW).phase
+
+            with self.subTest(state=state):
+                self.assertEqual(evidence(marker, NOW - window), phase)
+                self.assertEqual(evidence("工具或设置操作", NOW - 1), "idle")
+                self.assertEqual(evidence(marker, NOW - window - 1), "idle")
+                self.assertEqual(evidence(marker, NOW + 1), "idle")
 
     def test_wechat_reuses_normalized_activity_state(self):
         live = self.live(wx={"activity_state": "thinking",
@@ -1184,7 +1198,7 @@ class ReviewRegressionTests(unittest.TestCase):
         # newest-first 保留头部 6 条，而不是尾部。
         self.assertEqual(kept[0]["timestamp"], 300.0)
         self.assertEqual(len(kept), 6)
-        self.assertEqual(set(kept[0]), {"state", "timestamp", "chat", "ingress"})
+        self.assertEqual(set(kept[0]), {"state", "timestamp", "chat", "ingress", "active"})
         self.assertTrue(kept[0]["chat"])
         self.assertFalse(kept[0]["ingress"])
         blob = json.dumps(panel, ensure_ascii=False)
@@ -1204,7 +1218,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertTrue(panel["runtime_records"][0]["ingress"])
         self.assertFalse(panel["runtime_records"][1]["ingress"])
         self.assertEqual(set(panel["runtime_records"][0]),
-                         {"state", "timestamp", "chat", "ingress"})
+                         {"state", "timestamp", "chat", "ingress", "active"})
         self.assertNotIn("真实消息正文", json.dumps(panel, ensure_ascii=False))
 
     def test_non_chat_confirm_is_not_a_receipt(self):
@@ -1217,6 +1231,22 @@ class ReviewRegressionTests(unittest.TestCase):
             {"state": "confirmed", "timestamp": 1.0, "detail": "插画已生成"}]})
         self.assertFalse(panel["runtime_records"][0]["chat"])
         self.assertFalse(panel["runtime_records"][0]["ingress"])
+
+    def test_stale_controller_snapshot_cannot_keep_pending_animation(self):
+        spec = importlib.util.spec_from_file_location("fh_server_active_stage", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        record = {"state": "generating", "timestamp": NOW - 10,
+                  "detail": "QQ聊天模型请求中", "target": "fixture group"}
+        mod.qq_poller = mod.QQEvidencePoller(lambda: {"runtimeRecords": [record]})
+        mod.qq_poller.tick()
+        view = mod.qq_panel_view()
+        self.assertEqual(view["runtimeRecords"][0],
+                         {"state": "generating", "timestamp": NOW - 10,
+                          "_chat": False, "_ingress": False, "_active": True})
+        self.assertEqual(live_ws.qq_evidence({}, view, now=NOW).phase, "thinking")
+        with patch.object(mod.time, "monotonic", return_value=mod.qq_poller._read_at + 6):
+            self.assertIsNone(mod.qq_panel_view())
 
     def test_projected_receipts_reach_the_bridge_and_each_play_once(self):
         spec = importlib.util.spec_from_file_location("fh_server_projection", ROOT / "server.py")

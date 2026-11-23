@@ -120,6 +120,11 @@ with socket.socket() as server:
                 (directory / 'payload').write_text(json.dumps(request['params']))
                 with (directory / 'payloads').open('a') as out:
                     out.write(json.dumps(request['params']) + '\n')
+                if (directory / 'hold-send').exists():
+                    deadline = time.monotonic() + 4
+                    while not (directory / 'release-send').exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    assert (directory / 'release-send').exists(), 'send fixture was not released'
                 if (directory / 'drop-send').exists():
                     break
                 data = {'message_id': 99}

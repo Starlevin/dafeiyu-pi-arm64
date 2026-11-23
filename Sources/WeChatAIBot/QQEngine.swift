@@ -68,10 +68,16 @@ struct QQEngineSharedState: Sendable {
     @Published private(set) var status = "QQ 尚未连接"
     @Published private(set) var contacts: [QQContact] = []
     @Published private(set) var logs: [LogEntry] = []
+    // House evidence only: memory-resident and fixed-text, never added to persisted logs.
+    private var latestNativeChatIngress: LogEntry?
+    private var activeChatStage: (submission: UUID, entry: LogEntry)?
     var runtimeRecords: [QQRuntimeRecord] {
         let secrets = [runtimeCredentials?.oneBotToken ?? "", runtimeCredentials?.deepSeekKey ?? "",
                        imageCredentials.zhipuKey, imageCredentials.cloudflareToken, googleVisionKey]
-        return logs.suffix(30).reversed().map { entry in
+        var entries = Array(logs.suffix(30).reversed())
+        if let latestNativeChatIngress { entries.append(latestNativeChatIngress) }
+        if let activeChatStage { entries.append(activeChatStage.entry) }
+        return entries.sorted { $0.date > $1.date }.prefix(30).map { entry in
             QQRuntimeRecord(entry, target: config.targets.first { $0.id == entry.chatID }, secrets: secrets)
         }
     }
@@ -935,6 +941,8 @@ struct QQEngineSharedState: Sendable {
         sleepPrevention = nil
         deadlineTask?.cancel(); deadlineTask = nil; runDeadline = nil
         fence.stop(); running = false; queue.removeAll(); worker?.cancel(); worker = nil
+        activeChatStage = nil
+        latestNativeChatIngress = nil
         memoryWorker?.cancel(); memoryWorker = nil
         history.removeAll(); privateContextSeen.removeAll(); status = connected ? "QQ 已连接，自动回复已暂停" : "QQ 已暂停"
         repliesSinceSticker.removeAll()
@@ -1224,6 +1232,10 @@ struct QQEngineSharedState: Sendable {
     private func enqueueReply(_ work: Work, groupKey: String?) {
         guard queue.count < Self.queueCapacity else { return }
         queue.append(work)
+        if case let .reply(message, target, _, _, _) = work, message.group, message.mentionsSelf {
+            latestNativeChatIngress = LogEntry(
+                chatID: target.id, state: .queued, detail: "QQ原生聊天已入队")
+        }
         if let groupKey { countProactive(.queued, groupKey: groupKey) }
         startQueue()
     }
@@ -1543,6 +1555,7 @@ struct QQEngineSharedState: Sendable {
                 if !proactive && persona.rebuff(for: message.text) != nil {
                     result = ModelResult(text: "", tokens: 0, seconds: 0)
                 } else {
+                    defer { clearChatStage(submissionID) }
                     timing?.modelStart = ContinuousClock.now
                     result = try await modelClient.reviewedQQReply(key: key, config: config.ai, rule: rule,
                     history: message.group ? [] : Array((history[contextKey] ?? []).suffix(2)), text: modelInput, images: incomingImages, toolHandler: toolHandler, onlineToolsEnabled: !proactive && config.effectiveOnlineEnabled, socialToolsEnabled: socialRequested, imageGenerationEnabled: !proactive && config.effectiveImageGeneration.enabled, artworkEnabled: !proactive && config.effectiveArtwork.enabled && config.effectiveArtwork.agentEnabled, stickerOptions: stickerOptions, proactive: proactive && preparedImage == nil,
@@ -1555,7 +1568,7 @@ struct QQEngineSharedState: Sendable {
                     // 而一旦要联网，工具结果仍走原版双阶段校对，不牺牲正确性。
                     userText: message.text, toolsMayRun: webRequested || socialRequested, reserve: { [weak self] in
                         guard let self else { throw CancellationError() }
-                        try await self.reserveModel(epoch, scope: message.key, target: target)
+                        try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
                     })
                 }
                 if timing?.modelStart != nil { timing?.modelEnd = ContinuousClock.now }
@@ -1649,7 +1662,13 @@ struct QQEngineSharedState: Sendable {
                 let (action, params) = QQPolicy.sendAction(target: target, text: reply.text + sourceText + (preparedArtwork.map { "\n" + $0.caption } ?? ""), image: image)
                 if message.group { activeGroupSubmissions[submissionID] = message.key }
                 timing?.submitStart = ContinuousClock.now
-                let response = try await connection.action(action, params: params)
+                let response: [String: Any]
+                do {
+                    activeChatStage = (submissionID, LogEntry(
+                        chatID: target.id, state: .sending, detail: "QQ聊天提交 OneBot"))
+                    defer { clearChatStage(submissionID) }
+                    response = try await connection.action(action, params: params)
+                }
                 guard let data = response["data"] as? [String: Any], let sentID = QQPolicy.identifier(data["message_id"]), Int64(sentID) != nil else {
                     throw AppFailure.message("发送返回缺少消息 ID，结果未知")
                 }
@@ -2012,6 +2031,17 @@ struct QQEngineSharedState: Sendable {
         try check(epoch, scope: scope, target: target)
         guard usage.reserve(limit: config.ai.dailyLimit) else { throw AppFailure.message("QQ 今日模型调用已达上限") }
         try persist()
+    }
+    private func reserveReplyModel(_ epoch: UInt64, scope: String, target: QQTarget, submission: UUID) throws {
+        try reserveModel(epoch, scope: scope, target: target)
+        if activeChatStage?.submission != submission {
+            activeChatStage = (submission, LogEntry(
+                chatID: target.id, state: .generating, detail: "QQ聊天模型请求中"))
+        }
+    }
+
+    private func clearChatStage(_ submission: UUID) {
+        if activeChatStage?.submission == submission { activeChatStage = nil }
     }
     /// Memory maintenance has its own ledger; a broken summarizer cannot exhaust the chat budget.
     private func reserveMemoryModel(_ epoch: UInt64, scope: String, target: QQTarget) throws {

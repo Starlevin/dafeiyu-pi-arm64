@@ -385,6 +385,7 @@ QQ_RECORD_STATES = {"queued", "generating", "sending", "confirmed",
 QQ_MAX_RECORDS = 6
 QQ_POLL_INTERVAL = 2.0     # 有观众时的后台轮询节拍
 QQ_POLL_TIMEOUT = 1.2      # 单次读取预算，超时就保留上一轮，不阻塞任何请求
+QQ_PANEL_MAX_AGE = 5.0
 
 
 def _controller_panel(qa):
@@ -408,11 +409,12 @@ def _controller_panel(qa):
 
 
 def qq_panel_evidence(panel):
-    """把 QQ 面板压成 {state, timestamp, chat, ingress}，detail/正文一律丢弃。
+    """把 QQ 面板压成 {state, timestamp, chat, ingress, active}，丢弃原文。
 
     ``chat`` 是布尔：只有确切以 OneBot 已接受发送 开头的 confirmed 记录才
     为 True，插画/性格/设置命令一律 False。
     ``ingress`` 是布尔：只有固定原生聊天入队标记才为 True。
+    ``active`` 是布尔：只有核心当前的聊天模型或 OneBot 调用才为 True。
     """
     records = []
     raw = panel.get("runtimeRecords") if isinstance(panel, dict) else None
@@ -431,7 +433,7 @@ def qq_panel_evidence(panel):
                     and detail.startswith(live_ws.QQ_CHAT_CONFIRM_PREFIX))
             ingress = live_ws.qq_native_chat_ingress(item)
             records.append({"state": state, "timestamp": float(ts),
-                            "chat": chat, "ingress": ingress})
+                            "chat": chat, "ingress": ingress, "active": live_ws.qq_active_chat(item)})
     queued = panel.get("queued") if isinstance(panel, dict) else None
     return {
         "available": isinstance(panel, dict),
@@ -455,12 +457,15 @@ class QQEvidencePoller:
         self._timeout = timeout
         self._lock = threading.Lock()
         self._panel = None
+        self._read_at = None
         self._thread = None
         self._reader_thread = None
         self._stop = threading.Event()
 
     def snapshot(self):
         with self._lock:
+            if self._read_at is None or time.monotonic() - self._read_at > QQ_PANEL_MAX_AGE:
+                return None
             return self._panel
 
     def poll_once(self):
@@ -488,6 +493,7 @@ class QQEvidencePoller:
         if value is not None:
             with self._lock:
                 self._panel = value
+                self._read_at = time.monotonic()
         return value
 
     def _run(self):
@@ -551,7 +557,7 @@ def qq_panel_view():
     evidence = qq_panel_evidence(panel)
     return {"runtimeRecords": [
         {"state": item["state"], "timestamp": item["timestamp"],
-         "_chat": item["chat"], "_ingress": item["ingress"]}
+         "_chat": item["chat"], "_ingress": item["ingress"], "_active": item["active"]}
         for item in evidence["runtime_records"]]}
 
 

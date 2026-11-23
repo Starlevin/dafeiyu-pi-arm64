@@ -596,6 +596,7 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         if expectedMessages > 2 { try Data(String(expectedMessages).utf8).write(to: directory.appendingPathComponent("message-count")) }
         if control == "noSticker" { engine.config.effectivePersona.stickersEnabled = false }
         if control == "unknown" { try Data().write(to: directory.appendingPathComponent("drop-send")) }
+        if control == "groupMentionOnly" { try Data().write(to: directory.appendingPathComponent("hold-send")) }
         #expect(engine.useTemporaryCredentials(token: "synthetic-test-token", key: "synthetic-key"))
         await engine.connect()
         try #require(engine.connected, "\(engine.error ?? engine.status)")
@@ -634,6 +635,8 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         try #require(admitted == expectedMessages)
         #expect(engine.usage.calls == (control == "memory" ? 1 : DelayedModelProtocol.counts.started))
         #expect(engine.queuedCount == expectedMessages - 1)
+        #expect(engine.runtimeRecords.contains { $0.state == .generating && $0.detail == "QQ聊天模型请求中" })
+        #expect(!engine.logs.contains { $0.state == .generating })
         if control.hasPrefix("privateQuoted") {
             let body = try #require(DelayedModelProtocol.counts.bodies.first)
             #expect(body.contains("verified private quote") == ["privateQuotedReply", "privateQuotedOwn"].contains(control))
@@ -693,6 +696,19 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         if ["complete", "noSticker", "missingSticker", "unknown", "cooldown", "fastStickers", "groupMentionOnly", "groupQuotedReply", "periodicStickers"].contains(control) || control.hasPrefix("privateQuoted") {
             // Positive control: this same fixture must detect a send when generation completes.
             DelayedModelProtocol.completePending(intensity: control == "periodicStickers" ? 1 : 3)
+            if control == "groupMentionOnly" {
+                let payload = directory.appendingPathComponent("payload")
+                let until = Date().addingTimeInterval(3)
+                while !FileManager.default.fileExists(atPath: payload.path) && Date() < until {
+                    DelayedModelProtocol.completePending()
+                    try await Task.sleep(nanoseconds: 20_000_000)
+                }
+                try #require(FileManager.default.fileExists(atPath: payload.path))
+                #expect(engine.runtimeRecords.contains { $0.state == .sending && $0.detail == "QQ聊天提交 OneBot" })
+                #expect(!engine.runtimeRecords.contains { $0.state == .generating || $0.state == .confirmed })
+                #expect(!engine.logs.contains { $0.state == .sending })
+                try Data().write(to: directory.appendingPathComponent("release-send"))
+            }
             let desired = control == "periodicStickers" ? 6 : (["cooldown", "fastStickers"].contains(control) || control.hasPrefix("privateQuoted")) ? 2 : 1
             let sendDeadline = Date().addingTimeInterval(control == "periodicStickers" ? 10 : 4)
             while engine.sends.confirmed < desired && engine.sends.uncertain == 0 && Date() < sendDeadline {
@@ -701,6 +717,7 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
             }
             engine.pause()
             #expect(engine.sends.attempts == desired)
+            #expect(!engine.runtimeRecords.contains { [.generating, .sending].contains($0.state) })
             #expect(engine.sends.confirmed == (control == "unknown" ? 0 : desired))
             #expect(engine.sends.uncertain == (control == "unknown" ? 1 : 0))
             let actions = try String(contentsOf: directory.appendingPathComponent("actions"), encoding: .utf8)
@@ -770,6 +787,7 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         }
         #expect(!engine.running)
         #expect(engine.queuedCount == 0)
+        #expect(!engine.runtimeRecords.contains { [.generating, .sending].contains($0.state) })
         if control == "takeOver" { #expect(!engine.config.targets[0].enabled) }
 
         let cancellationDeadline = Date().addingTimeInterval(2)

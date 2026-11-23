@@ -348,6 +348,10 @@ QQ_RECORD_STATES = {"queued", "generating", "sending", "confirmed",
 # Only this exact OneBot acceptance line counts as a chat receipt.
 QQ_CHAT_CONFIRM_PREFIX = "OneBot 已接受发送"
 QQ_NATIVE_CHAT_INGRESS_DETAIL = "QQ原生聊天已入队"
+QQ_ACTIVE_CHAT = {
+    "generating": ("QQ聊天模型请求中", "thinking", 120.0),
+    "sending": ("QQ聊天提交 OneBot", "replying", 30.0),
+}
 QQ_MAX_RECORDS = 6
 
 
@@ -388,6 +392,12 @@ def qq_native_chat_ingress(item: Any) -> bool:
     return item.get("_ingress") is True or _record_detail(item).strip() == QQ_NATIVE_CHAT_INGRESS_DETAIL
 
 
+def qq_active_chat(item: dict[str, Any]) -> bool:
+    expected = QQ_ACTIVE_CHAT.get(str(item.get("state") or ""))
+    return expected is not None and (
+        item.get("_active") is True or _record_detail(item).strip() == expected[0])
+
+
 def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                 now: float) -> EvidenceSnapshot:
     """Project QQ stages from recent, specific controller evidence.
@@ -416,6 +426,11 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                 and age <= QQ_RECEIVED_WINDOW_SEC):
             return EvidenceSnapshot("qq", "received", EVIDENCE_VERIFIED,
                                     reason="native_chat_queued", at=float(latest["timestamp"]))
+        if age is not None and qq_active_chat(latest):
+            _, phase, window = QQ_ACTIVE_CHAT[state]
+            if age <= window:
+                return EvidenceSnapshot("qq", phase, EVIDENCE_VERIFIED,
+                                        reason="active_chat", at=float(latest["timestamp"]))
         if age is not None and age <= SENT_WINDOW_SEC:
             if state == "confirmed":
                 # confirmed splits in two: only a chat receipt counts as sent.
@@ -424,12 +439,6 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                                             reason="chat_receipt", at=float(latest["timestamp"]))
                 return EvidenceSnapshot("qq", "idle", EVIDENCE_DEGRADED,
                                         reason="non_chat_confirm", at=now)
-            if state == "sending":
-                return EvidenceSnapshot("qq", "replying", EVIDENCE_VERIFIED,
-                                        reason="runtime_record", at=float(latest["timestamp"]))
-            if state == "generating":
-                return EvidenceSnapshot("qq", "thinking", EVIDENCE_VERIFIED,
-                                        reason="runtime_record", at=float(latest["timestamp"]))
         if degraded:
             return EvidenceSnapshot("qq", "idle", EVIDENCE_DEGRADED,
                                     reason="record_not_recent", at=now)
