@@ -16,9 +16,20 @@ private final class SocialModelFixtureProtocol: URLProtocol, @unchecked Sendable
     override func stopLoading() {}
     override func startLoading() {
         Self.lock.lock(); Self.requests += 1; let index = Self.requests; Self.lock.unlock()
-        let body = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any] ?? [:]
         let result: [String: Any]
         if index == 1 {
+            var payload = request.httpBody ?? Data()
+            if payload.isEmpty, let stream = request.httpBodyStream {
+                stream.open()
+                defer { stream.close() }
+                var buffer = [UInt8](repeating: 0, count: 8192)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    if count <= 0 { break }
+                    payload.append(contentsOf: buffer.prefix(count))
+                }
+            }
+            let body = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any] ?? [:]
             let tools = body["tools"] as? [[String: Any]] ?? []
             #expect(tools.contains { ($0["function"] as? [String: Any])?["name"] as? String == "read_social" })
             result = ["choices": [["message": ["content": NSNull(), "tool_calls": [["id": "fixture", "type": "function", "function": ["name": "read_social", "arguments": #"{"platform":"bilibili","mode":"popular","value":"","limit":2}"#]]]], "finish_reason": "tool_calls"]]]
