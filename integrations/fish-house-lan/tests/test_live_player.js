@@ -79,7 +79,29 @@ async function main() {
     const targets = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json();
     cdp = new CDPClient(targets.find(t => t.type === "page").webSocketDebuggerUrl); await cdp.connect();
     await cdp.send("Page.enable"); await cdp.send("Runtime.enable"); await cdp.send("Log.enable");
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: `
+      window.fhHoldFrame = !location.search;
+      window.fhHeldFrames = [];
+      const nativeFrame = HTMLVideoElement.prototype.requestVideoFrameCallback;
+      HTMLVideoElement.prototype.requestVideoFrameCallback = function (callback) {
+        return nativeFrame.call(this, (time, metadata) => {
+          if (window.fhHoldFrame) window.fhHeldFrames.push(() => callback(time, metadata));
+          else callback(time, metadata);
+        });
+      };
+    ` });
     await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/live` });
+    await until(() => cdp.js("[...document.querySelectorAll('video')].some(v => !v.paused && v.currentTime > .1)"),
+      "initial video started before the first-frame notification");
+    await sleep(1300);
+    const delayedStart = await cdp.js(`({
+      node: window.__fishHouseLive.getState().currentNode,
+      cover: document.querySelector('#cover').classList.contains('cover-hidden'),
+      active: [...document.querySelectorAll('video')].some(v => v.style.opacity === '1'),
+    })`);
+    check("startup retains cover until a video frame is presented",
+      !delayedStart.node && !delayedStart.cover && !delayedStart.active, JSON.stringify(delayedStart));
+    await cdp.js("window.fhHoldFrame=false; window.fhHeldFrames.splice(0).forEach(release => release())");
     await until(() => cdp.js("window.__fishHouseLive && window.__fishHouseLive.getState().currentNode === 'rest'"), "idle theme playback");
     const defaultTheme = await (await fetch(`http://127.0.0.1:${PORT}/fish_house/themes/default/theme.json`)).json();
     const route = (from, to, theme = defaultTheme) => { const q=[[from]], seen={}; while(q.length){const p=q.shift(),tail=p[p.length-1];if(tail===to)return p;if(seen[tail])continue;seen[tail]=true;(theme.config.flow.edges||[]).filter(e=>e.from===tail).forEach(e=>q.push(p.concat([e.to])));}return []; };
@@ -95,13 +117,27 @@ async function main() {
     check("/live route, source theme ID and actual muted video playback", m.id === "7ce22364d7" && m.videos.some(v => !v.paused && v.ready >= 2 && v.src.includes("themes/default/videos/") && v.muted), JSON.stringify(m));
     const frames = await until(async () => { const f = await cdp.js("(function(){var v=[...document.querySelectorAll('video')].filter(x=>!x.paused&&x.readyState>=2)[0];if(!v)return null;var c=document.createElement('canvas');c.width=64;c.height=64;var x=c.getContext('2d');x.drawImage(v,0,0,64,64);var d=x.getImageData(0,0,64,64).data,n=0;for(var i=0;i<d.length;i+=4)if(d[i]+d[i+1]+d[i+2]>24)n++;return {n:n,time:v.currentTime,muted:v.muted}})()"); return f && f.time > .45 ? f : false; }, "video frame advancement");
     report.blackFrameSamples++; check("decoded frame is non-black and autoplay is muted", frames.n > 100 && frames.muted, JSON.stringify(frames));
-    check("same-origin theme cover is loaded and replaced after video frame", await cdp.js("document.getElementById('cover').naturalWidth > 0 && getComputedStyle(document.getElementById('cover')).opacity === '0'"), "cover fallback is removed after first decoded frame");
+    check("same-origin theme cover is loaded and replaced after video frame", await until(() =>
+      cdp.js("document.getElementById('cover').naturalWidth > 0 && getComputedStyle(document.getElementById('cover')).opacity === '0'"),
+      "cover fades once the video is visible"), "cover fallback is removed after first decoded frame");
     const send = async (seq, phase, source = "qq", type = "state", node = "") => { const msg = { type, seq, ts: Math.floor(Date.now()/1000), source, phase, node_id: node, bubble_text: phase === "received" ? "正在处理" : "", ttl_ms: 0 }; await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(msg) }); };
     let seq = 2;
     await cdp.js("window.__fhLiveNodes=[];window.__fhLivePrevious='';window.__fhLiveTraceTimer=setInterval(function(){var n=window.__fishHouseLive.getState().currentNode;if(n&&n!==window.__fhLivePrevious){window.__fhLiveNodes.push(n);window.__fhLivePrevious=n;}},40)");
     const preloadResourceCount = await cdp.js(`performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length`);
+    await cdp.js("window.fhHoldFrame=true");
     const fastReceived = seq++; await send(fastReceived, "received");
     await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === fastReceived, "fast received accepted");
+    const delayedPickup = await until(() => cdp.js(`(function () {
+      const incoming = [...document.querySelectorAll('video')].find(v => v.currentSrc === ${JSON.stringify(defaultPickupUrl)});
+      if (!incoming || incoming.paused || incoming.currentTime <= .05) return null;
+      const outgoing = [...document.querySelectorAll('video')].find(v => v !== incoming);
+      return {node:window.__fishHouseLive.getState().currentNode, incoming:incoming.style.opacity,
+        outgoing:outgoing.style.opacity};
+    })()`), "incoming pickup runs while frame notification is held");
+    check("transition retains the outgoing frame until incoming presentation",
+      delayedPickup.node === defaultIdle.id && delayedPickup.incoming === "0" && delayedPickup.outgoing === "1",
+      JSON.stringify(delayedPickup));
+    await cdp.js("window.fhHoldFrame=false; window.fhHeldFrames.splice(0).forEach(release => release())");
     await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === defaultPickup.id, "preloaded pickup becomes active");
     const pickupActivation = await cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(defaultPickupUrl)});return {found:!!v,paused:v&&v.paused,opacity:v&&v.style.opacity,requests:performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length}})()`);
     check("first pickup activation reuses the preloaded video request", pickupActivation.found && !pickupActivation.paused && pickupActivation.opacity === "1" && pickupActivation.requests === preloadResourceCount, JSON.stringify({active:pickupActivation.found&&!pickupActivation.paused, opacity:pickupActivation.opacity, requestsBefore:preloadResourceCount, requestsAfter:pickupActivation.requests}));
@@ -214,7 +250,7 @@ async function main() {
     check("Save-Data mode suppresses inactive pickup preload after theme switch", await cdp.js(`![...document.querySelectorAll('video')].some(v=>v.currentSrc.includes(${JSON.stringify('/themes/rekeyed/' + rekeyPickup.video)}))`), "selected theme idle video plays; pickup remains unfetched");
     await cdp.js("Object.defineProperty(navigator,'connection',{configurable:true,value:{saveData:false}})");
     check("renamed node IDs are chosen from graph roles", rekeyIdle && rekeyPhone && rekeyPickup && rekeyPutdown && await cdp.js("window.__fishHouseLive.getState().idleNode") === rekeyIdle.id && await cdp.js("window.__fishHouseLive.getState().phoneNode") === rekeyPhone.id, `idle=${rekeyIdle.id},phone=${rekeyPhone.id},pickup=${rekeyPickup.id},putdown=${rekeyPutdown.id}`);
-    await cdp.js("window.__fhRekeyTrace=[];window.__fhRekeyLast='';window.__fhRekeyTimer=setInterval(function(){var s=window.__fishHouseLive.getState(),n=s.currentNode;if(n&&n!==window.__fhRekeyLast){window.__fhRekeyLast=n;var v=[...document.querySelectorAll('video')].filter(x=>!x.paused)[0];window.__fhRekeyTrace.push({node:n,src:v&&v.currentSrc,ready:v&&v.readyState,time:v&&v.currentTime});}},40)");
+    await cdp.js("window.__fhRekeyTrace=[];window.__fhRekeyLast='';window.__fhRekeyTimer=setInterval(function(){var s=window.__fishHouseLive.getState(),n=s.currentNode;if(n&&n!==window.__fhRekeyLast){window.__fhRekeyLast=n;var v=[...document.querySelectorAll('video')].find(x=>!x.paused&&x.style.zIndex==='2');window.__fhRekeyTrace.push({node:n,src:v&&v.currentSrc,ready:v&&v.readyState,time:v&&v.currentTime});}},40)");
     await send(6,"received","qq","flow_goto",rekeyPickup.id);
     await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === 6, "rekey received flow_goto accepted");
     await send(7,"sent","qq","flow_goto",rekeyPutdown.id);
@@ -276,6 +312,18 @@ async function main() {
     const rejectedMetrics = await cdp.js("({state:window.__fishHouseLive.getState(),opacity:Number(getComputedStyle(document.getElementById('cover')).opacity),coverWidth:document.getElementById('cover').naturalWidth})");
     check("play rejection clears pending state and leaves same-origin cover visible", rejectedMetrics.state.currentNode === "" && rejectedMetrics.state.pendingNode === "" && rejectedMetrics.opacity > .9 && rejectedMetrics.coverWidth > 0, JSON.stringify(rejectedMetrics));
     await cdp.js("HTMLMediaElement.prototype.play=window.__fhNativePlay");
+    await cdp.js("window.fhHoldFrame=true; window.__fishHouseLive.playNode('rest'); true");
+    await until(() => cdp.js("window.__fishHouseLive.getState().pendingNode === 'rest'"), "stalled startup becomes pending");
+    await until(() => cdp.js("window.__fishHouseLive.getState().pendingNode === ''"), "stalled frame reaches its deadline", 10000);
+    await cdp.js("window.fhHoldFrame=false; window.fhHeldFrames.splice(0).forEach(release => release())");
+    check("frame deadline keeps cover and ignores late notifications",
+      await cdp.js("!document.querySelector('#cover').classList.contains('cover-hidden') && !window.__fishHouseLive.getState().currentNode && [...document.querySelectorAll('video')].every(v => !v.getAttribute('src'))"),
+      "the cover stays visible and the failed media is released");
+    await cdp.js("HTMLVideoElement.prototype.requestVideoFrameCallback=undefined; window.__fishHouseLive.playNode('rest'); true");
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === 'rest'"), "legacy playback readiness");
+    check("legacy frame readiness requires advancing real playback",
+      await cdp.js("[...document.querySelectorAll('video')].some(v => v.style.opacity === '1' && v.currentTime > 0 && v.videoWidth > 0)"),
+      "playback clock and decoded dimensions are both available");
     const s = await cdp.send("Page.captureScreenshot", { format:"png" }); fs.writeFileSync(path.join(os.tmpdir(), "fish-house-live-frame.png"), Buffer.from(s.data,"base64"));
     const expectedRetryErrors = cdp.errors.filter(e => e.method === "Log.entryAdded" && e.params.entry.url === retryUrl && /503/.test(e.params.entry.text));
     const unexpectedBrowserErrors = cdp.errors.filter(e => !expectedRetryErrors.includes(e));

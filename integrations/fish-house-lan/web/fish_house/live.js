@@ -156,55 +156,90 @@
         pause(next); next.removeAttribute("src"); next.load();
       }
     }
-    pause(next); next.style.opacity = "0"; next.loop = Boolean(n.loop); next.muted = true; next.playsInline = true;
+    if (currentNode) {
+      // A new request can reuse the back layer before the previous fade ends.
+      // Finish revealing the last presented frame before reloading that layer.
+      prev.style.transition = "none";
+      prev.style.opacity = "1";
+    }
+    pause(next);
+    next.style.transition = "none";
+    next.style.opacity = "0";
+    next.style.zIndex = "1";
+    next.loop = Boolean(n.loop); next.muted = true; next.playsInline = true;
     next.preload = "auto";
     if (!reusePreload) next.src = file;
     var generation = ++startedAt;
     return new Promise(function (resolve) {
-      var started = false, settled = false, readyTimer = 0;
+      var started = false, settled = false, deadline = 0, videoFrame = null, initialTime = 0;
+      function cleanup() {
+        clearTimeout(deadline);
+        next.removeEventListener("canplay", ready);
+        next.removeEventListener("loadeddata", ready);
+        next.removeEventListener("timeupdate", advanced);
+        if (videoFrame !== null && next.cancelVideoFrameCallback) next.cancelVideoFrameCallback(videoFrame);
+      }
       function fail() {
-        if (settled) return; settled = true; clearTimeout(readyTimer);
-        next.removeEventListener("canplay", ready); next.removeEventListener("loadeddata", ready);
+        if (settled) return;
+        settled = true;
+        cleanup();
         if (generation === startedAt) {
           if (pendingNode === id) pendingNode = "";
-          next.onerror = null;
-          if (next !== videos[active]) pause(next);
+          pause(next);
+          next.removeAttribute("src");
+          next.load();
         }
         resolve(false);
+      }
+      function presented() {
+        if (settled) return;
+        if (generation !== startedAt) { fail(); return; }
+        settled = true;
+        cleanup();
+        next.onerror = null;
+        var firstFrame = !currentNode;
+        prev.style.zIndex = "1";
+        next.style.zIndex = "2";
+        next.style.transition = "";
+        next.style.opacity = "1";
+        active = nextIndex; currentNode = id; pendingNode = "";
+        // Keep the cover or previous image beneath the incoming video for the full fade.
+        setTimeout(function () {
+          if (generation !== startedAt) return;
+          prev.style.opacity = "0";
+          pause(prev); prev.removeAttribute("src"); prev.load();
+          if (cover) cover.classList.add("cover-hidden");
+          if (id === idleNode) preloadPickup();
+        }, 450);
+        next.onended = advance;
+        if (firstFrame && embedded && window.parent !== window) {
+          window.parent.postMessage({ type: "dafeiyu-live-ready" }, location.origin);
+        }
+        resolve(true);
+      }
+      function advanced() {
+        // Chrome 66 and older WebViews lack the compositor callback.
+        if (!next.paused && next.readyState >= 2 && next.videoWidth > 0 && next.currentTime > initialTime) presented();
       }
       function ready() {
         if (started || settled) return;
         if (generation !== startedAt) { fail(); return; }
         started = true;
+        initialTime = next.currentTime;
         next.removeEventListener("canplay", ready); next.removeEventListener("loadeddata", ready);
         next.play().then(function () {
           if (settled) return;
           if (generation !== startedAt) { fail(); return; }
-          settled = true; clearTimeout(readyTimer); next.onerror = null;
-          next.style.opacity = "1"; prev.style.opacity = "0"; active = nextIndex; currentNode = id; pendingNode = "";
-          setTimeout(function () {
-            if (generation === startedAt && prev !== videos[active]) {
-              pause(prev); prev.removeAttribute("src"); prev.load();
-              if (id === idleNode) preloadPickup();
-            }
-          }, 450);
-          next.onended = function () { advance(); };
-          if (cover && !cover.classList.contains("cover-hidden")) {
-            var revealed = false, showVideo = function () {
-              if (revealed || generation !== startedAt) return;
-              revealed = true; cover.classList.add("cover-hidden");
-              if (embedded && window.parent !== window) {
-                window.parent.postMessage({ type: "dafeiyu-live-ready" }, location.origin);
-              }
-            };
-            if (next.requestVideoFrameCallback) next.requestVideoFrameCallback(showVideo); else setTimeout(showVideo, 250);
-            setTimeout(showVideo, 1200);
+          if (next.requestVideoFrameCallback) {
+            videoFrame = next.requestVideoFrameCallback(presented);
+          } else {
+            next.addEventListener("timeupdate", advanced);
+            advanced();
           }
-          resolve(true);
         }).catch(fail);
       }
       next.addEventListener("canplay", ready); next.addEventListener("loadeddata", ready); next.onerror = fail;
-      readyTimer = setTimeout(ready, 5000);
+      deadline = setTimeout(fail, 8000);
       if (reusePreload && next.readyState >= 2) Promise.resolve().then(ready);
       else if (!reusePreload) next.load();
     });
