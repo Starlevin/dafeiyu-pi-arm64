@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js?v=workspace-4"></script>
+<script src="app.js?v=workspace-5"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
 <script src="social.js" defer></script>
@@ -146,9 +146,25 @@
       <p class="empty" id="convFilteredEmpty" hidden>该平台下没有会话。</p>
       <div class="card" id="globalCard" hidden>
         <h3 class="card-title" id="globalTitle">全局设置</h3>
-        <p class="card-note">此设置对该平台的所有会话同时生效，不能按会话分别设置。</p>
+        <p class="card-note">这里设置微信兼容链路的默认人设。已保存的微信群人设优先应用。</p>
         <div id="globalBody"></div>
       </div>
+      <details class="card memory-panel" id="wechatGroupPersona">
+        <summary class="card-title">微信群人设</summary>
+        <form class="memory-toolbar" id="wechatGroupPersonaForm">
+          <div class="field">
+            <label for="wechatPersonaGroup">微信群</label>
+            <select class="select" id="wechatPersonaGroup" disabled></select>
+          </div>
+          <div class="field">
+            <label for="wechatPersonaPreset">回复语气</label>
+            <select class="select" id="wechatPersonaPreset" disabled></select>
+          </div>
+          <button class="btn btn-primary btn-sm" type="submit" id="wechatPersonaSave" disabled>保存人设</button>
+          <button class="btn btn-quiet btn-sm" type="button" id="wechatPersonaRefresh">刷新</button>
+        </form>
+        <p class="card-note" id="wechatPersonaStatus" role="status" aria-live="polite"></p>
+      </details>
       <details class="card memory-panel" id="wechatMemory">
         <summary class="card-title">微信群记忆</summary>
         <div class="memory-toolbar">

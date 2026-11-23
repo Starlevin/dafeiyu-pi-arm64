@@ -284,6 +284,7 @@
     $('authCard').hidden = false;
     $('console').hidden = true;
     clearWeChatMemory();
+    clearWeChatGroupPersonas();
     const isSetup = (mode === 'setup');
     $('setupForm').hidden = !isSetup;
     $('loginForm').hidden = isSetup;
@@ -1072,7 +1073,7 @@
       : (reason === 'unknown' ? '未确认' : '不支持');
     const span = node('span', 'ro-chip ' + reason, label);
     span.setAttribute('title', reason === 'wechat-global'
-      ? (field === 'style' ? '可在下方修改微信全局人设' : '此频率适用于全部微信群')
+      ? (field === 'style' ? '在下方设置微信群人设或兼容链路的默认人设' : '此频率适用于全部微信群')
       : (reason === 'unknown'
         ? '没有读到该会话的这一项，界面不做猜测'
         : '该平台不支持按会话修改此项'));
@@ -1338,6 +1339,86 @@
   let memoryEdit = null;
   let savingMemory = false;
   const memoryRoute = '/api/memory/wechat';
+  const groupPersonaRoute = '/api/persona/wechat';
+  let personaGroups = [];
+  let personaRequest = 0;
+  let personaBusy = false;
+
+  function selectedWeChatPersonaGroup() {
+    return personaGroups.find((group) => group.id === $('wechatPersonaGroup').value);
+  }
+
+  function updateWeChatPersonaControls(useCurrent) {
+    const group = selectedWeChatPersonaGroup();
+    const menu = $('wechatPersonaPreset');
+    if (useCurrent) menu.value = group ? group.preset : '';
+    $('wechatPersonaGroup').disabled = personaBusy || !personaGroups.length;
+    $('wechatPersonaRefresh').disabled = personaBusy;
+    menu.disabled = personaBusy || !group;
+    $('wechatPersonaSave').disabled = personaBusy || !group || menu.value === group.preset;
+  }
+
+  function clearWeChatGroupPersonas() {
+    ++personaRequest;
+    personaGroups = [];
+    personaBusy = false;
+    $('wechatPersonaGroup').replaceChildren();
+    $('wechatPersonaPreset').replaceChildren();
+    $('wechatPersonaStatus').textContent = '';
+    updateWeChatPersonaControls(true);
+  }
+
+  async function syncWeChatGroupPersonas(save) {
+    if (personaBusy || !$('wechatGroupPersona').open || !state.session || !state.session.authenticated) return;
+    const group = selectedWeChatPersonaGroup();
+    const value = $('wechatPersonaPreset').value;
+    if (save && (!group || group.preset === value)) return;
+    const request = ++personaRequest;
+    const status = $('wechatPersonaStatus');
+    const menu = $('wechatPersonaGroup');
+    const selection = menu.value;
+    let accepted = false;
+    personaBusy = true;
+    updateWeChatPersonaControls(false);
+    status.textContent = save ? '正在保存并回读…' : '正在读取微信群人设…';
+    try {
+      if (save) {
+        await apiPost(groupPersonaRoute + '/' + group.id, { preset: value, previous: group.preset });
+        accepted = true;
+      }
+      const result = await apiGet(groupPersonaRoute);
+      if (request !== personaRequest) return;
+      personaGroups = arr(result.groups);
+      const counts = new Map();
+      personaGroups.forEach((item) => counts.set(item.label, (counts.get(item.label) || 0) + 1));
+      menu.replaceChildren(...personaGroups.map((item) => {
+        const label = counts.get(item.label) > 1 ? item.label + ' · ' + item.accountCode : item.label;
+        const option = node('option', '', label);
+        option.value = item.id;
+        return option;
+      }));
+      if (personaGroups.some((item) => item.id === selection)) menu.value = selection;
+      const inherited = node('option', '', '沿用当前核心的默认人设');
+      inherited.value = '';
+      $('wechatPersonaPreset').replaceChildren(inherited, ...arr(result.styles).map((name) => node('option', '', name)));
+      const current = selectedWeChatPersonaGroup();
+      if (save) {
+        status.textContent = current && current.id === group.id && current.preset === value
+          ? '已保存并回读确认。' : '保存后的回读值已变化，请核对当前设置。';
+      } else {
+        status.textContent = current ? '适用于本群的 Swift 文本及兼容链路回复。' : '暂无可管理的微信群。';
+      }
+    } catch (error) {
+      if (request !== personaRequest) return;
+      if (error.status === 401) { handleUnauthorized(); return; }
+      status.textContent = accepted ? '已提交，请刷新核对是否保存。' : error.message;
+    } finally {
+      if (request === personaRequest) {
+        personaBusy = false;
+        updateWeChatPersonaControls(true);
+      }
+    }
+  }
 
   function stopMemoryEdit() {
     memoryEdit = null;
@@ -1519,6 +1600,14 @@
     $('wechatMemoryRefresh').addEventListener('click', () => refreshWeChatMemory(true));
     $('wechatMemoryEdit').addEventListener('submit', saveWeChatMemory);
     $('wechatMemoryCancel').addEventListener('click', stopMemoryEdit);
+    $('wechatGroupPersona').addEventListener('toggle', () => syncWeChatGroupPersonas(false));
+    $('wechatPersonaRefresh').addEventListener('click', () => syncWeChatGroupPersonas(false));
+    $('wechatPersonaGroup').addEventListener('change', () => updateWeChatPersonaControls(true));
+    $('wechatPersonaPreset').addEventListener('change', () => updateWeChatPersonaControls(false));
+    $('wechatGroupPersonaForm').addEventListener('submit', (event) => {
+      event.preventDefault();
+      syncWeChatGroupPersonas(true);
+    });
 
     // 先捕获并立刻移除 #pair= 片段，再决定屏幕。令牌只留在内存里。
     const frag = captureFragment();

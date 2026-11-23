@@ -34,6 +34,17 @@ private struct PilotMemoryResult: Encodable {
     var entry: WeChatMemoryEntry? = nil
 }
 
+private struct PilotPersonaList: Encodable {
+    let ok = true
+    let styles: [String]
+    let groups: [WeChatGroupPersona]
+}
+
+private struct PilotPersonaChange: Decodable {
+    let preset: String
+    let previous: String
+}
+
 /// 所有控制响应的统一形状（不含消息原文）。可选字段让一个结构体覆盖所有路径。
 private struct PilotAck: Encodable {
     var ok: Bool
@@ -264,13 +275,30 @@ public final class UnifiedPilotServer {
                         _ parsed: (method: String, path: String, headers: [String: String], body: Data)) async {
         let (method, path, headers, body) = parsed
         let memoryPath = "/api/admin/wechat-memory"
-        if path == memoryPath || path.hasPrefix(memoryPath + "/") {
+        let personaPath = "/api/admin/wechat-persona"
+        let personaRequest = path == personaPath || path.hasPrefix(personaPath + "/")
+        if personaRequest || path == memoryPath || path.hasPrefix(memoryPath + "/") {
             guard headers["x-unified-admin-token"] == memoryAdminToken, headers["origin"] == origin,
                   headers["host"] == origin.replacingOccurrences(of: "http://", with: "") else {
                 send(connection, PilotHTTP.response(403, PilotAck(ok: false, error: "forbidden"))); return
             }
             do {
-                if method == "GET", path == memoryPath, body.isEmpty {
+                if personaRequest {
+                    if method == "GET", path == personaPath, body.isEmpty {
+                        let groups = try await core.wechatGroupPersonas()
+                        let styles = WeChatGroupPersonas.styles.map(\.name)
+                        send(connection, PilotHTTP.response(200, PilotPersonaList(styles: styles, groups: groups)))
+                    } else {
+                        guard method == "POST", path.hasPrefix(personaPath + "/"), body.count <= 512,
+                              headers["content-type"]?.components(separatedBy: ";").first?.lowercased() == "application/json",
+                              let change = try? JSONDecoder().decode(PilotPersonaChange.self, from: body) else {
+                            throw WeChatMemoryAdminError.invalid
+                        }
+                        let scope = String(path.dropFirst(personaPath.count + 1))
+                        try await core.setWeChatGroupPersona(scope: scope, preset: change.preset, previous: change.previous)
+                        send(connection, PilotHTTP.response(200, PilotAck(ok: true)))
+                    }
+                } else if method == "GET", path == memoryPath, body.isEmpty {
                     send(connection, PilotHTTP.response(200, PilotMemoryResult(groups: try core.wechatMemoryGroups())))
                 } else {
                     guard path.hasPrefix(memoryPath + "/") else { throw WeChatMemoryAdminError.invalid }

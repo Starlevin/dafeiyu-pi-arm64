@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 from queue import Empty, Queue
 import re
+import stat
 import sys
 from threading import Event, Lock, Thread
 import time
@@ -1357,6 +1358,38 @@ def core_target(payload: dict):
     return CORE_URL, {}
 
 
+def _compatibility_group_persona(payload, account, path):
+    if path != "/webhook/wechat":
+        return payload
+    result = {key: value for key, value in payload.items() if key != "bridge_style"}
+    chat = payload.get("chat_id")
+    data_dir = os.environ.get("DAFEIYU_DATA_DIR")
+    if payload.get("chat_type") != "group" or not isinstance(chat, str) or not chat or not account or not data_dir:
+        return result
+    target = Path(data_dir) / "unified-wechat-group-personas.json"
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fields = [piece.encode("utf-8") for piece in ("wechat", account, "group", chat)]
+        key = hashlib.sha256(b"".join(str(len(piece)).encode() + b":" + piece for piece in fields)).hexdigest()
+        with os.fdopen(os.open(target, flags), "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or (os.name == "posix" and
+                    (metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600)):
+                return result
+            raw = stream.read(32_769)
+        if len(raw) > 32_768:
+            return result
+        document = json.loads(raw)
+        if isinstance(document, dict) and document.get("version") == 1 and isinstance(document.get("presets"), dict):
+            preset = document["presets"].get(key)
+            # The compatibility core applies only names in its existing bridgeStyles catalog.
+            if isinstance(preset, str) and 1 <= len(preset) <= 12:
+                result["bridge_style"] = preset
+    except (OSError, ValueError):
+        pass
+    return result
+
+
 def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhook/wechat") -> dict:
     """一次入站只投递到一个 core；请求/重试语义与 ask_core 完全一致。
 
@@ -1369,14 +1402,19 @@ def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhoo
         payload.get("group_auto_reply_public_question_settled") is True)
     if settled_public_question and "x-unified-token" not in extra:
         return {"ok": False, "error": "settled_candidate_swift_route_unavailable"}
-    account = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT") if extra else None
-    routed = {**payload, "account": account} if account else payload
+    unified_account = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT")
+    account = unified_account or str(payload.get("account") or "")
+    if extra:
+        routed = {**payload, "account": account} if unified_account else payload
+    else:
+        routed = _compatibility_group_persona(payload, account, path)
     response = _ask_core_once(url or CORE_URL, path, routed, token, timeout, extra)
     # Only a verified connection refusal proves that the pilot did not
     # receive the message. Never re-submit a request with an unknown outcome.
     if (extra and response.get("error") == "core_connection_refused"
             and not settled_public_question):
-        response = _ask_core_once(CORE_URL, path, payload, token, timeout)
+        compat_payload = _compatibility_group_persona(payload, account, path)
+        response = _ask_core_once(CORE_URL, path, compat_payload, token, timeout)
         extra = {}
     receipt = response.pop("memoryReceipt", None)
     response.pop("_swift_memory_receipt", None)

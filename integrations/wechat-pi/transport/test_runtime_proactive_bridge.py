@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 from queue import Queue
 import re
@@ -310,6 +311,38 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                     confirm.assert_called_once_with(receipt, "fixture-trace")
                 else:
                     confirm.assert_not_called()
+
+    def test_compatibility_persona_uses_swift_scope_and_reloads_on_next_message(self):
+        path = self.path.with_name("unified-wechat-group-personas.json")
+        scope = "ba5094ec427ac8a09855653d71fe55d54c865d585396f3f016b28257e06604db"
+        env = {"DAFEIYU_DATA_DIR": str(path.parent), "DAFEIYU_WECHAT_UNIFIED_ACCOUNT": "fixture-account"}
+        def write(preset):
+            path.write_text(json.dumps({"version": 1, "presets": {scope: preset}}), encoding="utf-8")
+            path.chmod(0o600)
+
+        payload = {"account": "ui-alias", "chat_type": "group", "chat_id": "fixture-group",
+                   "quoted": True, "text": "合成引用", "bridge_style": "伪造"}
+        swift = ("http://127.0.0.1:41143", {"x-unified-token": "fixture-token"})
+        with patch.dict(os.environ, env), patch.object(bridge, "_ask_core_once", return_value={"ok": True}) as call:
+            write("温柔")
+            with patch.object(bridge, "core_target", return_value=(bridge.CORE_URL, {})):
+                bridge.ask_core_routed(payload, "fixture-token")
+                self.assertEqual(call.call_args.args[2]["bridge_style"], "温柔")
+                write("理性")
+                bridge.ask_core_routed(payload, "fixture-token")
+                self.assertEqual(call.call_args.args[2]["bridge_style"], "理性")
+                for changes in ({"chat_type": "private"}, {"chat_id": "other-group"}):
+                    bridge.ask_core_routed(payload | changes, "fixture-token")
+                    self.assertNotIn("bridge_style", call.call_args.args[2])
+                path.write_text("invalid", encoding="utf-8")
+                bridge.ask_core_routed(payload, "fixture-token")
+                self.assertNotIn("bridge_style", call.call_args.args[2])
+            write("温柔")
+            with patch.object(bridge, "core_target", return_value=swift):
+                call.side_effect = [{"ok": False, "error": "core_connection_refused"}, {"ok": True}]
+                bridge.ask_core_routed(payload, "fixture-token")
+                self.assertEqual(call.call_args.args[:2], (bridge.CORE_URL, "/webhook/wechat"))
+                self.assertEqual(call.call_args.args[2]["bridge_style"], "温柔")
 
     def test_turning_off_before_draft_reservation_prevents_submission(self):
         self.configure(True)

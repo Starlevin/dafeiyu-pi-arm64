@@ -26,20 +26,21 @@ class FakeUpstream(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        if self.path != "/api/admin/wechat-memory/" + "a" * 64:
+        if self.path not in ("/api/admin/wechat-memory/" + "a" * 64, "/api/admin/wechat-persona/" + "a" * 64):
             self.send_error(404)
             return
         if (self.headers.get("x-unified-admin-token") != "a" * 72
                 or self.headers.get("Origin") != f"http://127.0.0.1:{self.server.server_port}"):
             self.send_error(403)
             return
+        self.rfile.read(int(self.headers["Content-Length"]))
         self.send_error(409, "private upstream detail")
 
     def do_HEAD(self):
         self.do_GET()
 
     def do_GET(self):
-        if self.path == "/api/admin/wechat-memory":
+        if self.path in ("/api/admin/wechat-memory", "/api/admin/wechat-persona"):
             if self.headers.get("x-unified-admin-token") != "a" * 72:
                 self.send_error(403)
                 return
@@ -256,6 +257,31 @@ class HouseConsoleExtTests(unittest.TestCase):
             with self.assertRaises(urllib.error.HTTPError) as unsafe_file:
                 self._get(endpoint)
             self.assertEqual(unsafe_file.exception.code, 503)
+
+    def test_wechat_group_persona_requires_same_origin_and_masks_conflicts(self):
+        endpoint = "/api/persona/wechat"
+        path = endpoint + "/" + "a" * 64
+        runtime = self.qq_root / "data-qq" / "unified-pilot.memory-admin.json"
+        runtime.parent.mkdir()
+        runtime.write_text(json.dumps({"port": self.upstream.server_port, "token": "a" * 72}), encoding="utf-8")
+        runtime.chmod(0o600)
+        with self.assertRaises(urllib.error.HTTPError) as anonymous:
+            self._get(endpoint, authed=False)
+        self.assertEqual(anonymous.exception.code, 401)
+        self.assertEqual(self._get(endpoint)[0], 200)
+        change = {"preset": "温柔", "previous": ""}
+        request = urllib.request.Request(self.base + path, json.dumps(change).encode(),
+                                         {"Content-Type": "application/json", "Cookie": self.cookie})
+        with self.assertRaises(urllib.error.HTTPError) as missing_origin:
+            urllib.request.urlopen(request, timeout=4)
+        self.assertEqual(missing_origin.exception.code, 403)
+        with self.assertRaises(urllib.error.HTTPError) as invalid:
+            self._post(path, dict(change, scope="b" * 64))
+        self.assertEqual(invalid.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as conflict:
+            self._post(path, change)
+        self.assertEqual(conflict.exception.code, 409)
+        self.assertEqual(json.load(conflict.exception)["error"], "该群人设已被其他操作更新，请刷新核对")
 
     def test_live_video_proxies_get_head_and_unsatisfiable_range(self):
         url = self.base + "/fish_house/themes/default/videos/example.mp4"

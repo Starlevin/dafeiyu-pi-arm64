@@ -38,6 +38,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WECHAT_MEMORY_ROUTE = re.compile(r"/api/memory/wechat(?:/([0-9a-f]{64}))?")
+WECHAT_PERSONA_ROUTE = re.compile(r"/api/persona/wechat(?:/([0-9a-f]{64}))?")
 
 MIME_MAP = {
     ".html": "text/html; charset=utf-8",
@@ -112,6 +113,16 @@ def _qq_root(cfg: dict) -> Path | None:
 
 
 def _wechat_memory_admin(cfg, method, scope, body):
+    path = "/api/admin/wechat-memory" + ("/" + scope if scope else "")
+    return _wechat_admin(cfg, method, path, body, {
+        400: "更正内容无效，请检查长度和敏感信息",
+        404: "该群记忆当前不可管理",
+        409: "条目已被更新或到期，请刷新后重试",
+        503: "微信记忆服务暂不可用，请刷新核对",
+    })
+
+
+def _wechat_admin(cfg, method, upstream_path, body, errors):
     try:
         root = _qq_root(cfg)
         if root is None:
@@ -130,18 +141,14 @@ def _wechat_memory_admin(cfg, method, scope, body):
             raise ValueError
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
         try:
-            upstream_path = "/api/admin/wechat-memory" + ("/" + scope if scope else "")
             headers = {"Origin": f"http://127.0.0.1:{port}", "x-unified-admin-token": token,
                        "Content-Type": "application/json"}
             payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
             connection.request(method, upstream_path, payload, headers)
             upstream = connection.getresponse()
             if upstream.status != 200:
-                known = {400: "更正内容无效，请检查长度和敏感信息",
-                         404: "该群记忆当前不可管理",
-                         409: "条目已被更新或到期，请刷新后重试"}
-                if upstream.status in known:
-                    return upstream.status, {"error": known[upstream.status]}
+                if upstream.status in errors:
+                    return upstream.status, {"error": errors[upstream.status]}
                 raise OSError
             raw = upstream.read(512_001)
             if len(raw) > 512_000:
@@ -153,7 +160,7 @@ def _wechat_memory_admin(cfg, method, scope, body):
         finally:
             connection.close()
     except (OSError, KeyError, TypeError, ValueError, http.client.HTTPException):
-        return 503, {"error": "微信记忆服务暂不可用，请刷新核对"}
+        return 503, {"error": errors[503]}
 
 
 def _wechat_root(cfg: dict) -> Path | None:
@@ -999,6 +1006,37 @@ def _proxy_house_video(handler, path):
 def resolve(handler, method: str, path: str) -> bool:
     """Handle unified Fish House + extended Console endpoints. Returns True if handled."""
     cfg = _app_cfg(handler)
+
+    persona = WECHAT_PERSONA_ROUTE.fullmatch(path)
+    if persona and method in ("GET", "POST"):
+        if not handler.need_auth():
+            return True
+        scope = persona.group(1)
+        body = None
+        if method == "POST":
+            if not handler.headers.get("Origin") or not handler.origin_ok():
+                handler.fail(403, "请从本控制台页面修改微信群人设")
+                return True
+            try:
+                body = handler.read_json()
+                if (not scope or set(body) != {"preset", "previous"}
+                        or any(not isinstance(value, str) or len(value) > 12 for value in body.values())):
+                    raise ValueError("人设更新请求无效")
+            except ValueError:
+                handler.fail(400, "人设更新请求无效")
+                return True
+        elif scope:
+            handler.fail(404, "该群人设接口不存在")
+            return True
+        upstream = "/api/admin/wechat-persona" + ("/" + scope if scope else "")
+        code, result = _wechat_admin(cfg, method, upstream, body, {
+            400: "请选择列表中的群人设",
+            404: "该微信群当前不可管理",
+            409: "该群人设已被其他操作更新，请刷新核对",
+            503: "微信群人设服务暂不可用，请刷新核对",
+        })
+        handler.json(code, result)
+        return True
 
     memory = WECHAT_MEMORY_ROUTE.fullmatch(path)
     if memory and method in ("GET", "POST"):

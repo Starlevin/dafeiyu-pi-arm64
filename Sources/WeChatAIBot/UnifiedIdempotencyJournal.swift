@@ -136,6 +136,9 @@ public actor UnifiedIdempotencyJournal {
     typealias Writer = @Sendable (URL, Data) throws -> Void
 
     private let fileURL: URL?
+    nonisolated var groupPersonasURL: URL? {
+        fileURL?.deletingLastPathComponent().appendingPathComponent(WeChatGroupPersonas.filename)
+    }
     private let capacity: Int
     private let writer: Writer
     private var entries: [String: UnifiedJournalEntry] = [:]

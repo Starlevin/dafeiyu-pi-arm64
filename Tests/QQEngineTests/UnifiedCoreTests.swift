@@ -25,9 +25,11 @@ private struct FixtureReplyGenerator: ReplyGenerating {
 private actor RequestRecorder {
     private(set) var incomingHistory: [[String]] = []
     private(set) var prompts: [String] = []
+    private(set) var systemPrompts: [String] = []
     func record(_ request: UnifiedGenerationRequest) {
         incomingHistory.append(request.history.map(\.incoming))
         prompts.append(request.userText)
+        systemPrompts.append(request.rule.prompt)
     }
 }
 
@@ -470,6 +472,50 @@ private func inbound(_ text: String = "合成消息",
         #expect(!after.contains("群聊陈述/待核实"))
         _ = await independent.handle(inbound("周报发布时间是什么？", chatId: "other-group", msgId: "test-after"))
         #expect((await recorder.prompts.last)?.contains("周五下午") == false)
+    }
+
+    @Test func groupPersonaUsesDurableIsolatedPresetsWithoutRestart() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], allowPrivate: true, maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account", "other-account"]
+        config.confirmedWeChatMemoryEnabled = false
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                               calls: CallCounter(), recorder: recorder)
+        let core = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        let scopes = try await core.wechatGroupPersonas()
+        #expect(scopes.count == 4 && scopes.allSatisfy { $0.preset.isEmpty })
+        let configured = try #require(scopes.first {
+            $0.label == "fixture-group" && $0.id == "ba5094ec427ac8a09855653d71fe55d54c865d585396f3f016b28257e06604db"
+        })
+        try await core.setWeChatGroupPersona(scope: configured.id, preset: "温柔", previous: "")
+        do {
+            try await core.setWeChatGroupPersona(scope: configured.id, preset: "理性", previous: "")
+            Issue.record("A stale edit must not replace the current preset.")
+        } catch WeChatMemoryAdminError.stale {}
+        for (index, message) in [
+            inbound("主群测试消息", msgId: "voice-1"),
+            inbound("另群测试消息", chatId: "other-group", msgId: "voice-2"),
+            inbound("另号测试消息", msgId: "voice-3", account: "other-account"),
+            inbound("私聊测试消息", chatType: "private", msgId: "voice-4"),
+            inbound("QQ 测试消息", msgId: "voice-5", platform: "qq")
+        ].enumerated() {
+            _ = await core.handle(message)
+            let prompt = try #require(await recorder.systemPrompts.last)
+            #expect(prompt.contains("当前会话唯一生效性格：温柔") == (index == 0))
+        }
+        let reopened = UnifiedReplyCore(config: config, generator: generator,
+                                        journal: UnifiedIdempotencyJournal(fileURL: file))
+        #expect(try await reopened.wechatGroupPersonas().first { $0.id == configured.id }?.preset == "温柔")
+        _ = await reopened.handle(inbound("重启测试消息", msgId: "voice-6"))
+        #expect(await recorder.systemPrompts.last?.contains("当前会话唯一生效性格：温柔") == true)
+        try await reopened.setWeChatGroupPersona(scope: configured.id, preset: "", previous: "温柔")
+        _ = await reopened.handle(inbound("恢复默认测试", msgId: "voice-7"))
+        #expect(await recorder.systemPrompts.last?.contains("当前会话唯一生效性格：雌小鬼") == true)
     }
 
     @Test func memoryAdminCorrectionPreservesScopeLabelAndExpiry() async throws {
