@@ -1,26 +1,25 @@
 import Foundation
+import BotCore
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
-/// 持久化幂等账本：保证「一条输入最多一次发回」跨进程重启仍成立。
-///
-/// 设计（对应任务书「去重持久化或明确可靠跨重启机制」）：
-/// - 文件 0600、原子替换（写 .tmp → chmod → replace），与既有 qq-state.json /
-///   bridge-health.json 的落盘范式一致。
-/// - 只存**摘要键**（sessionKey|msgId 的 FNV 摘要）与离散结果/状态，
-///   绝不存消息原文、群名、账号或 key。
-/// - 两阶段：
-///   * `reserve(key)` 在**调用模型之前**原子落盘 `state=pending`；
-///     重启后看到 pending 表示该输入可能已经生成/提交过 → 保守返回 ignore，
-///     绝不重新生成、绝不重新发回（发送不明勿盲重试）。
-///   * `complete(key, reply)` 在**返回结果之前**把最终 reply 落盘；
-///     同 key 再次进入直接回放，模型不再调用。
-/// - 有界：只保留最近 capacity 条（按时间淘汰），防止无界增长。
-/// - 单进程单实例假设：journal 文件由同一进程独占；多实例需外部文件锁（列为缺口）。
-
+/// Persistent idempotency journal. A pending entry is written before model
+/// generation so a restart never regenerates an input with an unclear outcome.
 public struct UnifiedJournalEntry: Codable, Sendable, Equatable {
-    public var key: String          // 摘要键，非原文
-    public var state: String        // pending | done | failed
+    public var key: String
+    public var state: String
     public var at: Double
     public var reply: UnifiedReply?
+    var memory: UnifiedJournalMemory? = nil
+}
+
+struct UnifiedJournalMemory: Codable, Sendable, Equatable {
+    let sessionDigest: String
+    let incoming: String
+    var confirmedAt: Double? = nil
 }
 
 private struct JournalFile: Codable {
@@ -28,70 +27,244 @@ private struct JournalFile: Codable {
     var entries: [UnifiedJournalEntry]
 }
 
-public actor UnifiedIdempotencyJournal {
-    private let fileURL: URL?
-    private var entries: [String: UnifiedJournalEntry] = [:]
-    private let capacity: Int
+private struct JournalLoadResult: Sendable {
+    var entries: [String: UnifiedJournalEntry]
+    var storageUsable: Bool
+}
 
-    /// - Parameter fileURL: nil = 纯内存（fixture 用，不落盘）；
-    ///   非 nil = 0600 原子文件，启动时加载。
+private enum JournalWriteError: Error {
+    case operationFailed
+}
+
+public actor UnifiedIdempotencyJournal {
+    typealias Writer = @Sendable (URL, Data) throws -> Void
+
+    private let fileURL: URL?
+    private let capacity: Int
+    private let writer: Writer
+    private var entries: [String: UnifiedJournalEntry] = [:]
+    private var memoryDrafts: [String: UnifiedJournalMemory] = [:]
+    private var storageUsable = true
+
+    /// `nil` selects an in-memory journal for fixtures. A file-backed journal
+    /// loads v1 data and fails closed if an existing file cannot be read or decoded.
     public init(fileURL: URL?, capacity: Int = 512) {
         self.fileURL = fileURL
         self.capacity = capacity
-        if let fileURL, let data = try? Data(contentsOf: fileURL),
-           let decoded = try? JSONDecoder().decode(JournalFile.self, from: data), decoded.version == 1 {
-            for entry in decoded.entries { entries[entry.key] = entry }
-            trim()
-        }
+        self.writer = { url, data in try Self.writeAtomically(data, to: url) }
+        let loaded = Self.loadExistingFile(at: fileURL, capacity: capacity)
+        self.entries = loaded.entries
+        self.storageUsable = loaded.storageUsable
     }
 
-    /// 返回 nil 表示「首次见到，可继续」；否则返回已有条目（回放或保守拒绝）。
+    /// Internal writer seam keeps disk-failure behavior deterministic in tests.
+    init(fileURL: URL?, capacity: Int, writer: @escaping Writer) {
+        self.fileURL = fileURL
+        self.capacity = capacity
+        self.writer = writer
+        let loaded = Self.loadExistingFile(at: fileURL, capacity: capacity)
+        self.entries = loaded.entries
+        self.storageUsable = loaded.storageUsable
+    }
+
+    /// Returns nil only for a new key. A corrupt or unreadable persistent file
+    /// still permits reads of entries already loaded, but blocks new work.
     public func lookup(_ key: String) -> UnifiedJournalEntry? { entries[key] }
 
-    /// 在调用模型**之前**占位。返回 false 表示已存在（不重复生成/不重复发送）。
+    /// This is called before model invocation. Persistence failure is the same
+    /// fail-closed result as an existing key; no candidate entry enters memory.
     @discardableResult public func reserve(_ key: String, at now: Double) -> Bool {
-        if entries[key] != nil { return false }
-        entries[key] = UnifiedJournalEntry(key: key, state: "pending", at: now, reply: nil)
-        persist()
+        guard storageUsable, entries[key] == nil else { return false }
+        var candidate = entries
+        candidate[key] = UnifiedJournalEntry(key: key, state: "pending", at: now, reply: nil)
+        guard persist(candidate) else { return false }
+        entries = candidate
         return true
     }
 
-    /// 在把结果交回桥**之前**落盘最终状态。
+    /// Persist completion before making it visible in memory. On failure the
+    /// prior pending entry remains, conservatively preventing another attempt.
     public func complete(_ key: String, reply: UnifiedReply, ok: Bool, at now: Double) {
-        entries[key] = UnifiedJournalEntry(key: key, state: ok ? "done" : "failed", at: now, reply: reply)
-        trim()
-        persist()
+        _ = complete(key, reply: reply, ok: ok, at: now, memory: nil)
     }
 
-    /// 供单测/诊断：当前账本条数（不含原文）。
+    func complete(_ key: String, reply: UnifiedReply, ok: Bool, at now: Double,
+                  memory: UnifiedJournalMemory?) -> Bool {
+        guard storageUsable else { return false }
+        let pendingMemory = fileURL != nil && ok ? memory : nil
+        var recordedReply = reply
+        if pendingMemory == nil { recordedReply.memoryReceipt = nil }
+        var candidate = entries
+        candidate[key] = UnifiedJournalEntry(
+            key: key, state: ok ? "done" : "failed", at: now, reply: recordedReply)
+        Self.trim(&candidate, capacity: capacity)
+        guard persist(candidate) else { return false }
+        entries = candidate
+        // The inbound body stays in process memory unless the UI proves the send.
+        memoryDrafts = memoryDrafts.filter { key, _ in
+            guard let entry = candidate[key] else { return false }
+            return (0...600).contains(now - entry.at)
+        }
+        memoryDrafts[key] = pendingMemory
+        return memory == nil || pendingMemory != nil
+    }
+
+    func confirmMemory(_ receipt: UUID, at now: Double) -> Bool {
+        guard storageUsable, fileURL != nil,
+              var entry = entries.values.first(where: {
+                  $0.state == "done" && $0.reply?.memoryReceipt == receipt
+              }) else { return false }
+        if entry.memory?.confirmedAt != nil { return true }
+        guard (0...600).contains(now - entry.at), var draft = memoryDrafts[entry.key] else { return false }
+        draft.confirmedAt = now
+        entry.memory = draft
+        var candidate = entries
+        candidate[entry.key] = entry
+        guard persist(candidate) else { return false }
+        entries = candidate
+        memoryDrafts.removeValue(forKey: entry.key)
+        return true
+    }
+
+    func memoryHistory(for sessionDigest: String, limit: Int) -> [ChatTurn] {
+        guard storageUsable, fileURL != nil, limit > 0 else { return [] }
+        let confirmed = entries.values.filter {
+            $0.state == "done" && $0.memory?.sessionDigest == sessionDigest && $0.memory?.confirmedAt != nil
+        }.sorted { ($0.at, $0.key) < ($1.at, $1.key) }
+        return confirmed.suffix(min(limit, 8)).compactMap { entry in
+            guard let memory = entry.memory, let reply = entry.reply?.reply else { return nil }
+            return ChatTurn(incoming: memory.incoming, outgoing: String(reply.prefix(1200)))
+        }
+    }
+
     public func count() -> Int { entries.count }
 
-    private func trim() {
-        guard entries.count > capacity else { return }
-        let sorted = entries.values.sorted { $0.at < $1.at }
-        for entry in sorted.prefix(entries.count - capacity) { entries.removeValue(forKey: entry.key) }
+    nonisolated private static func loadExistingFile(
+        at fileURL: URL?, capacity: Int
+    ) -> JournalLoadResult {
+        guard let fileURL else {
+            return JournalLoadResult(entries: [:], storageUsable: true)
+        }
+        var metadata = stat()
+        let lookupResult = fileURL.path.withCString { lstat($0, &metadata) }
+        if lookupResult != 0 {
+            if errno == ENOENT {
+                return JournalLoadResult(entries: [:], storageUsable: true)
+            }
+            print("unified_idempotency_load_failed reason=unreadable_path")
+            return JournalLoadResult(entries: [:], storageUsable: false)
+        }
+        guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            print("unified_idempotency_load_failed reason=invalid_file_type")
+            return JournalLoadResult(entries: [:], storageUsable: false)
+        }
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let decoded = try JSONDecoder().decode(JournalFile.self, from: data)
+            guard decoded.version == 1 else {
+                print("unified_idempotency_load_failed reason=unsupported_version")
+                return JournalLoadResult(entries: [:], storageUsable: false)
+            }
+            guard decoded.entries.allSatisfy({
+                !$0.key.isEmpty && ["pending", "done", "failed"].contains($0.state)
+            }) else {
+                print("unified_idempotency_load_failed reason=invalid_entry")
+                return JournalLoadResult(entries: [:], storageUsable: false)
+            }
+            var loadedEntries: [String: UnifiedJournalEntry] = [:]
+            for entry in decoded.entries { loadedEntries[entry.key] = entry }
+            trim(&loadedEntries, capacity: capacity)
+            return JournalLoadResult(entries: loadedEntries, storageUsable: true)
+        } catch {
+            // Do not log paths, content, or platform error descriptions.
+            print("unified_idempotency_load_failed reason=unreadable_or_corrupt")
+            return JournalLoadResult(entries: [:], storageUsable: false)
+        }
     }
 
-    private func persist() {
-        guard let fileURL else { return }
+    @discardableResult
+    private func persist(_ candidate: [String: UnifiedJournalEntry]) -> Bool {
+        guard storageUsable else { return false }
+        guard let fileURL else { return true }
         do {
-            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
-                                                    withIntermediateDirectories: true)
-            let file = JournalFile(version: 1, entries: Array(entries.values))
+            let file = JournalFile(version: 1, entries: Array(candidate.values))
             let data = try JSONEncoder().encode(file)
-            let tmp = fileURL.appendingPathExtension("tmp")
-            try data.write(to: tmp, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmp.path)
-            // 原子替换：Linux Foundation 的 replaceItemAt 在目标由本进程刚创建时
-            // 会抛 NSCocoaErrorDomain Code=4，故用「删旧 → rename 新」两步骤。
-            // 两者同目录，rename(2) 是原子的；崩溃时最坏留下 .tmp，下次启动重建。
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                try FileManager.default.removeItem(at: fileURL)
-            }
-            try FileManager.default.moveItem(at: tmp, to: fileURL)
+            try writer(fileURL, data)
+            return true
         } catch {
-            // 落盘失败不能变成「静默重复发送」：打印离散错误，由上层 fail-closed。
-            print("unified_idempotency_persist_failed \(error)")
+            // Keep diagnostics discrete; never include file paths or entry data.
+            print("unified_idempotency_persist_failed reason=write_failed")
+            return false
+        }
+    }
+
+    nonisolated private static func trim(
+        _ store: inout [String: UnifiedJournalEntry], capacity: Int
+    ) {
+        guard store.count > capacity else { return }
+        let sorted = store.values.sorted { $0.at < $1.at }
+        for entry in sorted.prefix(store.count - capacity) {
+            store.removeValue(forKey: entry.key)
+        }
+    }
+
+    /// Same-directory POSIX replacement: the old journal remains present until
+    /// `rename(2)` atomically installs the fully written, mode-0600 new file.
+    nonisolated private static func writeAtomically(_ data: Data, to fileURL: URL) throws {
+        let directory = fileURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        var template = Array((fileURL.path + ".tmp.XXXXXX").utf8CString)
+        let descriptor = template.withUnsafeMutableBufferPointer { buffer in
+            mkstemp(buffer.baseAddress!)
+        }
+        guard descriptor >= 0 else { throw JournalWriteError.operationFailed }
+
+        let temporaryPath = template.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        var descriptorOpen = true
+        var renamed = false
+        defer {
+            if descriptorOpen { _ = close(descriptor) }
+            if !renamed { temporaryPath.withCString { _ = unlink($0) } }
+        }
+
+        guard fchmod(descriptor, mode_t(0o600)) == 0 else {
+            throw JournalWriteError.operationFailed
+        }
+        let writeResult = data.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return raw.isEmpty }
+            var offset = 0
+            while offset < raw.count {
+                let written = write(descriptor, base.advanced(by: offset), raw.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    return false
+                }
+                if written == 0 { return false }
+                offset += written
+            }
+            return true
+        }
+        guard writeResult, fsync(descriptor) == 0 else {
+            throw JournalWriteError.operationFailed
+        }
+        guard close(descriptor) == 0 else {
+            descriptorOpen = false
+            throw JournalWriteError.operationFailed
+        }
+        descriptorOpen = false
+
+        let renameResult = temporaryPath.withCString { source in
+            fileURL.path.withCString { destination in rename(source, destination) }
+        }
+        guard renameResult == 0 else { throw JournalWriteError.operationFailed }
+        renamed = true
+
+        let directoryDescriptor = directory.path.withCString { open($0, O_RDONLY) }
+        guard directoryDescriptor >= 0 else { throw JournalWriteError.operationFailed }
+        defer { _ = close(directoryDescriptor) }
+        guard fsync(directoryDescriptor) == 0 else {
+            throw JournalWriteError.operationFailed
         }
     }
 }

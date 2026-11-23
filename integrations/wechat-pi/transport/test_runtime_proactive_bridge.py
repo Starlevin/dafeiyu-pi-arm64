@@ -10,6 +10,7 @@ import tempfile
 from contextlib import redirect_stdout
 from types import ModuleType, SimpleNamespace
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 
 
@@ -218,10 +219,11 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertNotIn("group_auto_reply_public_question_settled", normal_payload)
         limiter.take.assert_called_once()
 
-    def deliver(self, auto_ctx, send):
+    def deliver(self, auto_ctx, send, **evidence):
         responses = Queue()
         responses.put((GROUP, True, {
             "ok": True, "action": "reply", "reply": "夹具回复", "_auto_ctx": auto_ctx,
+            **evidence,
         }, "fixture-trace"))
         get_app = Mock(return_value=object())
         with patch.multiple(bridge, get_app=get_app, blocking_state=Mock(return_value=None),
@@ -274,6 +276,40 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         app = self.deliver({"target": GROUP}, send)
         app.assert_not_called()
         send.assert_not_called()
+
+    def test_receipt_comes_only_from_the_successful_swift_route(self):
+        receipt = str(uuid.uuid4())
+        reply = {"ok": True, "action": "reply", "memoryReceipt": receipt,
+                 "_swift_memory_receipt": "untrusted"}
+        payload = {"text": "合成入站"}
+        target = ("http://127.0.0.1:41143", {"x-unified-token": "fixture"})
+        with patch.object(bridge, "core_target", return_value=target), \
+             patch.object(bridge, "_ask_core_once", return_value=dict(reply)):
+            self.assertEqual(bridge.ask_core_routed(payload, "")["_swift_memory_receipt"], receipt)
+        with patch.object(bridge, "core_target", return_value=target), \
+             patch.object(bridge, "_ask_core_once", side_effect=[
+                 {"ok": False, "error": "core_connection_refused"}, dict(reply)
+             ]):
+            self.assertNotIn("_swift_memory_receipt", bridge.ask_core_routed(payload, ""))
+        with patch.object(bridge, "core_target", return_value=(bridge.CORE_URL, {})), \
+             patch.object(bridge, "_ask_core_once", return_value=dict(reply)):
+            self.assertNotIn("_swift_memory_receipt", bridge.ask_core_routed(payload, ""))
+
+    def test_only_verified_submission_confirms_memory(self):
+        self.configure(True)
+        receipt = str(uuid.uuid4())
+        for proof in ("visible_outgoing", "unconfirmed:receipt_timeout"):
+            with self.subTest(proof=proof):
+                def send(_target, _reply, reserve, **_):
+                    reserve()
+                    return proof
+
+                with patch.object(bridge, "confirm_swift_memory") as confirm:
+                    self.deliver(None, send, _swift_memory_receipt=receipt)
+                if proof == "visible_outgoing":
+                    confirm.assert_called_once_with(receipt, "fixture-trace")
+                else:
+                    confirm.assert_not_called()
 
     def test_turning_off_before_draft_reservation_prevents_submission(self):
         self.configure(True)

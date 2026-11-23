@@ -32,6 +32,12 @@
 
 群白名单还必须在 core 的 `group.proactiveJudge.groups` 中显式配置；只设置环境变量不会授权 core。测试时使用专用测试账号、合成聊天资料和可撤销的最小权限配置。
 
+## Swift 群聊上下文
+
+对于已路由至 Swift 的微信文本群聊，在 Swift 服务的私有配置中设置 `DAFEIYU_WECHAT_SWIFT_MEMORY=1`，并设置持久化 `DAFEIYU_DATA_DIR`、`DAFEIYU_UNIFIED_ALLOWED_ACCOUNTS` 和 `DAFEIYU_UNIFIED_ALLOWED_CHATS`。同时更新 Swift 可执行文件与微信桥接。
+
+桥接核验发出的消息气泡后才确认该轮上下文。重启后，Swift 按原账号和群召回最近的已确认轮次。记忆保存在权限为 `0600` 的本机 `unified-pilot-journal.json`，备份时按私有聊天数据处理。关闭环境开关并重启 Swift 服务即可停止使用这项记忆。
+
 ## 桌面交互与当前验收
 
 桥接代码使用 AT-SPI 读取 Linux 微信界面，并通过输入适配层完成必要的界面操作。发布这份源代码时没有启动桌面自动化、没有点击或键入、没有发送微信消息，也没有部署到 Pi。当前公开快照的 Pi 编译、真实图片识别、管理员命令和实际微信回复均未验收；进度和已知限制见[开发记录](../../docs/DEVELOPMENT_STATUS_2026-11-15.md)。

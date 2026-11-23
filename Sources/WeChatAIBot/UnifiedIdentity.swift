@@ -116,6 +116,8 @@ public struct UnifiedReply: Codable, Sendable, Equatable {
     public var trace: String?
     /// 仅摘要，不含原文。
     public var scope: String?
+    /// A bearer-authenticated bridge may confirm this turn after observing the outgoing bubble.
+    var memoryReceipt: UUID? = nil
 
     public static func ignore(_ reason: String, scope: String, trace: String) -> UnifiedReply {
         UnifiedReply(ok: true, action: "ignore", reason: reason, trace: trace, scope: scope)

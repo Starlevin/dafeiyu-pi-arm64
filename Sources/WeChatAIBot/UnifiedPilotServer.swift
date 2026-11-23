@@ -299,6 +299,17 @@ public final class UnifiedPilotServer {
             return
         }
 
+        if method == "POST", path == "/api/memory/confirmed" {
+            struct Confirmation: Decodable { let receipt: UUID }
+            guard let evidence = try? JSONDecoder().decode(Confirmation.self, from: body) else {
+                send(connection, PilotHTTP.response(400, PilotAck(ok: false, error: "bad_receipt"))); return
+            }
+            let stored = await core.confirmWeChatMemory(evidence.receipt)
+            send(connection, PilotHTTP.response(stored ? 200 : 404,
+                                                PilotAck(ok: stored, error: stored ? nil : "unknown_receipt")))
+            return
+        }
+
         // 试点撤回：递增代次，在途长请求结果作废；不触碰 QQ 引擎。
         if method == "POST", path == "/api/retire" {
             let generation = await core.retireGeneration()

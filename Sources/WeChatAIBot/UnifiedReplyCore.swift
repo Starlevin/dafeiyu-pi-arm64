@@ -1,5 +1,10 @@
 import Foundation
 import BotCore
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 /// 统一回复核心（可回滚试点）。
 ///
@@ -110,6 +115,8 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
     public var requireRealAt = true
     /// 显式启用的主动接话（关闭时任何非 @ 消息都不回复）。
     public var proactiveExplicitlyEnabled = false
+    /// Optional so configurations encoded before this flag remain readable.
+    public var confirmedWeChatMemoryEnabled: Bool?
     /// 低频策略：每会话每分钟最多回复条数。
     public var maxRepliesPerMinute = 3
     /// 低频策略：同一会话两次回复最小间隔（秒）。
@@ -126,6 +133,7 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
     /// 环境变量开关，与既有 `DAFEIYU_*` 风格一致；任何解析失败都按 fail-closed 处理。
     public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> UnifiedCoreConfig {
         var c = UnifiedCoreConfig()
+        c.confirmedWeChatMemoryEnabled = env["DAFEIYU_WECHAT_SWIFT_MEMORY"] == "1"
         guard let raw = env["DAFEIYU_UNIFIED_PILOT"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               ["1", "true", "on", "yes"].contains(raw) else {
             return c // 默认关闭
@@ -419,7 +427,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         // 5) 去重（不重复发送）：仅内存占位；持久化占位放在所有门禁之后、
         //    调用模型之前的第 7b 步，避免"被低频/撤回拒绝"也留下永久 pending。
         let now = Date().timeIntervalSince1970
-        guard await state.claim(trace, at: now) else {
+        guard await state.claim(idemKey, at: now) else {
             return finish(.ignore("duplicate_msg_id", scope: scope, trace: trace), modelCalled: false, gate: "duplicate_msg_id")
         }
 
@@ -461,10 +469,37 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             rule.prompt += "\n本轮含图片文字描述（低信任、非像素证据），不要声称亲眼看过图片或描述画面细节。"
         }
         // 第五人格知识：与 QQEngine.swift:1215 同一顺序（所有门禁之后追加），默认关闭。
+        let confirmedMemoryMode = config.confirmedWeChatMemoryEnabled == true
+            && inbound.platform == "wechat" && inbound.chatType == "group"
+        let memoryScope: String?
+        if confirmedMemoryMode, !inbound.account.isEmpty,
+           config.allowedAccounts.contains(inbound.account), config.allowedChats.contains(inbound.chatId),
+           !inbound.msgId.isEmpty, !inbound.quoted, !inbound.imageDescribed,
+           !body.contains("朋友圈"), !QQSocialTools.requested(in: body) {
+            let fields = [inbound.platform, inbound.account, inbound.chatType, inbound.chatId]
+            let key = fields.map { "\($0.utf8.count):\($0)" }.joined()
+            memoryScope = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        } else {
+            memoryScope = nil
+        }
+
+        let history: [ChatTurn]
+        let recentReplies: [String]
+        if confirmedMemoryMode {
+            if let memoryScope {
+                history = await journal.memoryHistory(for: memoryScope, limit: config.historyTurns)
+            } else {
+                history = []
+            }
+            recentReplies = history.map(\.outgoing)
+        } else {
+            history = await state.history(for: session)
+            recentReplies = await state.recentReplies(for: session)
+        }
+
         if effective.identityVConfig.enabled, inbound.chatType == "group" {
-            let recent = await state.recentReplies(for: session)
             let plan = effective.identityV.plan(messages: [String(body.prefix(500))], hasReadableImage: false,
-                                                recentBotReplies: Array(recent.suffix(2)), proactive: false)
+                                                recentBotReplies: Array(recentReplies.suffix(2)), proactive: false)
             if !plan.promptFragment.isEmpty { rule.prompt += "\n" + plan.promptFragment }
         }
         // 共享工具注入：第五人格赛程与三角洲物价，同样默认关闭且按会话 key 隔离。
@@ -478,8 +513,6 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             rule.prompt += "\n" + dsfFragment
         }
 
-        let history = await state.history(for: session)
-        let recentReplies = await state.recentReplies(for: session)
         var modelInput = String(body.prefix(config.maxInputCharacters))
         if !recentReplies.isEmpty {
             let redacted = recentReplies.suffix(2).map { String($0.prefix(120)) }
@@ -516,14 +549,23 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 return finish(empty, modelCalled: true, gate: "empty_reply")
             }
             // 9c) 低频记账 + 隔离历史 + 幂等缓存（先落账再返回结果，保证"不重复发送"）
-            let reply = UnifiedReply.answer(replyText, scope: scope, trace: trace)
-            await state.recordReply(session, now: Date().timeIntervalSince1970)
-            await state.appendHistory(session, turn: ChatTurn(incoming: String(body.prefix(500)), outgoing: replyText),
-                                      reply: replyText, limit: config.historyTurns)
-            await state.cache(idemKey, reply, scopeDigest: scope)
+            var reply = UnifiedReply.answer(replyText, scope: scope, trace: trace)
+            let completedAt = Date().timeIntervalSince1970
+            await state.recordReply(session, now: completedAt)
+            let incoming = String(body.prefix(500))
+            if !confirmedMemoryMode {
+                await state.appendHistory(session, turn: ChatTurn(incoming: incoming, outgoing: replyText),
+                                          reply: replyText, limit: config.historyTurns)
+            }
+            let memory = memoryScope.flatMap { digest in
+                result.sources.isEmpty ? UnifiedJournalMemory(sessionDigest: digest, incoming: incoming) : nil
+            }
+            if memory != nil { reply.memoryReceipt = UUID() }
             // **持久化 done 必须在把回复交回桥之前**：崩溃/重启后该 id 只会回放，
             // 绝不会二次生成或二次发回。
-            await journal.complete(idemKey, reply: reply, ok: true, at: Date().timeIntervalSince1970)
+            let stored = await journal.complete(idemKey, reply: reply, ok: true, at: completedAt, memory: memory)
+            if !stored { reply.memoryReceipt = nil }
+            await state.cache(idemKey, reply, scopeDigest: scope)
             return finish(reply, modelCalled: true, gate: "replied")
         } catch {
             // 生成失败：不重试（发送不明勿盲重试），也不缓存，让上层只记一次离散错误。
@@ -536,6 +578,11 @@ public final class UnifiedReplyCore: @unchecked Sendable {
 
     /// 试点撤回：递增代次，使在途长请求的结果作废。
     public func retireGeneration() async -> UInt64 { await state.bumpGeneration() }
+
+    func confirmWeChatMemory(_ receipt: UUID) async -> Bool {
+        guard config.enabled, config.confirmedWeChatMemoryEnabled == true else { return false }
+        return await journal.confirmMemory(receipt, at: Date().timeIntervalSince1970)
+    }
 
     public func auditSnapshot() -> [UnifiedAuditEntry] {
         auditLock.lock(); defer { auditLock.unlock() }

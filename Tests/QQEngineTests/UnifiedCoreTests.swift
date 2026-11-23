@@ -11,13 +11,21 @@ private struct FixtureReplyGenerator: ReplyGenerating {
     let replyJSON: String
     let fail: Bool
     var calls: CallCounter
+    var recorder: RequestRecorder? = nil
 
     func generate(_ request: UnifiedGenerationRequest) async throws -> UnifiedGenerationResult {
         await calls.increment()
         if fail { throw AppFailure.message("synthetic model failure") }
         // 夹具可以断言「实际复用的人格/知识 prompt 被注入」，而不是只看返回值。
-        _ = request
+        await recorder?.record(request)
         return UnifiedGenerationResult(text: replyJSON, tokens: 7)
+    }
+}
+
+private actor RequestRecorder {
+    private(set) var incomingHistory: [[String]] = []
+    func record(_ request: UnifiedGenerationRequest) {
+        incomingHistory.append(request.history.map(\.incoming))
     }
 }
 
@@ -226,6 +234,68 @@ private func inbound(_ text: String = "合成消息",
         #expect(!text.contains("合成消息"))
         #expect(!text.contains("synthetic-fixture-key"))
         #expect(text.contains("restart-1"))
+    }
+
+    @Test func confirmedWeChatHistorySurvivesRestartInItsOwnConversation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], allowPrivate: true,
+                                maxPerMinute: 20)
+        config.allowedAccounts = ["fixture-account", "other-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let firstCore = UnifiedReplyCore(config: config, generator: generator,
+                                         journal: UnifiedIdempotencyJournal(fileURL: file))
+        let first = await firstCore.handle(inbound("合成待确认茶单", msgId: "tea"))
+        let receipt = try #require(first.reply.memoryReceipt)
+        let unconfirmed = await firstCore.handle(inbound("未送达的合成文本", msgId: "pending"))
+        let unusedReceipt = try #require(unconfirmed.reply.memoryReceipt)
+        #expect(await recorder.incomingHistory == [[], []])
+        #expect(!(try String(contentsOf: file, encoding: .utf8)).contains("合成待确认茶单"))
+        #expect(!(await firstCore.confirmWeChatMemory(UUID())))
+        #expect(await firstCore.confirmWeChatMemory(receipt))
+        #expect(await firstCore.confirmWeChatMemory(receipt))
+        let warm = await firstCore.handle(inbound("暖态追问", msgId: "warm"))
+        #expect(warm.reply.action == "reply")
+        #expect(await recorder.incomingHistory.last == ["合成待确认茶单"])
+        let persisted = try String(contentsOf: file, encoding: .utf8)
+        #expect(persisted.contains("合成待确认茶单"))
+        #expect(!persisted.contains("未送达的合成文本"))
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
+
+        let cold = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        #expect(!(await cold.confirmWeChatMemory(unusedReceipt)))
+        #expect(await cold.confirmWeChatMemory(receipt))
+        let followups = [
+            inbound("原群追问", msgId: "follow-up"),
+            inbound("另一个群", chatId: "other-group", msgId: "follow-up"),
+            inbound("另一个账号", msgId: "follow-up", account: "other-account"),
+            inbound("同名私聊", chatType: "private", msgId: "follow-up"),
+            inbound("QQ 会话", msgId: "follow-up", platform: "qq")
+        ]
+        for message in followups {
+            let outcome = await cold.handle(message)
+            #expect(outcome.reply.action == "reply")
+        }
+        let recalled = await recorder.incomingHistory
+        #expect(Array(recalled.suffix(5)) == [["合成待确认茶单"], [], [], [], []])
+
+        var quote = inbound("合成引用内容", msgId: "quoted")
+        quote.quoted = true
+        var image = inbound("合成图像资料", msgId: "image")
+        image.imageDescribed = true
+        for external in [quote, image, inbound("看看朋友圈", msgId: "moments"),
+                         inbound("看看 bilibili 热门", msgId: "social")] {
+            let outcome = await cold.handle(external)
+            #expect(outcome.reply.memoryReceipt == nil, "fixture source: \(external.msgId)")
+        }
+        #expect(Array((await recorder.incomingHistory).suffix(4)) == [[], [], [], []])
     }
 
     @Test func pendingEntryAfterRestartIsNotRegenerated() async throws {

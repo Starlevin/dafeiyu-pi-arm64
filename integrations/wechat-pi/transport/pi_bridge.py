@@ -1376,8 +1376,29 @@ def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhoo
     # receive the message. Never re-submit a request with an unknown outcome.
     if (extra and response.get("error") == "core_connection_refused"
             and not settled_public_question):
-        return _ask_core_once(CORE_URL, path, payload, token, timeout)
+        response = _ask_core_once(CORE_URL, path, payload, token, timeout)
+        extra = {}
+    receipt = response.pop("memoryReceipt", None)
+    response.pop("_swift_memory_receipt", None)
+    if (path == "/webhook/wechat" and "x-unified-token" in extra
+            and response.get("ok") and response.get("action") == "reply"
+            and isinstance(receipt, str) and len(receipt) == 36):
+        try:
+            response["_swift_memory_receipt"] = str(uuid.UUID(receipt))
+        except ValueError:
+            pass
     return response
+
+
+def confirm_swift_memory(receipt, trace):
+    endpoint = group_routes.swift_pilot_url() if group_routes is not None else None
+    if endpoint is None:
+        log("swift_memory", trace=trace, status="unavailable")
+        return
+    url, token = endpoint
+    result = _ask_core_once(url, "/api/memory/confirmed", {"receipt": receipt}, "", 0.5,
+                            {"x-unified-token": token})
+    log("swift_memory", trace=trace, status="stored" if result.get("ok") else "unavailable")
 
 
 # --------------------------------------------------- opt-in state-based UI wait --
@@ -2495,6 +2516,8 @@ def deliver_ready(replies, args, health=None):
             health.finish_submit(trace, confirmed)
         record(health, "confirmation" if submitted else "submit", status, trace,
                success=confirmed, failed=not confirmed, unknown=submitted and not confirmed)
+        if confirmed and submitted and media is None and response.get("_swift_memory_receipt"):
+            confirm_swift_memory(response["_swift_memory_receipt"], trace)
         if confirmed and media is None and isinstance(response.get("sticker"), dict):
             dispatch_sticker(
                 target, response["sticker"], args, health, trace, proactive=auto_ctx is not None)
