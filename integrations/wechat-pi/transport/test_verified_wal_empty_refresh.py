@@ -1,5 +1,6 @@
 """Fake-clock contract for the verified-open empty WAL refresh."""
 import unittest
+from unittest.mock import patch
 
 from test_runtime_proactive_bridge import bridge
 from wal_sweep_queue import VerifiedWalRescanQueue
@@ -117,6 +118,29 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
         self.assertEqual(self.queue.pending["授权群"]["due_at"], deadline)
         self.assertTrue(self.queue.cancel_empty_refresh("授权群"))
         self.assertEqual(self.queue.pending_count(), 0)
+
+    def test_scheduled_empty_refresh_holds_only_the_open_scope_until_completion(self):
+        self.assertTrue(self.schedule())
+        app = object()
+        with patch.object(bridge, "group_is_open", return_value=True) as opened:
+            self.assertEqual(bridge.keep_short_wal_refresh(
+                self.queue, "授权群", app, ["授权群", "其他轮询"]), "授权群")
+            opened.assert_called_once_with(app, "授权群")
+            self.now = 100.65
+            self.assertTrue(self.queue.due("授权群"))
+            self.queue.completed("授权群")
+            self.assertIsNone(bridge.keep_short_wal_refresh(self.queue, "授权群", app, ["授权群"]))
+            opened.assert_called_once()
+
+    def test_switch_or_higher_priority_settle_releases_navigation_hold(self):
+        for open_group, targets in ((False, ["授权群"]), (True, ["其他轮询"])):
+            with self.subTest(open_group=open_group):
+                self.queue.hint("授权群", now=self.now, source_at=99.9)
+                self.assertTrue(self.schedule())
+                with patch.object(bridge, "group_is_open", return_value=open_group):
+                    self.assertIsNone(bridge.keep_short_wal_refresh(
+                        self.queue, "授权群", object(), targets))
+                self.assertFalse(self.queue.empty_refresh_pending("授权群"))
 
 
 if __name__ == "__main__":

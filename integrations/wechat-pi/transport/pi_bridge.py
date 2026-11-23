@@ -551,6 +551,16 @@ def cancel_filtered_empty_refreshes(queue, due_targets, allowed_targets):
     return cancelled
 
 
+def keep_short_wal_refresh(queue, target, app, targets):
+    """Do not navigate away while one verified empty-view refresh is pending."""
+    if target is None or not queue.empty_refresh_pending(target):
+        return None
+    if target in targets and app is not None and group_is_open(app, target):
+        return target
+    queue.cancel_empty_refresh(target)
+    return None
+
+
 def should_scan_chat(name, signature, last_signature, has_snapshot,
                      last_scan, now, full_scan_interval=60.0,
                      *, urgent_verified=False):
@@ -2733,6 +2743,7 @@ def main():
                     _moments_code = "unknown"
                 print("moments_self_check_failed code=%s" % _moments_code, flush=True)
     next_private_polls = {}
+    short_refresh_target = None
     known_privates = set(_private_accounts(args).keys())
     next_heartbeat = 0.0
     next_window_check = 0.0
@@ -2763,11 +2774,13 @@ def main():
                 next_private_polls.pop(old_priv, None)
         known_privates = set(privates.keys())
         targets = list(args.group)
+        scheduled_privates = set()
         watched = set(args.group)
         if args.admin_chat:
             watched.add(args.admin_chat)
         watched.update(privates.keys())
-        if moments is not None and jobs.empty() and replies.empty() and time.monotonic() >= moments_next:
+        if (moments is not None and short_refresh_target is None and jobs.empty()
+                and replies.empty() and time.monotonic() >= moments_next):
             moments_next = time.monotonic() + 3
             try:
                 status = moments.poll(sys.modules[__name__], token, "pi-wechat")
@@ -2825,16 +2838,21 @@ def main():
                         or urgent_target == priv_target
                         or (sweep is not None and sweep.due(priv_target, now=now))):
                     targets.append(priv_target)
-                    next_private_polls[priv_target] = now + 20
+                    scheduled_privates.add(priv_target)
         else:
             # Preserve the current group while the one in-memory candidate settles.
             targets = settle_poll_targets(targets, settling_targets)
+        if short_refresh_target is not None:
+            short_refresh_target = keep_short_wal_refresh(
+                verified_rechecks, short_refresh_target, app_now, targets)
+            if short_refresh_target is not None:
+                targets = [short_refresh_target]
         verified_recheck_targets = set()
         if verified_rechecks is not None:
             for target in args.group:
                 if not verified_rechecks.due(target, now=now):
                     continue
-                if app_now is not None and group_is_open(app_now, target):
+                if target == short_refresh_target or (app_now is not None and group_is_open(app_now, target)):
                     verified_recheck_targets.add(target)
                 else:
                     # A one-shot short refresh is valid only while the same
@@ -2854,6 +2872,8 @@ def main():
             else 4,
             0 if t in args.auto_reply_group else 1))
         for target in targets:
+            if target in scheduled_privates:
+                next_private_polls[target] = now + 20
             pending_settle = (public_question_settler.pending(target)
                               if public_question_settler is not None else None)
             settle_due = (pending_settle is not None
@@ -2938,6 +2958,8 @@ def main():
                             if verified_rechecks is not None:
                                 verified_rechecks.cancel_empty_refresh(target)
                             continue
+                        if target == short_refresh_target:
+                            log("wal_verified_empty_refresh_scan")
                     else:
                         verified_scope_open = group_is_open(app, target)
                         if not verified_scope_open and not open_chat(app, target):
@@ -3035,6 +3057,7 @@ def main():
                             appended=bool(appended), viewport_gap=gap_detected[0],
                             settled=pending_settle is not None, source_at=wal_source_at)
                     if short_refresh:
+                        short_refresh_target = target
                         log("wal_verified_empty_refresh_queued",
                             delay_ms=int(VERIFIED_WAL_EMPTY_REFRESH_SECONDS * 1000))
                     else:
@@ -3062,6 +3085,8 @@ def main():
                     log("poll_slow", target="private" if _is_private_target(args, target) else target,
                         elapsed_ms=int(elapsed * 1000))
             if public_question_settler is not None and public_question_settler.has_pending:
+                break
+            if target == short_refresh_target and verified_rechecks.empty_refresh_pending(target):
                 break
         try:
             deliver_ready(replies, args, health)
