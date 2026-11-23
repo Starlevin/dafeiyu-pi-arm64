@@ -14,7 +14,7 @@ evidence/LIVE_FACTS.md 与 LATENCY.md，Pi 真机 134/134 采样，2026-11-14）
   仅 1 次 title+sel 同为 TARGET 且 ghost=1。因此**不把 ghost 单独当阻断条件**，
   改为要求「header 内恰有 1 个 showing 的目标名 label」——这直接覆盖
   ghost 状态位抖动/遍历顺序变化导致的「两个 showing 标题」风险，且不会因一个
-  惰性 DOM 残留节点长期压制正常群回复。ghost 计数仍随观测上报，供稳定性判定。
+  惰性 DOM 残留节点长期压制正常群回复。稳定性比较使用每次采集的可见身份信号。
 * 群 / 同名私聊在 AT-SPI 上**没有原生标识**：行名首行不带成员数后缀、行无子节点、
   ``parse_row_name().is_group`` 恒 False；`pi_bridge` 的 ``is_group`` 全部来自
   ``--group`` 配置断言。header 标题的 ``(N)`` 成员数后缀只是一个**启发式提示**
@@ -52,7 +52,7 @@ REQUIRE_GROUP_HINT = os.environ.get("DAFEIYU_WECHAT_TX_GROUP_HINT") == "1"
 # 一次完整观测必须给出的键；缺任意一个即 proof_incomplete（fail-closed）。
 _REQUIRED_PROOF = (
     "ok", "app_ok", "title", "raw_title", "group_suffix",
-    "showing_target", "ghost_labels",
+    "showing_target",
     "selected", "visible_matches", "selected_matches",
     "draft", "char_count", "composer_fp", "composer_editor_ok", "scope",
 )
@@ -120,7 +120,6 @@ def _signature(sig):
         sig.get("visible_matches"),
         sig.get("selected_matches"),
         sig.get("showing_target"),
-        sig.get("ghost_labels"),
         sig.get("scope"),
     )
 

@@ -1,79 +1,62 @@
-"""Test the title and ambiguity proof without a running AT-SPI session."""
-import ast
-from pathlib import Path
+"""Exercise the real header walk without a running AT-SPI session."""
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
+from test_blocking_state_scan import FakeNode, SHOWING, bridge
 import tx_guard
 
 
-def observe(labels, target="测试群"):
-    path = Path(__file__).with_name("pi_bridge.py")
-    source = ast.parse(path.read_text(encoding="utf-8"))
-    fn = next(node for node in source.body
-              if isinstance(node, ast.FunctionDef) and node.name == "_tx_header_info")
-    showing_reads = []
-
-    def showing(node):
-        showing_reads.append(node[0])
-        if isinstance(node[2], Exception):
-            raise node[2]
-        return node[2]
-
-    class Pane:
-        def get_child_count(self):
-            return 1
-
-        def get_child_at_index(self, _):
-            return "header"
-
-    namespace = {
-        "messages_list": lambda _: "messages",
-        "ext": lambda node: (200, 0, 400, 36) if node == "header" else (200, 36, 400, 400),
-        "ancestor": lambda *_: Pane(),
-        "walk": lambda _: ((node, node[3]) for node in labels),
-        "role": lambda node: node[1],
-        "nm": lambda node: node[0],
-        "showing": showing,
-        "tx_guard": tx_guard,
-    }
-    exec(compile(ast.Module(body=[fn], type_ignores=[]), str(path), "exec"), namespace)
-    return namespace["_tx_header_info"]("app", target), showing_reads
+def observe(*children, target="测试群"):
+    header = FakeNode("filler", children=children, rect=(200, 0, 400, 36))
+    pane = FakeNode("filler", children=[header])
+    messages = FakeNode("list", rect=(200, 36, 400, 400))
+    atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING),
+                            CoordType=SimpleNamespace(SCREEN="screen"))
+    with patch.object(bridge, "Atspi", atspi), \
+         patch.object(bridge, "messages_list", return_value=messages), \
+         patch.object(bridge, "ancestor", return_value=pane):
+        return bridge._tx_header_info(object(), target)
 
 
 class HeaderProofTests(unittest.TestCase):
-    def test_only_target_labels_need_state_after_title(self):
-        proof, reads = observe([
-            ("搜索", "label", False, 1),
-            ("测试群(5)", "label", True, 1),
-            ("测试群", "label", True, 2),
-            ("(5)", "label", False, 2),
-            ("消息设置", "label", False, 1),
-            ("菜单", "button", True, 1),
-        ])
-        self.assertEqual(proof, {"raw_title": "测试群(5)", "showing_target": 1,
-                                 "ghost_labels": 0})
-        self.assertEqual(reads, ["搜索", "测试群(5)", "测试群"])
+    def test_hidden_pages_are_pruned_and_nested_title_counts_once(self):
+        hidden_title = FakeNode("label", "测试群")
+        hidden = FakeNode("filler", children=[hidden_title], showing=False)
+        nested = FakeNode("label", "测试群(5)", children=[FakeNode("label", "测试群")])
+        proof = observe(hidden, FakeNode("label", "  "), nested, FakeNode("label", "消息设置"))
+        self.assertEqual(proof, {"raw_title": "测试群(5)", "showing_target": 1})
+        self.assertEqual(hidden.child_count_calls, 0)
+        self.assertEqual(hidden_title.name_calls, 0)
 
-    def test_keeps_first_visible_title_and_independent_target_counts(self):
-        proof, reads = observe([
-            ("  ", "label", True, 1),
-            ("另一个会话", "label", True, 1),
-            ("测试群", "label", False, 1),
-            ("测试群（5）", "label", False, 2),
-            ("测试群(4)", "label", True, 1),
-            ("设置", "label", True, 1),
-            ("测试群(6)", "label", True, 1),
-        ])
-        self.assertEqual(proof, {"raw_title": "另一个会话", "showing_target": 2,
-                                 "ghost_labels": 1})
-        self.assertNotIn("设置", reads)
+    def test_independent_visible_titles_still_trigger_ambiguity_guard(self):
+        proof = observe(
+            FakeNode("label", "测试群(5)"),
+            FakeNode("filler", children=[FakeNode("label", "测试群（6）")]),
+        )
+        self.assertEqual(proof, {"raw_title": "测试群(5)", "showing_target": 2})
+        signature = dict.fromkeys(tx_guard._REQUIRED_PROOF)
+        signature.update(ok=True, app_ok=True, title=proof["raw_title"], **proof)
+        self.assertEqual(tx_guard.identity_verdict(signature, "测试群", "before_return").reason,
+                         "header_title_ambiguous")
 
-    def test_unreadable_matching_state_is_not_treated_as_safe(self):
-        with self.assertRaisesRegex(RuntimeError, "AT-SPI state"):
-            observe([
-                ("测试群", "label", True, 1),
-                ("测试群(5)", "label", RuntimeError("AT-SPI state"), 1),
-            ])
+    def test_peers_are_reread_when_visibility_changes(self):
+        first = FakeNode("filler", children=[FakeNode("label", "测试群(5)")])
+        second = FakeNode("filler", children=[FakeNode("label", "另一个群(5)")], showing=False)
+        self.assertEqual(observe(first, second)["showing_target"], 1)
+        first.state.showing = False
+        second.state.showing = True
+        self.assertEqual(observe(first, second), {"raw_title": "另一个群(5)", "showing_target": 0})
+
+    def test_unreadable_visible_branch_never_passes_as_a_unique_title(self):
+        unreadable = FakeNode("filler")
+        for operation in ("get_state_set", "get_child_count", "get_role_name"):
+            with self.subTest(operation=operation), \
+                 patch.object(unreadable, operation, side_effect=RuntimeError("fixture read failure")):
+                with self.assertRaisesRegex(RuntimeError, "fixture read failure"):
+                    observe(FakeNode("label", "测试群"), unreadable)
+        with self.assertRaisesRegex(RuntimeError, "visible_tree_child_missing"):
+            observe(FakeNode("label", "测试群"), FakeNode("filler", children=[None]))
 
 
 if __name__ == "__main__":

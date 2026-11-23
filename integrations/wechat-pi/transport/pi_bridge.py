@@ -371,11 +371,13 @@ def walk(node, dep=0, maxd=26):
                 yield from walk(c, dep + 1, maxd)
 
 
-def _walk_showing(node, dep=0, maxd=26, skip_lists=False, include_role=False):
+def _walk_showing(node, dep=0, maxd=26, skip_lists=False, include_role=False, *, strict=False):
     """Prune hidden Qt subtrees; optionally return a role read used for pruning."""
     if dep > maxd or not showing(node):
         return
-    node_role = role(node) if (skip_lists or include_role) else None
+    node_role = None
+    if skip_lists or include_role:
+        node_role = node.get_role_name() if strict else role(node)
     if skip_lists and node_role == "list" and nm(node) in ("Messages", "Chats"):
         yield (node, dep, node_role) if include_role else (node, dep)
         return
@@ -383,15 +385,23 @@ def _walk_showing(node, dep=0, maxd=26, skip_lists=False, include_role=False):
     try:
         ch = node.get_child_count()
     except Exception:
+        if strict:
+            raise
         return
+    if strict and (ch < 0 or ch >= 600 or (dep == maxd and ch > 0)):
+        raise RuntimeError("visible_tree_incomplete")
     if 0 < ch < 600:
         for i in range(ch):
             try:
                 c = node.get_child_at_index(i)
             except Exception:
+                if strict:
+                    raise
                 continue
             if c is not None:
-                yield from _walk_showing(c, dep + 1, maxd, skip_lists, include_role)
+                yield from _walk_showing(c, dep + 1, maxd, skip_lists, include_role, strict=strict)
+            elif strict:
+                raise RuntimeError("visible_tree_child_missing")
 
 
 def messages_list(a):
@@ -1015,7 +1025,7 @@ def _tx_composer_fp(node):
 
 
 def _tx_header_info(app, target):
-    """单次遍历 header 子树，同时提取 raw_title、showing_target 与 ghost_labels。"""
+    """Read the current title and independently count showing target labels."""
     ml = messages_list(app)
     if ml is None:
         return None
@@ -1031,42 +1041,23 @@ def _tx_header_info(app, target):
         return None
     raw_title = ""
     showing_target = 0
-    ghost_labels = 0
-    # Qt 群标题会把 '别野(5)' 拆成父 label('别野(5)') 与子 label('别野')/'(5)'，
-    # 只在当前 label 不位于已计数的同类 label 子树内部时才累加，避免单控件双计；
-    # 同一子树外若出现第二个同名 showing label，仍累加至 >=2 并由 tx_guard 拦截。
+    # Qt exposes inactive pages beneath the header. SHOWING applies to the
+    # whole ancestry, so a hidden page cannot supply an on-screen title.
+    # Nested labels for one title count once. Separate visible titles count separately.
     matched_showing_depth = None
-    matched_ghost_depth = None
-    for node, dep in walk(header):
+    for node, dep, node_role in _walk_showing(header, include_role=True, strict=True):
         if matched_showing_depth is not None and dep <= matched_showing_depth:
             matched_showing_depth = None
-        if matched_ghost_depth is not None and dep <= matched_ghost_depth:
-            matched_ghost_depth = None
-        if role(node) != "label":
+        if node_role != "label":
             continue
-        label_name = nm(node)
-        matches_target = tx_guard is not None and tx_guard.norm_target(label_name) == target
-        # Once the first visible title is known, only labels that can affect
-        # target uniqueness or ghost detection need a separate state query.
-        if not matches_target and (raw_title or not label_name):
-            continue
-        is_showing = showing(node)
-        if is_showing and label_name and not raw_title:
-            raw_title = label_name.strip()
-        if matches_target:
-            if is_showing:
-                if matched_showing_depth is None:
-                    showing_target += 1
-                    matched_showing_depth = dep
-            else:
-                if matched_ghost_depth is None:
-                    ghost_labels += 1
-                    matched_ghost_depth = dep
-    return {
-        "raw_title": raw_title,
-        "showing_target": showing_target,
-        "ghost_labels": ghost_labels,
-    }
+        label_name = (node.get_name() or "").strip()
+        if not raw_title and label_name:
+            raw_title = label_name
+        if (matched_showing_depth is None and tx_guard is not None
+                and tx_guard.norm_target(label_name) == target):
+            showing_target += 1
+            matched_showing_depth = dep
+    return {"raw_title": raw_title, "showing_target": showing_target}
 
 
 def _tx_chats_info(app, target):
@@ -1104,7 +1095,7 @@ def _tx_chats_info(app, target):
 
 
 def _tx_observe(target):
-    """把真实 AT-SPI 只读状态收成 tx_guard 所需的 15 键 proof dict（无正文/密钥）。"""
+    """从实时 AT-SPI 状态构造 tx_guard 所需的核验数据。"""
     if tx_guard is None:
         return {"ok": False, "reason": "tx_guard_module_missing"}
     app = get_app()
@@ -1138,7 +1129,6 @@ def _tx_observe(target):
             "raw_title": raw_title,
             "group_suffix": group_suffix,
             "showing_target": header["showing_target"],
-            "ghost_labels": header["ghost_labels"],
             "selected": selected,
             "visible_matches": visible_matches,
             "selected_matches": selected_matches,
