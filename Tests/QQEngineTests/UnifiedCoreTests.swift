@@ -24,8 +24,10 @@ private struct FixtureReplyGenerator: ReplyGenerating {
 
 private actor RequestRecorder {
     private(set) var incomingHistory: [[String]] = []
+    private(set) var prompts: [String] = []
     func record(_ request: UnifiedGenerationRequest) {
         incomingHistory.append(request.history.map(\.incoming))
+        prompts.append(request.userText)
     }
 }
 
@@ -296,6 +298,104 @@ private func inbound(_ text: String = "合成消息",
             #expect(outcome.reply.memoryReceipt == nil, "fixture source: \(external.msgId)")
         }
         #expect(Array((await recorder.incomingHistory).suffix(4)) == [[], [], [], []])
+    }
+
+    @Test func groupNotesRecallLatestValueAfterJournalRotationAndBackupRecovery() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        let books = directory.appendingPathComponent("wechat-group-memory")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], allowPrivate: true, maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account", "other-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let core = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file, capacity: 6))
+        let pending = await core.handle(inbound("记住：团建集合=未送达码头", msgId: "unconfirmed"))
+        #expect(pending.reply.memoryReceipt != nil)
+        #expect(!FileManager.default.fileExists(atPath: books.path))
+        #expect(UnifiedGroupMemoryNote.parse("记住：口令=synthetic-secret") == nil)
+
+        for (id, text) in [
+            ("first-note", "记住：团建集合=旧地标"),
+            ("duplicate-note", "记住：团建集合＝旧地标"),
+            ("changed-note", "记住事项：团建集合＝新地标"),
+        ] {
+            let reply = await core.handle(inbound(text, msgId: id))
+            let receipt = try #require(reply.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(receipt))
+            #expect(await core.confirmWeChatMemory(receipt))
+        }
+        for index in 0..<6 {
+            let filler = await core.handle(inbound("往来夹具\(index)", msgId: "filler-\(index)"))
+            let receipt = try #require(filler.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(receipt))
+        }
+        let scopes = try FileManager.default.contentsOfDirectory(at: books, includingPropertiesForKeys: nil)
+        let scope = try #require(scopes.first)
+        #expect(scopes.count == 1)
+        let attributes = try FileManager.default.attributesOfItem(atPath: scope.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        do {
+            let store = try QQMemoryReliableStore(directory: scope, scope: scope.lastPathComponent)
+            #expect(store.items.count == 2)
+            #expect(store.items.filter { $0.current(Date()) }.map(\.text) == ["团建集合：新地标"])
+            #expect(store.items.first { $0.current(Date()) }?.kind == "task")
+            try Data("broken-primary".utf8).write(to: store.stateURL, options: .atomic)
+        }
+        let journalText = try String(contentsOf: file, encoding: .utf8)
+        #expect(!journalText.contains("changed-note"))
+        let cold = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file, capacity: 6))
+        let recall = await cold.handle(inbound("团建集合在哪儿？", msgId: "late-query"))
+        #expect(recall.reply.action == "reply")
+        let prompt = try #require(await recorder.prompts.last)
+        #expect(prompt.contains("本群长期记录") && prompt.contains("新地标"))
+        #expect(!prompt.contains("旧地标") && !prompt.contains("未送达码头"))
+        #expect((await recorder.incomingHistory.last ?? []).allSatisfy { !$0.contains("地标") })
+    }
+
+    @Test func confirmedGroupNoteRepairsArchiveOnNextLookupWhilePreservingIsolation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        let books = directory.appendingPathComponent("wechat-group-memory")
+        try FileManager.default.createDirectory(at: books, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], allowPrivate: true, maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account", "other-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let live = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        let note = await live.handle(inbound("记住：社团约定=应急新地标", msgId: "outbox"))
+        let receipt = try #require(note.reply.memoryReceipt)
+        #expect(!(await live.confirmWeChatMemory(receipt)))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: books.path).isEmpty)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: books.path)
+        let cold = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        let queries = [
+            inbound("社团约定是什么？", msgId: "follow"),
+            inbound("社团约定是什么？", chatId: "other-group", msgId: "follow"),
+            inbound("社团约定是什么？", msgId: "follow", account: "other-account"),
+            inbound("社团约定是什么？", chatType: "private", msgId: "follow"),
+            inbound("社团约定是什么？", msgId: "follow", platform: "qq"),
+        ]
+        for message in queries {
+            let result = await cold.handle(message)
+            #expect(result.reply.action == "reply")
+        }
+        let prompts = Array((await recorder.prompts).suffix(queries.count))
+        #expect(prompts.first?.contains("本群长期记录") == true)
+        #expect(prompts.first?.contains("应急新地标") == true)
+        #expect(prompts.dropFirst().allSatisfy { !$0.contains("应急新地标") })
     }
 
     @Test func pendingEntryAfterRestartIsNotRegenerated() async throws {

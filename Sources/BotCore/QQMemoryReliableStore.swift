@@ -232,6 +232,38 @@ public final class QQMemoryReliableStore {
         journal.batch(knownIDs: Set(state.appliedIDs), limit: limit, maxCharacters: maxCharacters)
     }
 
+    /// An explicitly named group note, with a delivery-proven event as its source.
+    /// The caller binds this store to exactly one conversation.
+    public func recordConfirmedGroupNote(id: String, label: String, value: String, kind: String,
+                                         at now: Date) throws {
+        let key = label.precomposedStringWithCanonicalMapping.lowercased()
+        let text = label + "：" + value
+        guard !label.isEmpty, key.count <= 20, !value.isEmpty, value.count <= 140,
+              !text.contains(where: \.isNewline), !QQMemoryRedactor.containsSensitive(text),
+              ["fact", "preference", "task"].contains(kind) else {
+            throw QQMemoryReliableError.invalid("无效的群记忆条目")
+        }
+        guard !state.appliedIDs.contains(id) else { return }
+        let subject = "CONVERSATION"
+        let prior = state.items.filter {
+            $0.subject == subject && $0.keywords == [key] && $0.current(now)
+        }
+        if prior.contains(where: { $0.updatedAt > now }) { return }
+        let event = QQMemoryEvent(id: id, subject: subject, text: text, at: now)
+        let recorded = try ingest(event, now: now)
+        let entry = recorded.entry ?? journal.entries(knownIDs: Set(state.appliedIDs)).first { $0.id == id }
+        guard let entry else { throw QQMemoryReliableError.invalid("群记忆日志未接受条目") }
+        let candidates = prior.sorted { $0.updatedAt > $1.updatedAt }.prefix(6).map(\.id)
+        let change = QQMemoryDelta.Change(operation: "upsert", replaces: candidates, subject: subject,
+                                          kind: kind, text: text, keywords: [key], importance: 2,
+                                          sourceID: id, evidence: text, days: kind == "task" ? 30 : 365)
+        let unchanged = prior.contains {
+            $0.kind == kind && QQReplyRepetitionPolicy.normalized($0.text) == QQReplyRepetitionPolicy.normalized(text)
+        }
+        try apply(QQMemoryDelta(summary: "", changes: unchanged ? [] : [change]), batch: [entry],
+                  candidateIDs: Set(candidates), now: now)
+    }
+
     @discardableResult
     public func apply(_ delta: QQMemoryDelta, batch: [QQMemoryJournalEntry], candidateIDs: Set<String>, now: Date = Date()) throws -> QQMemoryApplyReport {
         guard !batch.isEmpty else { throw QQMemoryReliableError.invalid("空记忆批次") }

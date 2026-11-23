@@ -20,6 +20,34 @@ struct UnifiedJournalMemory: Codable, Sendable, Equatable {
     let sessionDigest: String
     let incoming: String
     var confirmedAt: Double? = nil
+    var groupNote: UnifiedGroupMemoryNote? = nil
+}
+
+struct UnifiedGroupMemoryNote: Codable, Sendable, Equatable {
+    let label: String
+    let value: String
+    let kind: String
+
+    static func parse(_ text: String) -> Self? {
+        guard text.count <= 180, !text.contains(where: \.isNewline) else { return nil }
+        let fields = text.split(maxSplits: 1, whereSeparator: { $0 == ":" || $0 == "：" })
+        guard fields.count == 2 else { return nil }
+        let kind: String
+        switch fields[0].trimmingCharacters(in: .whitespaces) {
+        case "记住": kind = "fact"
+        case "记住偏好": kind = "preference"
+        case "记住事项": kind = "task"
+        default: return nil
+        }
+        let assignment = fields[1].split(maxSplits: 1, whereSeparator: { $0 == "=" || $0 == "＝" })
+        guard assignment.count == 2 else { return nil }
+        let label = assignment[0].trimmingCharacters(in: .whitespaces)
+        let value = assignment[1].trimmingCharacters(in: .whitespaces)
+        guard (1...20).contains(label.count), (1...140).contains(value.count),
+              !label.lowercased().contains("cookie"),
+              !QQMemoryRedactor.containsSensitive(label + "：" + value) else { return nil }
+        return Self(label: label, value: value, kind: kind)
+    }
 }
 
 private struct JournalFile: Codable {
@@ -44,6 +72,7 @@ public actor UnifiedIdempotencyJournal {
     private let writer: Writer
     private var entries: [String: UnifiedJournalEntry] = [:]
     private var memoryDrafts: [String: UnifiedJournalMemory] = [:]
+    private var archivedNoteReceipts: Set<UUID> = []
     private var storageUsable = true
 
     /// `nil` selects an in-memory journal for fixtures. A file-backed journal
@@ -100,6 +129,9 @@ public actor UnifiedIdempotencyJournal {
         Self.trim(&candidate, capacity: capacity)
         guard persist(candidate) else { return false }
         entries = candidate
+        if archivedNoteReceipts.count > capacity {
+            archivedNoteReceipts.formIntersection(candidate.values.compactMap { $0.reply?.memoryReceipt })
+        }
         // The inbound body stays in process memory unless the UI proves the send.
         memoryDrafts = memoryDrafts.filter { key, _ in
             guard let entry = candidate[key] else { return false }
@@ -114,7 +146,9 @@ public actor UnifiedIdempotencyJournal {
               var entry = entries.values.first(where: {
                   $0.state == "done" && $0.reply?.memoryReceipt == receipt
               }) else { return false }
-        if entry.memory?.confirmedAt != nil { return true }
+        if let memory = entry.memory, memory.confirmedAt != nil {
+            return saveGroupNote(memory, receipt: receipt)
+        }
         guard (0...600).contains(now - entry.at), var draft = memoryDrafts[entry.key] else { return false }
         draft.confirmedAt = now
         entry.memory = draft
@@ -123,7 +157,66 @@ public actor UnifiedIdempotencyJournal {
         guard persist(candidate) else { return false }
         entries = candidate
         memoryDrafts.removeValue(forKey: entry.key)
-        return true
+        return saveGroupNote(draft, receipt: receipt)
+    }
+
+    private func saveGroupNote(_ memory: UnifiedJournalMemory, receipt: UUID) -> Bool {
+        guard let note = memory.groupNote, let confirmedAt = memory.confirmedAt else { return true }
+        if archivedNoteReceipts.contains(receipt) { return true }
+        do {
+            guard let archive = try groupArchive(memory.sessionDigest, create: true) else { return false }
+            try archive.recordConfirmedGroupNote(id: receipt.uuidString, label: note.label,
+                                                  value: note.value, kind: note.kind,
+                                                  at: Date(timeIntervalSince1970: confirmedAt))
+            archivedNoteReceipts.insert(receipt)
+            return true
+        } catch {
+            print("unified_group_memory_write_failed")
+            return false
+        }
+    }
+
+    func groupMemoryContext(for scope: String, query: String) -> String {
+        guard storageUsable else { return "" }
+        // Finish notes whose delivery proof persisted just before a process or storage failure.
+        let waiting = entries.values.compactMap { entry -> (Double, UUID, UnifiedJournalMemory)? in
+            guard entry.state == "done", let memory = entry.memory, memory.sessionDigest == scope,
+                  let at = memory.confirmedAt, memory.groupNote != nil,
+                  let receipt = entry.reply?.memoryReceipt, !archivedNoteReceipts.contains(receipt) else { return nil }
+            return (at, receipt, memory)
+        }.sorted { $0.0 < $1.0 }
+        for (_, receipt, memory) in waiting {
+            if !saveGroupNote(memory, receipt: receipt) { break }
+        }
+        do {
+            let archive = try groupArchive(scope, create: false)
+            return archive?.context(query, subject: "CONVERSATION", characters: 480,
+                                    includeEpisodes: false) ?? ""
+        } catch {
+            print("unified_group_memory_read_failed")
+            return ""
+        }
+    }
+
+    private func groupArchive(_ scope: String, create: Bool) throws -> QQMemoryReliableStore? {
+        guard let fileURL, scope.utf8.count == 64,
+              scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        let root = fileURL.deletingLastPathComponent().appendingPathComponent("wechat-group-memory")
+        let directory = root.appendingPathComponent(scope)
+        let manager = FileManager.default
+        if !create && !manager.fileExists(atPath: directory.path) { return nil }
+        for folder in [root, directory] {
+            if create && !manager.fileExists(atPath: folder.path) {
+                try manager.createDirectory(at: folder, withIntermediateDirectories: false,
+                                            attributes: [.posixPermissions: 0o700])
+            }
+            let attributes = try manager.attributesOfItem(atPath: folder.path)
+            guard attributes[.type] as? FileAttributeType == .typeDirectory,
+                  (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700 else {
+                throw CocoaError(.fileReadNoPermission)
+            }
+        }
+        return try QQMemoryReliableStore(directory: directory, scope: scope)
     }
 
     func memoryHistory(for sessionDigest: String, limit: Int) -> [ChatTurn] {
