@@ -19,6 +19,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import unified_console as uc
+import wechat_account
 
 
 class FakeUpstream(http.server.BaseHTTPRequestHandler):
@@ -282,6 +283,43 @@ class HouseConsoleExtTests(unittest.TestCase):
             self._post(path, change)
         self.assertEqual(conflict.exception.code, 409)
         self.assertEqual(json.load(conflict.exception)["error"], "该群人设已被其他操作更新，请刷新核对")
+
+    def test_wechat_account_uses_auth_same_origin_and_only_serves_redrawn_code(self):
+        url = "/api/account/wechat"
+        token = "https://login.weixin.qq.com/l/synthetic-qr"
+        with patch.object(wechat_account, "_native") as native:
+            with self.assertRaises(urllib.error.HTTPError) as anonymous:
+                self._get(url, authed=False)
+            self.assertEqual(anonymous.exception.code, 401)
+            request = urllib.request.Request(self.base + url + "/qr", b"{}",
+                                             {"Content-Type": "application/json", "Cookie": self.cookie})
+            with self.assertRaises(urllib.error.HTTPError) as foreign:
+                urllib.request.urlopen(request, timeout=4)
+            self.assertEqual(foreign.exception.code, 403)
+            native.assert_not_called()
+            native.return_value = {"state": "online", "canScan": False, "qr": token}
+            _, online = self._post(url + "/qr", {})
+            self.assertEqual(online["state"], "online")
+            self.assertNotIn("image", online)
+            native.return_value = {"state": "scan", "canScan": True, "qr": token}
+            _, scan = self._post(url + "/qr", {})
+            self.assertTrue(scan["image"].startswith("data:image/png;base64,iVBOR"))
+            self.assertNotIn(token, json.dumps(scan))
+
+    def test_wechat_reconnect_confirms_only_the_bridge_and_blocks_repeat(self):
+        with patch.object(wechat_account, "_idle", return_value=True), \
+                patch.object(wechat_account, "LAST_RESTART", float("-inf")), \
+                patch.object(wechat_account, "_systemctl", side_effect=["11", "", "12", "active"]) as command:
+            code, value = wechat_account._reconnect(self.wx_root, {})
+            self.assertEqual((code, value), (200, {"ok": True, "restarted": True}))
+            self.assertEqual(command.call_args_list[1].args, ("restart", "dafeiyu-wechat-bridge.service"))
+            self.assertEqual(wechat_account._reconnect(self.wx_root, {})[0], 429)
+            self.assertEqual(command.call_count, 4)
+        with patch.object(wechat_account, "_idle", return_value=False), \
+                patch.object(wechat_account, "LAST_RESTART", float("-inf")), \
+                patch.object(wechat_account, "_systemctl", return_value="11") as command:
+            self.assertEqual(wechat_account._reconnect(self.wx_root, {})[0], 409)
+            command.assert_called_once()
 
     def test_live_video_proxies_get_head_and_unsatisfiable_range(self):
         url = self.base + "/fish_house/themes/default/videos/example.mp4"

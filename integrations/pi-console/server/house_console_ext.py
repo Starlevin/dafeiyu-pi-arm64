@@ -1006,6 +1006,10 @@ def _proxy_house_video(handler, path):
 def resolve(handler, method: str, path: str) -> bool:
     """Handle unified Fish House + extended Console endpoints. Returns True if handled."""
     cfg = _app_cfg(handler)
+    if path == "/api/account/wechat" or path.startswith("/api/account/wechat/"):
+        import wechat_account
+        core = _wechat_root(cfg) if handler.app.fixture is None else None
+        return wechat_account.resolve(handler, method, path, core.parent if core else None, cfg)
 
     persona = WECHAT_PERSONA_ROUTE.fullmatch(path)
     if persona and method in ("GET", "POST"):

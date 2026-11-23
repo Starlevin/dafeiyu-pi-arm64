@@ -285,6 +285,7 @@
     $('console').hidden = true;
     clearWeChatMemory();
     clearWeChatGroupPersonas();
+    closeWeChatAccount();
     const isSetup = (mode === 'setup');
     $('setupForm').hidden = !isSetup;
     $('loginForm').hidden = isSetup;
@@ -1339,6 +1340,72 @@
   let memoryEdit = null;
   let savingMemory = false;
   const memoryRoute = '/api/memory/wechat';
+  const wechatAccountPath = '/api/account/wechat';
+  let wechatAccountRequest = 0;
+  let wechatAccountBusy = false;
+  let wechatAccountPoll = 0;
+  let wechatQrExpires = 0;
+
+  function hideWeChatQr() {
+    clearTimeout(wechatAccountPoll);
+    const image = $('wechatAccountQr');
+    image.hidden = true;
+    image.removeAttribute('src');
+  }
+
+  function closeWeChatAccount() {
+    ++wechatAccountRequest;
+    wechatAccountBusy = false;
+    hideWeChatQr();
+    $('wechatAccountStatus').textContent = '';
+    $('wechatAccountRefresh').disabled = false;
+    $('wechatAccountGetQr').disabled = true;
+    $('wechatAccountReconnect').disabled = true;
+  }
+
+  async function readWeChatAccount(action) {
+    if (wechatAccountBusy || !$('wechatAccount').open || !state.session || !state.session.authenticated) return;
+    if (action === 'reconnect' && !window.confirm('重连微信桥接会短暂暂停微信消息处理。确认重连吗？')) return;
+    const request = ++wechatAccountRequest;
+    const status = $('wechatAccountStatus');
+    const image = $('wechatAccountQr');
+    const scan = $('wechatAccountGetQr');
+    const reconnect = $('wechatAccountReconnect');
+    const refresh = $('wechatAccountRefresh');
+    clearTimeout(wechatAccountPoll);
+    if (action) hideWeChatQr();
+    wechatAccountBusy = true;
+    refresh.disabled = scan.disabled = reconnect.disabled = true;
+    status.textContent = action === 'reconnect' ? '正在重连微信桥接…' : '正在读取微信窗口…';
+    let result;
+    try {
+      if (action === 'reconnect') {
+        await apiPost(wechatAccountPath + '/reconnect', { confirmed: true });
+      }
+      result = action === 'qr' ? await apiPost(wechatAccountPath + '/qr', {}) : await apiGet(wechatAccountPath);
+      if (request !== wechatAccountRequest) return;
+      status.textContent = (action === 'reconnect' ? '桥接已重连。' : '') + result.label;
+      if (typeof result.image === 'string' && result.image.startsWith('data:image/png;base64,')) {
+        image.src = result.image;
+        image.hidden = false;
+        wechatQrExpires = Date.now() + 30_000;
+      }
+      if (result.state !== 'scan' || Date.now() >= wechatQrExpires) hideWeChatQr();
+      if (!image.hidden) wechatAccountPoll = setTimeout(() => readWeChatAccount(), 6000);
+    } catch (error) {
+      if (request !== wechatAccountRequest) return;
+      if (error.status === 401) { handleUnauthorized(); return; }
+      hideWeChatQr();
+      status.textContent = error.message;
+    } finally {
+      if (request === wechatAccountRequest) {
+        wechatAccountBusy = false;
+        refresh.disabled = false;
+        scan.disabled = !result || result.canScan !== true;
+        reconnect.disabled = !result || result.canReconnect !== true;
+      }
+    }
+  }
   const groupPersonaRoute = '/api/persona/wechat';
   let personaGroups = [];
   let personaRequest = 0;
@@ -1569,6 +1636,10 @@
       });
       panes.forEach((pane) => { pane.hidden = pane.dataset.workspacePane !== target; });
       if (target === 'hSettings') refreshChannels();
+      else if ($('wechatAccount').open) {
+        $('wechatAccount').open = false;
+        closeWeChatAccount();
+      }
       if (target === 'hDiagnostics') refreshDelivery();
       if (target === 'hConversations') refreshWeChatMemory(true);
     }
@@ -1608,6 +1679,13 @@
       event.preventDefault();
       syncWeChatGroupPersonas(true);
     });
+    $('wechatAccount').addEventListener('toggle', () => {
+      if ($('wechatAccount').open) readWeChatAccount();
+      else closeWeChatAccount();
+    });
+    $('wechatAccountRefresh').addEventListener('click', () => readWeChatAccount());
+    $('wechatAccountGetQr').addEventListener('click', () => readWeChatAccount('qr'));
+    $('wechatAccountReconnect').addEventListener('click', () => readWeChatAccount('reconnect'));
 
     // 先捕获并立刻移除 #pair= 片段，再决定屏幕。令牌只留在内存里。
     const frag = captureFragment();
