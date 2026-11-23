@@ -1060,19 +1060,23 @@ class Bot {
     const separateHint = msg.separateRequested ? '本轮对方要求分开发送。把不同要点各写一行，最多 ' + maxBubbles + ' 行。' : '';
     const tail = [promptParts.tail, turnState.bridgeLine, separateHint].filter(Boolean).join('\n');
     // 主人问起朋友圈时，先尝试补一次最新读取；读不到就用旧快照，并在上下文里说明。
-    if (this.moments && isMaster && !isGroup && momentsIntent(clean.text)
-        && typeof this.moments.ensureFresh === 'function') {
+    const canReadMoments = this.moments && msg.platform === 'wechat' && msg.chatType === 'private'
+      && momentsIntent(clean.text) && isVerifiedOwner(this.config, msg);
+    if (canReadMoments && typeof this.moments.ensureFresh === 'function') {
       try {
         const account = String((this.config.wechat && this.config.wechat.account) || '').trim();
         await this.moments.ensureFresh({ account });
       } catch { /* 读不到不影响正常回复 */ }
     }
-    // 记忆块 = 人物卡/事件/摘要 + 关系卡 + 朋友圈快照。
-    // 朋友圈只在「主人私聊」且这轮确实问到朋友圈时加入，绝不下沉到群聊或普通聊天。
     let momentsBlock = '';
-    if (this.moments && isMaster && !isGroup && momentsIntent(clean.text)) {
-      try { momentsBlock = this.moments.contextBlock(); } catch { momentsBlock = ''; }
+    if (canReadMoments && typeof this.moments.contextBlock === 'function') {
+      try {
+        const contents = this.moments.contextBlock();
+        if (typeof contents === 'string') momentsBlock = contents.trim();
+      } catch { /* 快照不可用时仍可正常答复 */ }
     }
+    // 快照只参与当前私聊回复。即使模型改写了原文，也不能将派生回复写入聊天记忆。
+    msg.momentsContextUsed = Boolean(momentsBlock);
     const memoryBlock = [mem.block, mem.relationsBlock, momentsBlock].filter(Boolean).join('\n\n');
     const turns = this.buildTurns({ ...msg, ts: nowMs }, historyForTurns, memoryBlock, tail);
 
@@ -2074,16 +2078,18 @@ class Bot {
     const storeText = hasDiaryMark
       ? text.replace(/\[\[diary:[^\]]{1,32}\]\]/gi, '（读取日记）')
       : text;
-    try {
-      this.store.appendMessage(decision.key, {
-        role: 'assistant',
-        name: this.config.persona.name,
-        text: storeText,
-        ts: this.now().getTime(),
-        error,
-      });
-    } catch (err) {
-      this.logger && this.logger.error('写入回复失败（照常发送）：' + describeError(err));
+    if (!msg.momentsContextUsed) {
+      try {
+        this.store.appendMessage(decision.key, {
+          role: 'assistant',
+          name: this.config.persona.name,
+          text: storeText,
+          ts: this.now().getTime(),
+          error,
+        });
+      } catch (err) {
+        this.logger && this.logger.error('写入回复失败（照常发送）：' + describeError(err));
+      }
     }
     // 每轮一个 checkpoint：重启后能知道停在哪、episode 有没有关
     try {
