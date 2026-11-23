@@ -16,6 +16,38 @@ public struct UnifiedJournalEntry: Codable, Sendable, Equatable {
     var memory: UnifiedJournalMemory? = nil
 }
 
+enum WeChatMemoryAdminError: Error {
+    case unavailable, unknownScope, stale, invalid
+}
+
+struct WeChatMemoryEntry: Encodable, Sendable {
+    let id: String
+    let label: String
+    let value: String
+    let kind: String
+    let source: String
+    let updatedAt: Int64
+    let expiresAt: Int64
+
+    init?(_ item: QQMemoryItem) {
+        guard item.subject == "CONVERSATION", item.keywords.count == 1,
+              let key = item.keywords.first,
+              let split = item.text.indices.first(where: {
+                  item.text[$0] == "：" &&
+                      String(item.text[..<$0]).precomposedStringWithCanonicalMapping.lowercased() == key
+              }) else { return nil }
+        id = item.id
+        label = String(item.text[..<split])
+        value = String(item.text[item.text.index(after: split)...])
+        kind = item.kind
+        source = item.sourceIDs.contains { $0.hasPrefix("console:") } ? "operator"
+            : item.inferredFromConversation == true ? "conversation" : "manual"
+        // The durable archive stores ISO 8601 timestamps at second precision.
+        updatedAt = Int64(item.updatedAt.timeIntervalSince1970.rounded(.down))
+        expiresAt = Int64(item.expiresAt.timeIntervalSince1970.rounded(.down))
+    }
+}
+
 struct UnifiedJournalMemory: Codable, Sendable, Equatable {
     let sessionDigest: String
     let incoming: String
@@ -256,6 +288,35 @@ public actor UnifiedIdempotencyJournal {
         return try QQMemoryReliableStore(directory: directory, scope: scope)
     }
 
+    func groupMemoryEntries(for scope: String) throws -> [WeChatMemoryEntry] {
+        guard storageUsable, fileURL != nil else { throw WeChatMemoryAdminError.unavailable }
+        guard let archive = try groupArchive(scope, create: false) else { return [] }
+        let now = Date()
+        return archive.items.filter { $0.current(now) }
+            .sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }
+            .compactMap(WeChatMemoryEntry.init)
+    }
+
+    func correctGroupMemory(for scope: String, id: UUID, value: String) throws -> WeChatMemoryEntry {
+        guard storageUsable, fileURL != nil else { throw WeChatMemoryAdminError.unavailable }
+        let correction = value.trimmingCharacters(in: .whitespaces)
+        guard (1...140).contains(correction.count), correction.utf8.count <= 960,
+              !correction.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              !QQMemoryRedactor.containsSensitive(correction) else { throw WeChatMemoryAdminError.invalid }
+        let now = Date()
+        guard let archive = try groupArchive(scope, create: false),
+              let item = archive.items.first(where: { UUID(uuidString: $0.id) == id && $0.current(now) }),
+              let entry = WeChatMemoryEntry(item) else { throw WeChatMemoryAdminError.stale }
+        guard !QQMemoryRedactor.containsSensitive(entry.label + "：" + correction) else { throw WeChatMemoryAdminError.invalid }
+        let eventID = "console:" + UUID().uuidString
+        try archive.recordConfirmedGroupNote(id: eventID, label: entry.label, value: correction, kind: entry.kind,
+                                             at: now, retainingExpiry: item.expiresAt)
+        if let updated = archive.items.first(where: { $0.current(now) && $0.sourceIDs.contains(eventID) }),
+           let result = WeChatMemoryEntry(updated) { return result }
+        guard correction == entry.value else { throw WeChatMemoryAdminError.unavailable }
+        return entry
+    }
+
     func memoryHistory(for sessionDigest: String, limit: Int) -> [ChatTurn] {
         guard storageUsable, fileURL != nil, limit > 0 else { return [] }
         let confirmed = entries.values.filter {
@@ -340,7 +401,7 @@ public actor UnifiedIdempotencyJournal {
 
     /// Same-directory POSIX replacement: the old journal remains present until
     /// `rename(2)` atomically installs the fully written, mode-0600 new file.
-    nonisolated private static func writeAtomically(_ data: Data, to fileURL: URL) throws {
+    nonisolated static func writeAtomically(_ data: Data, to fileURL: URL) throws {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory,
                                                 withIntermediateDirectories: true)

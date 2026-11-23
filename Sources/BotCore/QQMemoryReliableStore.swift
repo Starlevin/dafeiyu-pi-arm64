@@ -235,7 +235,8 @@ public final class QQMemoryReliableStore {
     /// A named group note, with a delivery-proven event as its source.
     /// The caller binds this store to exactly one conversation.
     public func recordConfirmedGroupNote(id: String, label: String, value: String, kind: String,
-                                         inferred: Bool = false, at now: Date) throws {
+                                         inferred: Bool = false, at now: Date,
+                                         retainingExpiry: Date? = nil) throws {
         let key = label.precomposedStringWithCanonicalMapping.lowercased()
         let text = label + "：" + value
         guard !label.isEmpty, key.count <= 20, !value.isEmpty, value.count <= 140,
@@ -261,15 +262,19 @@ public final class QQMemoryReliableStore {
                                             ? (kind == "task" ? 14 : 45) : (kind == "task" ? 30 : 365))
         let unchanged = prior.contains {
             $0.kind == kind && ($0.inferredFromConversation == true) == inferred
-                && QQReplyRepetitionPolicy.normalized($0.text) == QQReplyRepetitionPolicy.normalized(text)
+                && (retainingExpiry != nil
+                    ? $0.text == text
+                    : QQReplyRepetitionPolicy.normalized($0.text) == QQReplyRepetitionPolicy.normalized(text))
         }
         try apply(QQMemoryDelta(summary: "", changes: unchanged ? [] : [change]), batch: [entry],
-                  candidateIDs: Set(candidates), now: now, inferredFromConversation: inferred)
+                  candidateIDs: Set(candidates), now: now, inferredFromConversation: inferred,
+                  retainingExpiry: retainingExpiry)
     }
 
     @discardableResult
     public func apply(_ delta: QQMemoryDelta, batch: [QQMemoryJournalEntry], candidateIDs: Set<String>,
-                      now: Date = Date(), inferredFromConversation: Bool = false) throws -> QQMemoryApplyReport {
+                      now: Date = Date(), inferredFromConversation: Bool = false,
+                      retainingExpiry: Date? = nil) throws -> QQMemoryApplyReport {
         guard !batch.isEmpty else { throw QQMemoryReliableError.invalid("空记忆批次") }
         let pendingIDs = Set(journal.entries(knownIDs: Set(state.appliedIDs)).map(\.event.id))
         guard Set(batch.map(\.event.id)).isSubset(of: pendingIDs) else {
@@ -314,7 +319,7 @@ public final class QQMemoryReliableStore {
             state.items.append(QQMemoryItem(subject: change.subject, kind: change.kind, text: text,
                                             keywords: change.keywords.map(QQMemoryRedactor.redact),
                                             importance: change.importance, sourceIDs: [change.sourceID],
-                                            updatedAt: now, expiresAt: now.addingTimeInterval(Double(days * 86400)),
+                                            updatedAt: now, expiresAt: retainingExpiry ?? now.addingTimeInterval(Double(days * 86400)),
                                             inferredFromConversation: inferredFromConversation ? true : nil))
             report.newItems += 1
         }

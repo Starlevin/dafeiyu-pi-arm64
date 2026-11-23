@@ -283,6 +283,7 @@
   function showAuth(mode, opts) {
     $('authCard').hidden = false;
     $('console').hidden = true;
+    clearWeChatMemory();
     const isSetup = (mode === 'setup');
     $('setupForm').hidden = !isSetup;
     $('loginForm').hidden = isSetup;
@@ -312,6 +313,7 @@
     $('console').hidden = false;
     if (window.location.hash === '#hSettings') refreshChannels();
     if (window.location.hash === '#hDiagnostics') refreshDelivery();
+    if (window.location.hash === '#hConversations') refreshWeChatMemory(true);
   }
   function applySession(s) {
     renderSessionMeta(s);
@@ -1332,6 +1334,147 @@
     }
   }
 
+  let memoryRequest = 0;
+  let memoryEdit = null;
+  let savingMemory = false;
+  const memoryRoute = '/api/memory/wechat';
+
+  function stopMemoryEdit() {
+    memoryEdit = null;
+    $('wechatMemoryEdit').hidden = true;
+    $('wechatMemoryValue').value = '';
+  }
+
+  function clearWeChatMemory() {
+    ++memoryRequest;
+    savingMemory = false;
+    const menu = $('wechatMemoryGroup');
+    menu.replaceChildren();
+    menu.disabled = true;
+    $('wechatMemoryRefresh').disabled = false;
+    $('wechatMemorySave').disabled = false;
+    $('wechatMemoryCancel').disabled = false;
+    $('wechatMemoryValue').readOnly = false;
+    $('wechatMemoryRows').replaceChildren();
+    $('wechatMemoryStatus').textContent = '';
+    stopMemoryEdit();
+  }
+
+  function renderWeChatMemory(entries, scope) {
+    const mount = $('wechatMemoryRows');
+    mount.replaceChildren();
+    const sources = { conversation: '群聊陈述 · 待核实', manual: '群内手工保存', operator: '控制台更正' };
+    const kinds = { task: '事项', fact: '事实', preference: '偏好', event: '活动' };
+    for (const record of entries) {
+      const item = node('article', 'memory-record');
+      const text = node('div', '');
+      const end = new Date(record.expiresAt * 1000);
+      const expiry = Number.isFinite(end.getTime()) ? end.toLocaleString('zh-CN') : '到期时间待确认';
+      text.append(node('h4', '', record.label), node('p', '', record.value),
+        node('p', 'memory-meta', [kinds[record.kind], sources[record.source], '到期 ' + expiry].filter(Boolean).join(' · ')));
+      const edit = node('button', 'btn btn-quiet btn-sm', '更正');
+      edit.type = 'button';
+      edit.addEventListener('click', () => {
+        if (savingMemory || $('wechatMemoryGroup').value !== scope) return;
+        memoryEdit = { scope, id: record.id };
+        $('wechatMemoryLabel').textContent = '更正 ' + record.label;
+        $('wechatMemoryValue').value = record.value;
+        $('wechatMemoryEdit').hidden = false;
+        $('wechatMemoryValue').focus();
+      });
+      item.append(text, edit);
+      mount.append(item);
+    }
+  }
+
+  async function refreshWeChatMemory(loadGroups) {
+    if (savingMemory || !$('wechatMemory').open || !state.session || !state.session.authenticated) return;
+    const requestID = ++memoryRequest;
+    const menu = $('wechatMemoryGroup');
+    const refresh = $('wechatMemoryRefresh');
+    const status = $('wechatMemoryStatus');
+    stopMemoryEdit();
+    $('wechatMemoryRows').replaceChildren();
+    menu.disabled = true;
+    refresh.disabled = true;
+    status.textContent = '正在读取群记忆…';
+    try {
+      if (loadGroups) {
+        const previous = menu.value;
+        const data = await apiGet(memoryRoute);
+        if (requestID !== memoryRequest) return;
+        const groups = arr(data && data.groups);
+        const labels = new Map();
+        groups.forEach((group) => labels.set(group.label, (labels.get(group.label) || 0) + 1));
+        menu.replaceChildren(...groups.map((group) => {
+          const label = labels.get(group.label) > 1 ? group.label + ' · ' + group.accountCode : group.label;
+          const option = node('option', '', label);
+          option.value = group.id;
+          return option;
+        }));
+        if (groups.some((group) => group.id === previous)) menu.value = previous;
+      }
+      const group = menu.value;
+      if (!group) {
+        status.textContent = '暂无可管理的微信群。';
+        return;
+      }
+      const data = await apiGet(memoryRoute + '/' + group);
+      if (requestID !== memoryRequest) return;
+      const entries = arr(data && data.entries);
+      renderWeChatMemory(entries, group);
+      status.textContent = entries.length ? '已读取 ' + entries.length + ' 条当前记忆。' : '该群暂无当前记忆。';
+    } catch (error) {
+      if (requestID !== memoryRequest) return;
+      if (error.status === 401) { handleUnauthorized(); return; }
+      status.textContent = error.message;
+    } finally {
+      if (requestID === memoryRequest) {
+        menu.disabled = !menu.options.length;
+        refresh.disabled = false;
+      }
+    }
+  }
+
+  async function saveWeChatMemory(event) {
+    event.preventDefault();
+    if (!memoryEdit || savingMemory) return;
+    const edit = memoryEdit;
+    const input = $('wechatMemoryValue');
+    const status = $('wechatMemoryStatus');
+    const requestID = memoryRequest;
+    let accepted = false;
+    savingMemory = true;
+    const locked = ['wechatMemoryGroup', 'wechatMemoryRefresh', 'wechatMemorySave', 'wechatMemoryCancel'];
+    locked.forEach((id) => { $(id).disabled = true; });
+    input.readOnly = true;
+    status.textContent = '正在保存并回读…';
+    try {
+      const path = memoryRoute + '/' + edit.scope;
+      const saved = await apiPost(path, { id: edit.id, value: input.value.trim() });
+      accepted = true;
+      const current = await apiGet(path);
+      if (requestID !== memoryRequest) return;
+      const entries = arr(current && current.entries);
+      if (!saved.entry || !entries.some((entry) => entry.id === saved.entry.id && entry.value === saved.entry.value)) {
+        throw new Error('更正已提交，回读未确认。请刷新核对。');
+      }
+      stopMemoryEdit();
+      renderWeChatMemory(entries, edit.scope);
+      status.textContent = '更正已保存并回读确认。';
+    } catch (error) {
+      if (requestID !== memoryRequest) return;
+      if (error.status === 401) { handleUnauthorized(); return; }
+      status.textContent = accepted ? '更正已提交，回读未确认。请刷新核对。' : error.message;
+    } finally {
+      if (requestID === memoryRequest) {
+        savingMemory = false;
+        locked.forEach((id) => { $(id).disabled = false; });
+        input.readOnly = false;
+      }
+    }
+  }
+
   function wireWorkspace() {
     const links = Array.from(document.querySelectorAll('[data-workspace-view]'));
     const panes = Array.from(document.querySelectorAll('[data-workspace-pane]'));
@@ -1346,6 +1489,7 @@
       panes.forEach((pane) => { pane.hidden = pane.dataset.workspacePane !== target; });
       if (target === 'hSettings') refreshChannels();
       if (target === 'hDiagnostics') refreshDelivery();
+      if (target === 'hConversations') refreshWeChatMemory(true);
     }
     window.addEventListener('hashchange', displayView);
     links.forEach((link) => link.addEventListener('click', () => {
@@ -1370,6 +1514,11 @@
     $('passwordForm').addEventListener('submit', onPasswordSubmit);
     $('refreshBtn').addEventListener('click', () => { if (!state.busy) loadOverview(); });
     $('logoutBtn').addEventListener('click', onLogout);
+    $('wechatMemory').addEventListener('toggle', () => refreshWeChatMemory(true));
+    $('wechatMemoryGroup').addEventListener('change', () => refreshWeChatMemory(false));
+    $('wechatMemoryRefresh').addEventListener('click', () => refreshWeChatMemory(true));
+    $('wechatMemoryEdit').addEventListener('submit', saveWeChatMemory);
+    $('wechatMemoryCancel').addEventListener('click', stopMemoryEdit);
 
     // 先捕获并立刻移除 #pair= 片段，再决定屏幕。令牌只留在内存里。
     const frag = captureFragment();

@@ -22,6 +22,18 @@ private struct PilotRuntime: Codable {
     let controlURL: String
 }
 
+private struct PilotMemoryAdminRuntime: Encodable {
+    let port: Int
+    let token: String
+}
+
+private struct PilotMemoryResult: Encodable {
+    let ok = true
+    var groups: [WeChatMemoryGroup]? = nil
+    var entries: [WeChatMemoryEntry]? = nil
+    var entry: WeChatMemoryEntry? = nil
+}
+
 /// 所有控制响应的统一形状（不含消息原文）。可选字段让一个结构体覆盖所有路径。
 private struct PilotAck: Encodable {
     var ok: Bool
@@ -97,7 +109,8 @@ private enum PilotHTTP {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(object)) ?? Data("{}".utf8)
-        let status = code == 200 ? "OK" : (code == 202 ? "Accepted" : (code == 403 ? "Forbidden" : (code == 404 ? "Not Found" : "Bad Request")))
+        let status = [200: "OK", 202: "Accepted", 403: "Forbidden", 404: "Not Found",
+                      409: "Conflict", 503: "Service Unavailable"][code] ?? "Bad Request"
         let header = "HTTP/1.1 \(code) \(status)\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: \(data.count)\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n"
         return Data(header.utf8) + data
     }
@@ -107,9 +120,13 @@ private enum PilotHTTP {
 public final class UnifiedPilotServer {
     private let listener: LoopbackListener
     private let token: String
+    private let memoryAdminToken = UUID().uuidString + UUID().uuidString
     private let origin: String
     private let core: UnifiedReplyCore
     private let runtimeFile: URL?
+    private var memoryAdminRuntimeFile: URL? {
+        runtimeFile?.deletingPathExtension().appendingPathExtension("memory-admin.json")
+    }
     private var jobs: [String: JobStatus] = [:]
     private var started = false
 
@@ -138,6 +155,14 @@ public final class UnifiedPilotServer {
         guard !started else { return }
         started = true
         writeRuntime()
+        if let file = memoryAdminRuntimeFile {
+            do {
+                let metadata = PilotMemoryAdminRuntime(port: Int(listener.port), token: memoryAdminToken)
+                try UnifiedIdempotencyJournal.writeAtomically(JSONEncoder().encode(metadata), to: file)
+            } catch {
+                print("unified_memory_admin_runtime_write_failed")
+            }
+        }
         if announce {
             print("UNIFIED_PILOT_URL=\(controlURL)")
             print("统一回复试点本机监听已就绪；独立端口，不影响 QQ 控制面板 /api/status。")
@@ -165,6 +190,7 @@ public final class UnifiedPilotServer {
     public func stop() {
         listener.stop()
         if let runtimeFile { try? FileManager.default.removeItem(at: runtimeFile) }
+        if let file = memoryAdminRuntimeFile { try? FileManager.default.removeItem(at: file) }
     }
 
     // MARK: - 连接处理（nonisolated：不占用 MainActor）
@@ -237,6 +263,43 @@ public final class UnifiedPilotServer {
     private func handle(_ connection: LoopbackConnection,
                         _ parsed: (method: String, path: String, headers: [String: String], body: Data)) async {
         let (method, path, headers, body) = parsed
+        let memoryPath = "/api/admin/wechat-memory"
+        if path == memoryPath || path.hasPrefix(memoryPath + "/") {
+            guard headers["x-unified-admin-token"] == memoryAdminToken, headers["origin"] == origin,
+                  headers["host"] == origin.replacingOccurrences(of: "http://", with: "") else {
+                send(connection, PilotHTTP.response(403, PilotAck(ok: false, error: "forbidden"))); return
+            }
+            do {
+                if method == "GET", path == memoryPath, body.isEmpty {
+                    send(connection, PilotHTTP.response(200, PilotMemoryResult(groups: try core.wechatMemoryGroups())))
+                } else {
+                    guard path.hasPrefix(memoryPath + "/") else { throw WeChatMemoryAdminError.invalid }
+                    let scope = String(path.dropFirst(memoryPath.count + 1))
+                    if method == "GET", body.isEmpty {
+                        let entries = try await core.wechatMemoryEntries(scope: scope)
+                        send(connection, PilotHTTP.response(200, PilotMemoryResult(entries: entries)))
+                    } else {
+                        struct Correction: Decodable { let id: UUID; let value: String }
+                        guard method == "POST", body.count <= 2048,
+                              headers["content-type"]?.components(separatedBy: ";").first?.lowercased() == "application/json",
+                              let update = try? JSONDecoder().decode(Correction.self, from: body) else {
+                            throw WeChatMemoryAdminError.invalid
+                        }
+                        let entry = try await core.correctWeChatMemory(scope: scope, id: update.id, value: update.value)
+                        send(connection, PilotHTTP.response(200, PilotMemoryResult(entry: entry)))
+                    }
+                }
+            } catch WeChatMemoryAdminError.invalid {
+                send(connection, PilotHTTP.response(400, PilotAck(ok: false, error: "invalid_memory_update")))
+            } catch WeChatMemoryAdminError.unknownScope {
+                send(connection, PilotHTTP.response(404, PilotAck(ok: false, error: "unknown_scope")))
+            } catch WeChatMemoryAdminError.stale {
+                send(connection, PilotHTTP.response(409, PilotAck(ok: false, error: "stale_memory_entry")))
+            } catch {
+                send(connection, PilotHTTP.response(503, PilotAck(ok: false, error: "memory_unavailable")))
+            }
+            return
+        }
 
         // 静态能力声明与审计：只读，不含消息原文。
         if method == "GET", path == "/api/capabilities" {

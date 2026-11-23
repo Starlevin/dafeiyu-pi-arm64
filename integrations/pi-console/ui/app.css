@@ -236,6 +236,19 @@ main.wrap { padding-top: 40px; padding-bottom: 56px; }
 .field-ctl .select, .field-ctl .input { max-width: 200px; }
 .field-row .cell-unset { flex: 1 1 auto; }
 
+.memory-panel summary { cursor: pointer; }
+.memory-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 14px; }
+.memory-toolbar .field { margin: 0; flex: 1 1 220px; min-width: 0; }
+.memory-toolbar .select { width: 100%; }
+.memory-records { display: grid; gap: 8px; margin-top: 12px; }
+.memory-record {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 14px;
+  align-items: start; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius);
+}
+.memory-record h4, .memory-record p { margin: 0; overflow-wrap: anywhere; }
+.memory-record .memory-meta { margin-top: 5px; color: var(--muted); font-size: 12px; }
+.memory-editor { padding: 12px; background: var(--surface-2); border-radius: var(--radius); }
+
 /* ---------- 表格 ---------- */
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 720px; }

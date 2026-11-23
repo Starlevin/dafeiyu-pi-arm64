@@ -7,12 +7,12 @@
 <meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151b26" media="(prefers-color-scheme: dark)">
 <title>大肥鱼统一控制台</title>
-<link rel="stylesheet" href="app.css?v=workspace-2">
+<link rel="stylesheet" href="app.css?v=workspace-3">
 <link rel="stylesheet" href="usage.css">
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js?v=workspace-3"></script>
+<script src="app.js?v=workspace-4"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
 <script src="social.js" defer></script>
@@ -149,6 +149,26 @@
         <p class="card-note">此设置对该平台的所有会话同时生效，不能按会话分别设置。</p>
         <div id="globalBody"></div>
       </div>
+      <details class="card memory-panel" id="wechatMemory">
+        <summary class="card-title">微信群记忆</summary>
+        <div class="memory-toolbar">
+          <div class="field">
+            <label for="wechatMemoryGroup">微信群</label>
+            <select class="select" id="wechatMemoryGroup" disabled></select>
+          </div>
+          <button class="btn btn-quiet btn-sm" type="button" id="wechatMemoryRefresh">刷新记忆</button>
+        </div>
+        <p class="card-note" id="wechatMemoryStatus" role="status" aria-live="polite"></p>
+        <form class="memory-editor" id="wechatMemoryEdit" hidden>
+          <div class="field">
+            <label for="wechatMemoryValue" id="wechatMemoryLabel">更正内容</label>
+            <input class="input" id="wechatMemoryValue" maxlength="140" required autocomplete="off">
+          </div>
+          <button class="btn btn-primary btn-sm" type="submit" id="wechatMemorySave">保存更正</button>
+          <button class="btn btn-quiet btn-sm" type="button" id="wechatMemoryCancel">取消</button>
+        </form>
+        <div id="wechatMemoryRows" class="memory-records"></div>
+      </details>
     </section>
 
     <section id="usagePane" class="section" data-workspace-pane="usagePane" aria-label="模型 Token 用量"></section>

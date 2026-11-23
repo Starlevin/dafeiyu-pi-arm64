@@ -11,6 +11,7 @@ Provides:
        POST /api/diag              -> non-sensitive frontend rendering telemetry
   2. Real, honest, zero-secret backend adapters for Unified Console Modules 4, 6, 7, 9 + Gemini:
        GET  /api/memory/status     -> per-group memory isolation count & storage metadata (never reads chat text)
+       GET/POST /api/memory/wechat -> scoped Swift group memory management
        GET  /api/stickers          -> live QQ & WeChat sticker packs inventory (including 6 original GIFs)
        GET  /api/proactive/config  -> live WeChat proactiveJudge & QQ ReplyDecision V2 state
        GET  /api/trace/summary     -> aggregated model-hub route latency & fallback summary (zero UUID/content leak)
@@ -25,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import statistics
 import tempfile
 import threading
@@ -35,6 +37,7 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+WECHAT_MEMORY_ROUTE = re.compile(r"/api/memory/wechat(?:/([0-9a-f]{64}))?")
 
 MIME_MAP = {
     ".html": "text/html; charset=utf-8",
@@ -106,6 +109,51 @@ def _qq_root(cfg: dict) -> Path | None:
         return None
     p = Path(raw).expanduser()
     return p if p.exists() else None
+
+
+def _wechat_memory_admin(cfg, method, scope, body):
+    try:
+        root = _qq_root(cfg)
+        if root is None:
+            raise OSError
+        path = root / "data-qq" / "unified-pilot.memory-admin.json"
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        with os.fdopen(os.open(path, flags), "rb") as runtime:
+            mode = os.fstat(runtime.fileno())
+            if not stat.S_ISREG(mode.st_mode) or (os.name == "posix" and
+                    (mode.st_uid != os.getuid() or stat.S_IMODE(mode.st_mode) != 0o600)):
+                raise OSError
+            metadata = json.loads(runtime.read(8192))
+        port, token = metadata["port"], metadata["token"]
+        if (type(port) is not int or not 1 <= port <= 65535 or not isinstance(token, str)
+                or re.fullmatch(r"[0-9A-Fa-f-]{72}", token) is None):
+            raise ValueError
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=4)
+        try:
+            upstream_path = "/api/admin/wechat-memory" + ("/" + scope if scope else "")
+            headers = {"Origin": f"http://127.0.0.1:{port}", "x-unified-admin-token": token,
+                       "Content-Type": "application/json"}
+            payload = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+            connection.request(method, upstream_path, payload, headers)
+            upstream = connection.getresponse()
+            if upstream.status != 200:
+                known = {400: "更正内容无效，请检查长度和敏感信息",
+                         404: "该群记忆当前不可管理",
+                         409: "条目已被更新或到期，请刷新后重试"}
+                if upstream.status in known:
+                    return upstream.status, {"error": known[upstream.status]}
+                raise OSError
+            raw = upstream.read(512_001)
+            if len(raw) > 512_000:
+                raise ValueError
+            result = json.loads(raw)
+            if not isinstance(result, dict) or result.get("ok") is not True:
+                raise ValueError
+            return 200, result
+        finally:
+            connection.close()
+    except (OSError, KeyError, TypeError, ValueError, http.client.HTTPException):
+        return 503, {"error": "微信记忆服务暂不可用，请刷新核对"}
 
 
 def _wechat_root(cfg: dict) -> Path | None:
@@ -951,6 +999,29 @@ def _proxy_house_video(handler, path):
 def resolve(handler, method: str, path: str) -> bool:
     """Handle unified Fish House + extended Console endpoints. Returns True if handled."""
     cfg = _app_cfg(handler)
+
+    memory = WECHAT_MEMORY_ROUTE.fullmatch(path)
+    if memory and method in ("GET", "POST"):
+        if not handler.need_auth():
+            return True
+        scope = memory.group(1)
+        body = None
+        if method == "POST":
+            if not handler.headers.get("Origin") or not handler.origin_ok():
+                handler.fail(403, "请从本控制台页面更正记忆")
+                return True
+            try:
+                body = handler.read_json()
+                if (not scope or set(body) != {"id", "value"}
+                        or not isinstance(body["id"], str) or len(body["id"]) != 36
+                        or not isinstance(body["value"], str) or len(body["value"]) > 500):
+                    raise ValueError("更正请求无效")
+            except ValueError:
+                handler.fail(400, "更正请求无效")
+                return True
+        code, result = _wechat_memory_admin(cfg, method, scope, body)
+        handler.json(code, result)
+        return True
 
     if method == "GET":
         if path == "/home":

@@ -25,10 +25,30 @@ class FakeUpstream(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def do_POST(self):
+        if self.path != "/api/admin/wechat-memory/" + "a" * 64:
+            self.send_error(404)
+            return
+        if (self.headers.get("x-unified-admin-token") != "a" * 72
+                or self.headers.get("Origin") != f"http://127.0.0.1:{self.server.server_port}"):
+            self.send_error(403)
+            return
+        self.send_error(409, "private upstream detail")
+
     def do_HEAD(self):
         self.do_GET()
 
     def do_GET(self):
+        if self.path == "/api/admin/wechat-memory":
+            if self.headers.get("x-unified-admin-token") != "a" * 72:
+                self.send_error(403)
+                return
+            body = json.dumps({"ok": True, "groups": [{"scope": "a" * 64}]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/fish_house/themes/default/videos/example.mp4":
             content = b"0123456789"
             if self.headers.get("Range") == "bytes=2-4":
@@ -196,6 +216,46 @@ class HouseConsoleExtTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             self._get("/fish_house/../../etc/passwd", authed=False)
         self.assertIn(ctx.exception.code, (403, 404))
+
+    def test_wechat_memory_proxy_requires_session_origin_and_private_runtime(self):
+        endpoint = "/api/memory/wechat"
+        group_path = endpoint + "/" + "a" * 64
+        correction = {"id": "00000000-0000-0000-0000-000000000001", "value": "更正"}
+        runtime = self.qq_root / "data-qq" / "unified-pilot.memory-admin.json"
+        runtime.parent.mkdir()
+        runtime.write_text(json.dumps({"port": self.upstream.server_port, "token": "a" * 72}), encoding="utf-8")
+        runtime.chmod(0o600)
+
+        with self.assertRaises(urllib.error.HTTPError) as unauthenticated:
+            self._get(endpoint, authed=False)
+        self.assertEqual(unauthenticated.exception.code, 401)
+        status, body = self._get(endpoint)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["groups"], [{"scope": "a" * 64}])
+        self.assertNotIn(b"a" * 72, body)
+
+        for origin in (None, "http://example.invalid"):
+            headers = {"Content-Type": "application/json", "Cookie": self.cookie}
+            if origin:
+                headers["Origin"] = origin
+            request = urllib.request.Request(self.base + group_path, json.dumps(correction).encode(), headers)
+            with self.assertRaises(urllib.error.HTTPError) as invalid_origin:
+                urllib.request.urlopen(request, timeout=4)
+            self.assertEqual(invalid_origin.exception.code, 403)
+
+        with self.assertRaises(urllib.error.HTTPError) as invalid_body:
+            self._post(group_path, dict(correction, scope="b" * 64))
+        self.assertEqual(invalid_body.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as conflict:
+            self._post(group_path, correction)
+        self.assertEqual(conflict.exception.code, 409)
+        self.assertEqual(json.load(conflict.exception)["error"], "条目已被更新或到期，请刷新后重试")
+
+        if os.name == "posix":
+            runtime.chmod(0o644)
+            with self.assertRaises(urllib.error.HTTPError) as unsafe_file:
+                self._get(endpoint)
+            self.assertEqual(unsafe_file.exception.code, 503)
 
     def test_live_video_proxies_get_head_and_unsatisfiable_range(self):
         url = self.base + "/fish_house/themes/default/videos/example.mp4"

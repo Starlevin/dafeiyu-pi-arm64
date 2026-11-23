@@ -472,6 +472,60 @@ private func inbound(_ text: String = "合成消息",
         #expect((await recorder.prompts.last)?.contains("周五下午") == false)
     }
 
+    @Test func memoryAdminCorrectionPreservesScopeLabelAndExpiry() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let core = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        let groups = try core.wechatMemoryGroups()
+        let primary = try #require(groups.first { $0.label == "fixture-group" })
+        let other = try #require(groups.first { $0.label == "other-group" })
+        let turn = await core.handle(inbound("记住：春季：集合地点＝合成北门", msgId: "memory"))
+        let receipt = try #require(turn.reply.memoryReceipt)
+        #expect(try await core.wechatMemoryEntries(scope: primary.id).isEmpty)
+        #expect(await core.confirmWeChatMemory(receipt))
+        let rows = try await core.wechatMemoryEntries(scope: primary.id)
+        let before = try #require(rows.first)
+        #expect(before.label == "春季：集合地点")
+        #expect(before.source == "manual")
+        let id = try #require(UUID(uuidString: before.id))
+
+        do {
+            _ = try await core.correctWeChatMemory(scope: other.id, id: id, value: "错误群写入")
+            Issue.record("A different group's entry ID must not authorize a write")
+        } catch WeChatMemoryAdminError.stale {}
+        do {
+            _ = try await core.correctWeChatMemory(scope: primary.id, id: id, value: "sk-fixture-secret")
+            Issue.record("Sensitive correction must be rejected")
+        } catch WeChatMemoryAdminError.invalid {}
+
+        let after = try await core.correctWeChatMemory(scope: primary.id, id: id, value: "合成西门")
+        #expect(after.source == "operator")
+        #expect(after.id != before.id)
+        #expect(after.label == before.label && after.expiresAt == before.expiresAt)
+        do {
+            _ = try await core.correctWeChatMemory(scope: primary.id, id: id, value: "过期草稿")
+            Issue.record("The prior revision must be stale")
+        } catch WeChatMemoryAdminError.stale {}
+        let restarted = UnifiedReplyCore(config: config, generator: generator,
+                                        journal: UnifiedIdempotencyJournal(fileURL: file))
+        let current = try await restarted.wechatMemoryEntries(scope: primary.id)
+        #expect(current.map(\.value) == ["合成西门"])
+        #expect(current.first?.updatedAt == after.updatedAt)
+        #expect(current.first?.expiresAt == after.expiresAt)
+        #expect(try await restarted.wechatMemoryEntries(scope: other.id).isEmpty)
+        _ = await restarted.handle(inbound("春季集合地点在哪里？", msgId: "readback"))
+        #expect((await recorder.prompts.last)?.contains("合成西门") == true)
+    }
+
     @Test func pendingEntryAfterRestartIsNotRegenerated() async throws {
         // 模拟「进程在模型返回前崩溃」：账本里只有 pending。
         let dir = FileManager.default.temporaryDirectory

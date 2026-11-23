@@ -261,6 +261,12 @@ public struct UnifiedOutcome: Sendable, Equatable {
     public var gate: String
 }
 
+struct WeChatMemoryGroup: Encodable, Sendable {
+    let id: String
+    let label: String
+    let accountCode: String
+}
+
 public final class UnifiedReplyCore: @unchecked Sendable {
     public let config: UnifiedCoreConfig
     public let capabilities = UnifiedCapabilities()
@@ -476,9 +482,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
            config.allowedAccounts.contains(inbound.account), config.allowedChats.contains(inbound.chatId),
            !inbound.msgId.isEmpty, !inbound.quoted, !inbound.imageDescribed,
            !body.contains("朋友圈"), !QQSocialTools.requested(in: body) {
-            let fields = [inbound.platform, inbound.account, inbound.chatType, inbound.chatId]
-            let key = fields.map { "\($0.utf8.count):\($0)" }.joined()
-            memoryScope = SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+            memoryScope = Self.wechatGroupScope(account: inbound.account, chat: inbound.chatId)
         } else {
             memoryScope = nil
         }
@@ -594,6 +598,39 @@ public final class UnifiedReplyCore: @unchecked Sendable {
     func confirmWeChatMemory(_ receipt: UUID) async -> Bool {
         guard config.enabled, config.confirmedWeChatMemoryEnabled == true else { return false }
         return await journal.confirmMemory(receipt, at: Date().timeIntervalSince1970)
+    }
+
+    private static func wechatGroupScope(account: String, chat: String) -> String {
+        let fields = ["wechat", account, "group", chat]
+        let key = fields.map { "\($0.utf8.count):\($0)" }.joined()
+        return SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func wechatMemoryGroups() throws -> [WeChatMemoryGroup] {
+        guard config.enabled, config.confirmedWeChatMemoryEnabled == true else {
+            throw WeChatMemoryAdminError.unavailable
+        }
+        let chats = Set(config.allowedChats).filter { !$0.isEmpty }.sorted()
+        return Set(config.allowedAccounts).filter { !$0.isEmpty }.sorted().flatMap { account in
+            let code = SHA256.hash(data: Data(account.utf8)).prefix(4).map { String(format: "%02x", $0) }.joined()
+            return chats.map { chat in
+                WeChatMemoryGroup(id: Self.wechatGroupScope(account: account, chat: chat), label: chat, accountCode: code)
+            }
+        }
+    }
+
+    func wechatMemoryEntries(scope: String) async throws -> [WeChatMemoryEntry] {
+        guard try wechatMemoryGroups().contains(where: { $0.id == scope }) else {
+            throw WeChatMemoryAdminError.unknownScope
+        }
+        return try await journal.groupMemoryEntries(for: scope)
+    }
+
+    func correctWeChatMemory(scope: String, id: UUID, value: String) async throws -> WeChatMemoryEntry {
+        guard try wechatMemoryGroups().contains(where: { $0.id == scope }) else {
+            throw WeChatMemoryAdminError.unknownScope
+        }
+        return try await journal.correctGroupMemory(for: scope, id: id, value: value)
     }
 
     public func auditSnapshot() -> [UnifiedAuditEntry] {
