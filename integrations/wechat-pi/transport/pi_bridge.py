@@ -2083,7 +2083,8 @@ def _make_row_side_fn(bounds, seed=None):
 
 
 def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
-                public_question_settler=None, public_question_settled_trace=None):
+                public_question_settler=None, public_question_settled_trace=None,
+                *, rows_observed_at=None):
     is_group = target in args.group
     if is_group:
         private_id = ""
@@ -2262,8 +2263,11 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                         continue
                 record(health, "mention", "auto_reply", trace)
             record(health, "queue", "accepted", trace)
-            jobs.put_nowait((target, is_group, payload, photo,
-                             time.monotonic(), auto_ctx))
+            queued_at = time.monotonic()
+            jobs.put_nowait((target, is_group, payload, photo, queued_at, auto_ctx))
+            if rows_observed_at is not None:
+                log("ingress_timing", trace=trace,
+                    visible_rows_to_queue_ms=int((queued_at - rows_observed_at) * 1000))
             queued_any = True
     return queued_any
 
@@ -2965,6 +2969,7 @@ def main():
                         if not verified_scope_open and not open_chat(app, target):
                             continue
                 bounds, rows = read_messages(app)
+                rows_observed_at = time.monotonic()
                 if bounds is None or chat_title(app) != target:
                     if pending_settle is not None and settle_due:
                         public_question_settler.cancel(target)
@@ -3015,19 +3020,22 @@ def main():
                         accepted = handle_rows(
                             app, rows, latest_index, bounds, target, args, jobs, health,
                             public_question_settler=public_question_settler,
-                            public_question_settled_trace=due_trace)
+                            public_question_settled_trace=due_trace,
+                            rows_observed_at=rows_observed_at)
                     else:
                         log("public_question_settle", result="candidate_changed")
                         if appended:
                             accepted = handle_rows(
                                 app, rows, len(rows) - len(appended), bounds,
                                 target, args, jobs, health,
-                                public_question_settler=public_question_settler)
+                                public_question_settler=public_question_settler,
+                                rows_observed_at=rows_observed_at)
                 elif appended:
                     accepted = handle_rows(
                         app, rows, len(rows) - len(appended), bounds, target,
                         args, jobs, health,
-                        public_question_settler=public_question_settler)
+                        public_question_settler=public_question_settler,
+                        rows_observed_at=rows_observed_at)
                 if wal_source_at is not None:
                     log("wal_ingress_stage", stage="scan", role="message",
                         event_to_queue_ms=max(0, int((time.monotonic() - wal_source_at) * 1000)),

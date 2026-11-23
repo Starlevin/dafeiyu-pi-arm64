@@ -70,7 +70,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
     def ingest_rows(self, rows, *, queue_size=4, mention=None, limiter=None,
                     proven=None, jobs=None, health=None, public_question_settler=None,
                     settled_trace=None, swift_route=False, monotonic=123.0,
-                    cooldown_config=None):
+                    cooldown_config=None, rows_observed_at=None):
         jobs = jobs or Queue(maxsize=queue_size)
         self.args.auto_limiter = limiter or Mock(take=Mock(return_value=True))
         self.configure(True)
@@ -93,8 +93,23 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
             result = bridge.handle_rows(None, rows, 0, (0, 0, 500, 500),
                                         GROUP, self.args, jobs, health,
                                         public_question_settler=public_question_settler,
-                                        public_question_settled_trace=settled_trace)
+                                        public_question_settled_trace=settled_trace,
+                                        rows_observed_at=rows_observed_at)
         return result, jobs
+
+    def test_ingress_latency_is_joinable_to_an_admitted_turn_without_text(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            accepted, jobs = self.ingest_rows(
+                [("fixture-body-omit", (1, 1, 2, 2))], mention="fixture-direct",
+                rows_observed_at=122.75)
+        self.assertTrue(accepted)
+        job = jobs.get_nowait()
+        trace = job[2]["msg_id"]
+        self.assertIn(f"ingress_timing trace='{trace}' visible_rows_to_queue_ms=250",
+                      output.getvalue())
+        self.assertNotIn("fixture-body-omit", output.getvalue())
+        self.assertNotIn("fixture-direct", output.getvalue())
 
     def test_batched_ordinary_rows_only_latest_proven_row_consumes_limiter(self):
         limiter = Mock(take=Mock(return_value=True))

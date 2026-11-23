@@ -33,6 +33,7 @@ public struct UnifiedGenerationRequest: Sendable {
     public var userText: String
     public var modelKey: String
     public var currentUserText: String = ""
+    public var modelTraceID: UUID? = nil
 }
 
 public struct UnifiedGenerationResult: Sendable {
@@ -91,6 +92,7 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
             proactive: false,
             userText: request.currentUserText,
             toolsMayRun: socialRequested,
+            traceID: request.modelTraceID,
             reserve: {}
         )
         if socialRequested && !succeeded {
@@ -370,6 +372,8 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let scope = identity.scopeDigest
         let session = identity.sessionKey
         let trace = inbound.msgId.isEmpty ? UUID().uuidString : inbound.msgId
+        var auditModelTraceID: String?
+        var auditInboundTraceDigest: String?
 
         func finish(_ reply: UnifiedReply, modelCalled: Bool, gate: String) -> UnifiedOutcome {
             let entry = UnifiedAuditEntry(
@@ -378,7 +382,9 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 reason: gate,
                 tokens: 0,
                 durationMs: Int(Date().timeIntervalSince(started) * 1000),
-                outcome: reply.action == "reply" ? "reply" : (reply.ok ? "ignore" : "failure")
+                outcome: reply.action == "reply" ? "reply" : (reply.ok ? "ignore" : "failure"),
+                modelTraceID: auditModelTraceID,
+                inboundTraceDigest: auditInboundTraceDigest
             )
             auditLock.lock(); audit.append(entry); auditLock.unlock()
             return UnifiedOutcome(reply: reply, modelCalled: modelCalled, gate: gate)
@@ -548,8 +554,13 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 + redacted.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         }
 
+        let modelTraceID = Self.modelHubTraceID(forIdempotencyKey: idemKey)
+        auditModelTraceID = QQModelTrace.normalized(modelTraceID)
+        let inboundDigest = SHA256.hash(data: Data(trace.utf8))
+        auditInboundTraceDigest = inboundDigest.prefix(6).map { String(format: "%02x", $0) }.joined()
         let request = UnifiedGenerationRequest(key: "unified-pilot", config: effective.botConfig, rule: rule,
-                                                history: history, userText: modelInput, modelKey: effective.modelKey, currentUserText: body)
+                                                history: history, userText: modelInput, modelKey: effective.modelKey,
+                                                currentUserText: body, modelTraceID: modelTraceID)
 
         // 9) 调用实际 LLMProvider（生产）/ 假模型（fixture）
         // 占位已持久化：此后**任何**出口都必须把最终状态写回账本，避免重启后
@@ -612,6 +623,18 @@ public final class UnifiedReplyCore: @unchecked Sendable {
     func confirmWeChatMemory(_ receipt: UUID) async -> Bool {
         guard config.enabled, config.confirmedWeChatMemoryEnabled == true else { return false }
         return await journal.confirmMemory(receipt, at: Date().timeIntervalSince1970)
+    }
+
+    /// Stable opaque UUID for correlating a turn with the loopback model hub.
+    static func modelHubTraceID(forIdempotencyKey key: String) -> UUID {
+        let material = Data(("dafeiyu-unified-model-trace-v1\0" + key).utf8)
+        var bytes = Array(SHA256.hash(data: material).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x80
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
+                           bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11],
+                           bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 
     private static func wechatGroupScope(account: String, chat: String) -> String {

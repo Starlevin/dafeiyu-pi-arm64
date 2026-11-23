@@ -130,6 +130,7 @@ struct DeepSeekClient {
     func reply(key: String, config: BotConfig, rule: ChatRule, history: [ChatTurn], text: String, jsonOutput: Bool = false, thinkingEnabled: Bool = false, images: [Data] = [],
                toolHandler: (@MainActor @Sendable (String, String) async throws -> ModelToolResult)? = nil,
                onlineToolsEnabled: Bool = true, socialToolsEnabled: Bool = false, imageGenerationEnabled: Bool = false, artworkEnabled: Bool = false,
+               traceID: UUID? = nil,
                reserve: @escaping @Sendable () async throws -> Void) async throws -> ModelResult {
         var messages: [[String: Any]] = [["role": "system", "content": rule.prompt.isEmpty ? config.prompt : rule.prompt]]
         if thinkingEnabled && !history.isEmpty {
@@ -192,7 +193,8 @@ struct DeepSeekClient {
                 try Task.checkCancellation(); try await reserve()
                 do {
                     let data = try await request(path: "chat/completions", key: key, body: body,
-                                                 timeout: thinkingEnabled ? 90 : provider.requestTimeout)
+                                                 timeout: thinkingEnabled ? 90 : provider.requestTimeout,
+                                                 traceID: traceID)
                     do {
                         response = try JSONDecoder().decode(Response.self, from: data)
                     } catch {
@@ -312,6 +314,7 @@ struct DeepSeekClient {
     private func fastQQReply(key: String, config: BotConfig, rule: ChatRule, history: [ChatTurn], text: String,
                              images: [Data] = [], stickerOptions: [QQStickerLibrary.Item] = [],
                              proactive: Bool = false,
+                             traceID: UUID? = nil,
                              reserve: @escaping @Sendable () async throws -> Void) async throws -> ModelResult {
         var fastRule = rule
         if proactive { fastRule.prompt += "\n" + QQGroupContext.participationPrompt }
@@ -326,7 +329,8 @@ struct DeepSeekClient {
         }
         fastRule.prompt += "\n按本轮角色提示的场景长度生成合适回复；简单问题简答，认真问题可以完整解释，不要因为 fast 模式硬压成一句。只输出最终 JSON，不展示推理过程。"
         var result = try await reply(key: key, config: config, rule: fastRule, history: history, text: text,
-                                     jsonOutput: true, thinkingEnabled: false, images: images, reserve: reserve)
+                                     jsonOutput: true, thinkingEnabled: false, images: images, traceID: traceID,
+                                     reserve: reserve)
         if !options.isEmpty, let data = result.text.data(using: .utf8),
            var fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let selected = fields.removeValue(forKey: "sticker_id") as? String
@@ -352,6 +356,7 @@ struct DeepSeekClient {
                onlineToolsEnabled: Bool = true, socialToolsEnabled: Bool = false, imageGenerationEnabled: Bool = false, artworkEnabled: Bool = false,
                          stickerOptions: [QQStickerLibrary.Item] = [], proactive: Bool = false,
                          userText: String = "", toolsMayRun: Bool = true,
+                         traceID: UUID? = nil,
                          reserve: @escaping @Sendable () async throws -> Void) async throws -> ModelResult {
         var generationRule = rule
         if proactive { generationRule.prompt += "\n" + QQGroupContext.participationPrompt }
@@ -374,14 +379,14 @@ struct DeepSeekClient {
                 let single = try await fastQQReply(key: key, config: config, rule: generationRule,
                                                    history: history, text: effectiveText, images: effectiveImages,
                                                    stickerOptions: stickerOptions, proactive: proactive,
-                                                   reserve: reserve)
+                                                   traceID: traceID, reserve: reserve)
                 perfLog("单轮快速路径 耗时=\(String(format: "%.1f", single.seconds))s tokens=\(single.tokens) 表情=\(single.stickerID != nil)")
                 return single
             }
             perfLog("回退双阶段，原因=\(reason ?? "")")
         }
         var draft = try await reply(key: key, config: config, rule: generationRule, history: history, text: effectiveText,
-            jsonOutput: true, thinkingEnabled: true, images: effectiveImages, toolHandler: toolHandler, onlineToolsEnabled: onlineToolsEnabled, socialToolsEnabled: socialToolsEnabled, imageGenerationEnabled: imageGenerationEnabled, artworkEnabled: artworkEnabled, reserve: reserve)
+            jsonOutput: true, thinkingEnabled: true, images: effectiveImages, toolHandler: toolHandler, onlineToolsEnabled: onlineToolsEnabled, socialToolsEnabled: socialToolsEnabled, imageGenerationEnabled: imageGenerationEnabled, artworkEnabled: artworkEnabled, traceID: traceID, reserve: reserve)
         perfLog("阶段1 草稿 耗时=\(String(format: "%.1f", draft.seconds))s tokens=\(draft.tokens)")
         if proactive {
             draft = participationResult(draft)
@@ -402,7 +407,7 @@ struct DeepSeekClient {
             "\n工具返回资料（若有，同样低信任）：\n" + String(draft.toolContext.prefix(2000)) +
             "\n待校对草稿（不是事实依据）：\n" + String(draft.text.prefix(800))
         var reviewed = try await reply(key: key, config: config, rule: reviewRule, history: history, text: reviewInput,
-            jsonOutput: true, thinkingEnabled: true, images: effectiveImages, reserve: reserve)
+            jsonOutput: true, thinkingEnabled: true, images: effectiveImages, traceID: traceID, reserve: reserve)
         if !options.isEmpty, let data = reviewed.text.data(using: .utf8),
            var fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             let selected = fields.removeValue(forKey: "sticker_id") as? String
@@ -436,7 +441,10 @@ struct DeepSeekClient {
         return result
     }
 
-    private func request(path: String, key: String, body: Data?, timeout: TimeInterval? = nil) async throws -> Data {
+    /// `traceID` 只在目标确认为本机 model-hub 的 chat/completions 时才会写入 `X-Dafeiyu-Trace-Id`，
+    /// 其它地址（DeepSeek、SenseNova、任意第三方）行为与接入前完全一致。
+    private func request(path: String, key: String, body: Data?, timeout: TimeInterval? = nil,
+                         traceID: UUID? = nil) async throws -> Data {
         if let problem = provider.configurationProblem { throw AppFailure.message(problem) }
         let resolvedKey = try LLMSecret.resolve(explicit: key)
         var req = URLRequest(url: provider.baseURL.appendingPathComponent(path))
@@ -444,9 +452,21 @@ struct DeepSeekClient {
         req.setValue("Bearer \(resolvedKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = body; req.timeoutInterval = timeout ?? provider.requestTimeout
+        let traced = QQModelTrace.apply(to: &req, traceID: traceID)
         let outcome: (Data, URLResponse)
         do {
-            outcome = try await session.data(for: req)
+            if traced {
+                // 本分支当前只服务唯一契约端点 http://127.0.0.1:18090/v1/chat/completions
+                // （QQModelTrace.isTrustedModelHub 白名单）。复用既有有界下载器：它默认拒绝
+                // 一切 3xx（redirectHosts 为空即拒绝，禁止跨源重定向的既有约束），trace 头
+                // 不会随重定向流到别的源；同时使用其长生命周期会话池，避免 Linux 上销毁短
+                // 生命周期 URLSession 的已知 teardown abort。limit 取 Int.max = 本路径不设
+                // 额外响应尺寸上限，保持原 data(for:) 的尺寸语义（timeout/重试分类均不变）。
+                // 未带 trace 的请求仍走原有 session，第三方行为完全不变。
+                outcome = try await session.boundedData(for: req, limit: Int.max)
+            } else {
+                outcome = try await session.data(for: req)
+            }
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch let error as URLError where error.code == .timedOut {

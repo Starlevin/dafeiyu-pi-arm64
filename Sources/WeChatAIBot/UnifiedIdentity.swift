@@ -138,4 +138,7 @@ public struct UnifiedAuditEntry: Codable, Sendable, Equatable {
     public var tokens: Int
     public var durationMs: Int
     public var outcome: String
+    /// Opaque correlation fields exist only for turns that reach generation.
+    public var modelTraceID: String? = nil
+    public var inboundTraceDigest: String? = nil
 }

@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import Testing
 import BotCore
 @testable import WeChatAIBot
@@ -37,6 +40,34 @@ private actor CallCounter {
     private(set) var count = 0
     func increment() { count += 1 }
     func value() -> Int { count }
+}
+
+private final class DirectTraceFixture: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var headers: [String] = []
+
+    static func reset() { lock.lock(); headers = []; lock.unlock() }
+    static var traceHeaders: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return headers
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+
+    override func startLoading() {
+        Self.lock.lock()
+        Self.headers.append(request.value(forHTTPHeaderField: QQModelTrace.headerName) ?? "")
+        Self.lock.unlock()
+        let body = #"{"choices":[{"message":{"content":"{\"text\":\"合成短回复\",\"emotion\":\"neutral\",\"intensity\":1}"},"finish_reason":"stop"}]}"#
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+                                       headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
 }
 
 private func validJSON(_ text: String) -> String {
@@ -80,6 +111,47 @@ private func inbound(_ text: String = "合成消息",
 }
 
 @Suite(.serialized) struct UnifiedCoreTests {
+
+    @Test func directGroupReplyJoinsReviewedRequestsToAuditWithoutRepeatingOnReplay() async throws {
+        DirectTraceFixture.reset()
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [DirectTraceFixture.self]
+        let session = URLSession(configuration: sessionConfig)
+        defer { session.invalidateAndCancel() }
+        let provider = LLMProvider(kind: .custom,
+                                   baseURL: URL(string: "http://127.0.0.1:18090/v1")!,
+                                   modelOverride: "fixture", maxRetries: 0)
+        let core = UnifiedReplyCore(
+            config: makeConfig(requireAt: true),
+            generator: DeepSeekReplyGenerator(client: DeepSeekClient(provider: provider, session: session)),
+            modelKey: "synthetic-key", journal: freshJournal()
+        )
+        let candidate = inbound("测试问句？", msgId: "synthetic-message-id-1")
+        let outcome = await core.handle(candidate)
+        #expect(outcome.reply.action == "reply")
+        #expect(outcome.modelCalled)
+        let expected = UnifiedReplyCore.modelHubTraceID(
+            forIdempotencyKey: "wechat|fixture-account|group|fixture-group|synthetic-message-id-1"
+        )
+        let headers = DirectTraceFixture.traceHeaders
+        #expect(headers == Array(repeating: QQModelTrace.normalized(expected), count: 2))
+        let audit = core.auditSnapshot()
+        #expect(audit.first?.modelTraceID == headers.first)
+        #expect(audit.first?.inboundTraceDigest == "51cfc0d3bc69")
+
+        let replay = await core.handle(candidate)
+        #expect(replay.gate == "durable_replay")
+        #expect(!replay.modelCalled)
+        #expect(DirectTraceFixture.traceHeaders == headers)
+        #expect(core.auditSnapshot().last?.modelTraceID == nil)
+    }
+
+    @Test func olderAuditJSONWithoutOptionalTraceFieldsRemainsDecodable() throws {
+        let old = #"{"at":1,"scope":"scope","reason":"ignored","tokens":0,"durationMs":2,"outcome":"ignore"}"#
+        let entry = try JSONDecoder().decode(UnifiedAuditEntry.self, from: Data(old.utf8))
+        #expect(entry.modelTraceID == nil)
+        #expect(entry.inboundTraceDigest == nil)
+    }
 
     @Test func defaultConfigIsFailClosed() {
         let c = UnifiedCoreConfig.fromEnvironment([:]) // 无 DAFEIYU_UNIFIED_PILOT
