@@ -27,6 +27,16 @@ struct UnifiedGroupMemoryNote: Codable, Sendable, Equatable {
     let label: String
     let value: String
     let kind: String
+    var inferred: Bool? = nil
+
+    private static let naturalForms: [(String, NSRegularExpression)] = [
+        ("task", #"^(?:我们|大家|群里)(?:已经|刚刚)?(?:约定|约好|决定|定好)(?:了)?[，,:：\s]*(?:把)?([^，,。；;:：]{2,20}?)(?:定在|定于|定为|改到|改为|安排在|在|是|为)([^，,。；;？?！!]{2,116})[。！!]?$"#),
+        ("fact", #"^(?:我们|大家|群里)(?:已经|刚刚)?确认(?:了)?[，,:：\s]*([^，,。；;:：]{2,20}?)(?:是在|在|是|为)([^，,。；;？?！!]{2,116})[。！!]?$"#),
+        ("preference", #"^(?:我们|大家|群里)(?:平时|一直|通常)(?:都)?(?:对|在)([^，,。；;:：]{2,20}?)(?:更喜欢|更习惯|偏好)([^，,。；;？?！!]{2,116})[。！!]?$"#),
+        ("event", #"^(?:我们|大家|群里)(?:刚|刚刚|已经)(?:完成了|参加了|打完了)([^，,。；;:：]{2,20})[，,](?:结果|成绩)(?:是|为)([^，,。；;？?！!]{2,116})[。！!]?$"#)
+    ].compactMap { kind, pattern in
+        (try? NSRegularExpression(pattern: pattern)).map { (kind, $0) }
+    }
 
     static func parse(_ text: String) -> Self? {
         guard text.count <= 180, !text.contains(where: \.isNewline) else { return nil }
@@ -43,6 +53,32 @@ struct UnifiedGroupMemoryNote: Codable, Sendable, Equatable {
         guard assignment.count == 2 else { return nil }
         let label = assignment[0].trimmingCharacters(in: .whitespaces)
         let value = assignment[1].trimmingCharacters(in: .whitespaces)
+        return checked(label, value, kind: kind)
+    }
+
+    static func infer(from text: String) -> Self? {
+        guard text.count <= 180, !text.contains(where: \.isNewline) else { return nil }
+        let lower = text.lowercased()
+        guard !["？", "?", "“", "”", "如果", "可能", "也许", "听说", "据说", "待定",
+                "暂定", "不确定", "未确定", "尚未", "还没", "转发", "朋友圈",
+                "qq动态", "qq空间", "qzone"].contains(where: { lower.contains($0) }),
+              !QQMemoryRedactor.containsSensitive(text) else { return nil }
+        let full = NSRange(text.startIndex..<text.endIndex, in: text)
+        for (kind, pattern) in naturalForms {
+            guard let match = pattern.firstMatch(in: text, range: full),
+                  let topic = Range(match.range(at: 1), in: text),
+                  let detail = Range(match.range(at: 2), in: text) else { continue }
+            let label = text[topic].trimmingCharacters(in: .whitespaces)
+            let value = text[detail].trimmingCharacters(in: .whitespaces)
+            guard !label.hasSuffix("不"), !label.hasSuffix("没"),
+                  var note = checked(label, value, kind: kind) else { return nil }
+            note.inferred = true
+            return note
+        }
+        return nil
+    }
+
+    private static func checked(_ label: String, _ value: String, kind: String) -> Self? {
         guard (1...20).contains(label.count), (1...140).contains(value.count),
               !label.lowercased().contains("cookie"),
               !QQMemoryRedactor.containsSensitive(label + "：" + value) else { return nil }
@@ -167,6 +203,7 @@ public actor UnifiedIdempotencyJournal {
             guard let archive = try groupArchive(memory.sessionDigest, create: true) else { return false }
             try archive.recordConfirmedGroupNote(id: receipt.uuidString, label: note.label,
                                                   value: note.value, kind: note.kind,
+                                                  inferred: note.inferred == true,
                                                   at: Date(timeIntervalSince1970: confirmedAt))
             archivedNoteReceipts.insert(receipt)
             return true

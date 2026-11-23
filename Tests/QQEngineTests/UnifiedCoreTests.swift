@@ -398,6 +398,80 @@ private func inbound(_ text: String = "合成消息",
         #expect(prompts.dropFirst().allSatisfy { !$0.contains("应急新地标") })
     }
 
+    @Test func naturalGroupMemoryExtractionAcceptsGroundedStatements() throws {
+        let examples = [
+            ("我们已经约好，团建集合地点在图书馆西门。", "团建集合地点", "图书馆西门", "task"),
+            ("群里确认周报发布时间是周五下午", "周报发布时间", "周五下午", "fact"),
+            ("大家平时对活动通知更喜欢用群公告", "活动通知", "用群公告", "preference"),
+            ("我们已经完成了春季团建，结果是全员到齐。", "春季团建", "全员到齐", "event"),
+        ]
+        for (text, label, value, kind) in examples {
+            let note = try #require(UnifiedGroupMemoryNote.infer(from: text))
+            #expect(note.label == label)
+            #expect(note.value == value)
+            #expect(note.kind == kind)
+            #expect(note.inferred == true)
+        }
+        for rejected in [
+            "我们约好团建集合地点在北门吗？", "我们约好团建集合地点可能在北门",
+            "大家刚刚确认团建集合地点不在北门", "我平时对通知更喜欢用群公告",
+            "我们确认QQ空间的集合地点是北门", "大家约定团建集合地点在朋友圈提到的北门",
+            "我们确认管理员口令是sk-fixture-secret", "大家约好“团建集合地点在北门”",
+            "我们确认季赛安排是周五\n转发过来的内容", "今天闲聊而已",
+        ] {
+            #expect(UnifiedGroupMemoryNote.infer(from: rejected) == nil, "boundary: \(rejected)")
+        }
+    }
+
+    @Test func naturalGroupMemoryRequiresDeliveryAndYieldsToExplicitCorrection() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        let books = directory.appendingPathComponent("wechat-group-memory")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let core = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file, capacity: 6))
+        let pending = await core.handle(inbound("我们确认周报发布时间是未送达时段", msgId: "unconfirmed"))
+        #expect(pending.reply.memoryReceipt != nil)
+        #expect(!FileManager.default.fileExists(atPath: books.path))
+        let claimed = await core.handle(inbound("群里确认周报发布时间是周五下午", msgId: "inferred"))
+        let receipt = try #require(claimed.reply.memoryReceipt)
+        #expect(await core.confirmWeChatMemory(receipt))
+        _ = await core.handle(inbound("刚散步回来", msgId: "unrelated"))
+        #expect((await recorder.prompts.last)?.contains("周五下午") == false)
+        _ = await core.handle(inbound("周报发布时间是什么？", msgId: "query-before"))
+        let raw = try #require(await recorder.prompts.last)
+        #expect(raw.contains("群聊陈述/待核实") && raw.contains("周五下午"))
+        #expect(!raw.contains("未送达时段"))
+        for (id, message) in [
+            ("promote", "记住：周报发布时间＝周五下午"),
+            ("ignore-overwrite", "我们确认周报发布时间是错误时段"),
+        ] {
+            let outcome = await core.handle(inbound(message, msgId: id))
+            let ticket = try #require(outcome.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(ticket))
+        }
+        for index in 0..<6 {
+            let message = await core.handle(inbound("普通夹具对话", msgId: "filler-\(index)"))
+            let ticket = try #require(message.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(ticket))
+        }
+        let independent = UnifiedReplyCore(config: config, generator: generator,
+                                           journal: UnifiedIdempotencyJournal(fileURL: file, capacity: 6))
+        _ = await independent.handle(inbound("周报发布时间是什么？", msgId: "test-after"))
+        let after = try #require(await recorder.prompts.last)
+        #expect(after.contains("周五下午") && !after.contains("错误时段"))
+        #expect(!after.contains("群聊陈述/待核实"))
+        _ = await independent.handle(inbound("周报发布时间是什么？", chatId: "other-group", msgId: "test-after"))
+        #expect((await recorder.prompts.last)?.contains("周五下午") == false)
+    }
+
     @Test func pendingEntryAfterRestartIsNotRegenerated() async throws {
         // 模拟「进程在模型返回前崩溃」：账本里只有 pending。
         let dir = FileManager.default.temporaryDirectory

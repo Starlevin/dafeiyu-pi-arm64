@@ -39,12 +39,15 @@ public struct QQMemoryItem: Codable, Equatable, Sendable, Identifiable {
     public let sourceIDs: [String]
     public let updatedAt: Date
     public let expiresAt: Date
+    public let inferredFromConversation: Bool?
     public init(id: String = UUID().uuidString, subject: String, kind: String, text: String,
                 keywords: [String] = [], importance: Int = 2, sourceIDs: [String] = [],
-                updatedAt: Date, expiresAt: Date, invalidatedAt: Date? = nil) {
+                updatedAt: Date, expiresAt: Date, invalidatedAt: Date? = nil,
+                inferredFromConversation: Bool? = nil) {
         self.id = id; self.subject = subject; self.kind = kind; self.text = text
         self.keywords = keywords; self.importance = importance; self.sourceIDs = sourceIDs
         self.updatedAt = updatedAt; self.expiresAt = expiresAt; self.invalidatedAt = invalidatedAt
+        self.inferredFromConversation = inferredFromConversation
     }
     public var invalidatedAt: Date?
     public func current(_ now: Date) -> Bool { invalidatedAt == nil && expiresAt > now }
@@ -249,7 +252,10 @@ public struct QQMemoryIndex: Sendable {
             for id in matches where records[id]?.subject == subject { scores[id, default: 0] += weight }
         }
         // Small persistent context: current speaker's profile and open tasks, even without word overlap.
-        for item in records.values where item.subject == subject && ["preference", "task", "legacy"].contains(item.kind) { scores[item.id, default: 0] += 1 }
+        for item in records.values where item.subject == subject && item.inferredFromConversation != true
+            && ["preference", "task", "legacy"].contains(item.kind) {
+            scores[item.id, default: 0] += 1
+        }
         return scores.compactMap { id, score -> (QQMemoryItem, Double)? in
             guard let item = records[id], item.subject == subject,
                   item.current(now) || (history && now.timeIntervalSince(item.invalidatedAt ?? item.expiresAt) < 90 * 86400) else { return nil }
@@ -262,7 +268,14 @@ public struct QQMemoryIndex: Sendable {
         let formatter = ISO8601DateFormatter(); formatter.formatOptions = [.withFullDate]
         var lines: [String] = [], count = 0
         for item in search(query, subject: subject, now: now, history: historical) {
-            let state = !item.current(now) ? "历史/已失效，不能当作现在" : item.kind == "legacy" ? "旧摘要/未经逐条核验" : item.kind == "episode" ? "历史片段/当时状态" : "已记录"
+            let state: String
+            if !item.current(now) {
+                state = "历史/已失效，不能当作现在"
+            } else if item.inferredFromConversation == true {
+                state = "群聊陈述/待核实"
+            } else {
+                state = item.kind == "legacy" ? "旧摘要/未经逐条核验" : item.kind == "episode" ? "历史片段/当时状态" : "已记录"
+            }
             let line = "[\(item.subject)·\(item.kind)·\(formatter.string(from: item.updatedAt))·\(state)] \(item.text)"
             if count + line.count + 1 > characters { continue }
             lines.append(line); count += line.count + 1

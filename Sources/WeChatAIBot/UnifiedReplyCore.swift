@@ -514,7 +514,10 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         }
 
         var modelInput = String(body.prefix(config.maxInputCharacters))
-        let groupNote = memoryScope != nil && inbound.atMe ? UnifiedGroupMemoryNote.parse(body) : nil
+        let groupNote = memoryScope.flatMap { _ in
+            let explicit = inbound.atMe ? UnifiedGroupMemoryNote.parse(body) : nil
+            return explicit ?? UnifiedGroupMemoryNote.infer(from: body)
+        }
         if let memoryScope, groupNote == nil {
             let facts = await journal.groupMemoryContext(for: memoryScope, query: body)
             if !facts.isEmpty {
