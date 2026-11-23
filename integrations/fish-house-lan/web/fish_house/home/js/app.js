@@ -111,6 +111,7 @@
 
   var activePack = null;
   var morphPending = false;
+  var characterUnavailable = false;
   var hudDimTimer = 0;
   var bubbleTimer = 0;
   var toastTimer = 0;
@@ -254,12 +255,14 @@
       if (err || !pack) {
         if (mTag) mTag.textContent = "加载失败";
         showToast("目标形态素材加载失败，已安全保留当前形态", 3200);
-        if (!activePack) showStaticFallback("无法载入角色素材，已切换静态兼容画面，控制台仍可使用。");
+        characterUnavailable = !activePack;
+        syncStageFallback();
         return;
       }
       var loadDt = Math.round(((window.performance && performance.now) ? performance.now() : Date.now()) - t0);
       var doMorph = !!(activePack && o.animate !== false);
       activePack = pack;
+      characterUnavailable = false;
       currentForm = targetForm;
       savePref(PREF_KEYS.form, currentForm);
       if (doMorph) formSwitchCount += 1;
@@ -302,6 +305,17 @@
     if (fb) fb.className = "";
   }
 
+  function syncStageFallback() {
+    var fallback = $("fh-fallback");
+    var visualReady = (liveFrame && liveFrame.className === "fh-live-frame ready") ||
+      (liveStill && liveStill.complete && liveStill.naturalWidth > 0);
+    if (visualReady || !characterUnavailable) {
+      hideStaticFallback();
+    } else if (fallback && fallback.className !== "on") {
+      showStaticFallback("无法载入角色素材，已切换静态兼容画面，控制台仍可使用。");
+    }
+  }
+
   // ---- Theme, Performance Modes (auto/high/eco + WebGL toggle) & Default Homepage ----
   function lightweightVideo() {
     var ua = navigator.userAgent || "";
@@ -331,6 +345,7 @@
     } else if (still && !liveStill) {
       liveStill = makeEl("img", "fh-live-static");
       liveStill.alt = "";
+      liveStill.addEventListener("load", syncStageFallback);
       liveStill.src = window.innerHeight > window.innerWidth
         ? "home/assets/rooms/room-mobile-day.jpg"
         : "home/assets/rooms/room-pc-day.jpg";
@@ -348,6 +363,7 @@
         if (liveFrame === frame && frame.className !== "fh-live-frame ready") {
           layer.removeChild(frame);
           liveFrame = null;
+          syncStageFallback();
         }
       }, 15000);
     }
@@ -356,6 +372,7 @@
     } else {
       renderer.resume();
     }
+    syncStageFallback();
   }
 
   window.addEventListener("message", function (event) {
@@ -364,6 +381,7 @@
         event.data.type !== "dafeiyu-live-ready") return;
     liveFrame.className = "fh-live-frame ready";
     renderer.pause();
+    syncStageFallback();
   });
 
   function applyTheme(nextTheme) {
@@ -447,6 +465,8 @@
   function evaluateMeasuredAdaptive() {
     if (adaptiveEvaluated) return;
     adaptiveEvaluated = true;
+    // Canvas and character-pack metrics cannot measure the independent player.
+    if (liveFrame || liveStill) return;
     var m = renderer.getMetrics();
     var pErrs = packLoader.getMetrics().errors.length;
     var poorPerf = (m.fps > 0 && m.fps < 18 && m.p10Fps < 14) || (m.firstPaintMs > 4500) || (pErrs >= 3);
