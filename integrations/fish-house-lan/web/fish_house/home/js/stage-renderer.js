@@ -899,11 +899,11 @@
       var frFrom = getFrameForPack(morph.fromPack, currentState, 0);
       var frTo = getFrameForPack(morph.toPack, currentState, frameIndex);
 
-      var outAlpha = t < 0.48 ? 1.0 - easeInOutCubic(t / 0.48) : 0;
-      var outScale = 1.0 - 0.06 * Math.min(1, t / 0.48);
-      var inNorm = t > 0.40 ? (t - 0.40) / 0.60 : 0;
-      var inAlpha = t > 0.40 ? easeOutQuad(inNorm) : 0;
-      var inScale = 0.92 + 0.08 * easeOutQuad(inNorm);
+      var blend = easeInOutCubic(Math.max(0, t));
+      var outAlpha = frTo ? 1.0 - blend : 1.0;
+      var outScale = 1.0 - 0.06 * blend;
+      var inAlpha = frFrom ? blend : 1.0;
+      var inScale = 0.92 + 0.08 * blend;
 
       var drawnAny = false;
       var refFr = frTo || frFrom;
@@ -1001,8 +1001,9 @@
       if (morph && morphT >= 0) {
         var frFrom = getFrameForPack(morph.fromPack, currentState, 0);
         var frTo = getFrameForPack(morph.toPack, currentState, frameIndex);
-        var outA = morphT < 0.48 ? 1.0 - easeInOutCubic(morphT / 0.48) : 0;
-        var inA = morphT > 0.40 ? easeOutQuad((morphT - 0.40) / 0.60) : 0;
+        var blend = easeInOutCubic(Math.max(0, morphT));
+        var outA = frTo ? 1.0 - blend : 1.0;
+        var inA = frFrom ? blend : 1.0;
         if (frFrom && outA > 0.01) {
           var plF = computeCharPlacement(morph.fromPack, frFrom, cw, ch, camScale, 1.0 - 0.05 * morphT, 0);
           webgl.drawQuad(frFrom.img, frFrom.rect[0], frFrom.rect[1], frFrom.rect[2], frFrom.rect[3],

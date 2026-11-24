@@ -126,6 +126,7 @@
   var adaptiveEvaluated = false;
   var formSwitchCount = 0;
   var liveFrame = null;
+  var liveRetireTimer = 0;
   var liveStill = null;
   var adaptiveEco = false;
 
@@ -232,8 +233,8 @@
     }
     var dockMorph = $("fh-dock-morph");
     if (dockMorph) dockMorph.textContent = (currentForm === "adult") ? "切换 Q版" : "切换 成年";
-    var dockTheme = $("fh-dock-theme");
-    if (dockTheme) dockTheme.textContent = THEME_NAMES[currentTheme] || "晴朗晨光";
+    var dockVideo = $("fh-dock-video");
+    if (dockVideo) dockVideo.classList.toggle("active", currentTheme === "video" && currentForm === "adult");
     var quickTheme = $("fh-btn-theme-quick");
     if (quickTheme) quickTheme.textContent = THEME_ICONS[currentTheme] || "☀";
   }
@@ -268,9 +269,19 @@
       if (doMorph) formSwitchCount += 1;
 
       hideStaticFallback();
-      renderer.setPack(pack, doMorph);
+      var leavingLive = liveFrame && liveFrame.classList.contains("ready");
+      renderer.setPack(pack, doMorph && !leavingLive);
       renderer.setState(eventEngine.getState().state);
-      syncLiveScene();
+      if (o.theme) {
+        applyTheme(o.theme);
+        // Keep explicit scene links reproducible on reload without reloading now.
+        var url = new URL(window.location.href);
+        url.searchParams.set("form", currentForm);
+        url.searchParams.set("theme", currentTheme);
+        window.history.replaceState(null, "", url.href);
+      } else {
+        syncLiveScene();
+      }
       setSegActive("fh-seg-form", "data-form", currentForm);
       syncTopHud(eventEngine.getState());
       wakeHud();
@@ -293,8 +304,8 @@
     if (img) {
       var portrait = window.innerHeight > window.innerWidth;
       img.src = portrait
-        ? "home/assets/rooms/room-mobile-day.jpg"
-        : "home/assets/rooms/room-pc-day.jpg";
+        ? "./home/assets/rooms/fallback-whale-android.png"
+        : "./home/assets/rooms/fallback-whale-pc.png";
     }
     if (txt && msg) txt.textContent = msg;
     if (fb) fb.className = "on";
@@ -307,7 +318,7 @@
 
   function syncStageFallback() {
     var fallback = $("fh-fallback");
-    var visualReady = (liveFrame && liveFrame.className === "fh-live-frame ready") ||
+    var visualReady = (liveFrame && liveFrame.classList.contains("ready")) ||
       (liveStill && liveStill.complete && liveStill.naturalWidth > 0);
     if (visualReady || !characterUnavailable) {
       hideStaticFallback();
@@ -334,10 +345,32 @@
     var videoSelected = currentTheme === "video" && currentForm === "adult";
     var still = videoSelected && lightweightVideo();
     var consoleCover = drawerOpen && document.body.classList.contains("console-home");
-    var useFrame = videoSelected && !still && !document.hidden && !consoleCover;
+    var visible = !document.hidden && !consoleCover;
+    var useFrame = videoSelected && !still && visible;
     if (!useFrame && liveFrame) {
-      layer.removeChild(liveFrame);
-      liveFrame = null;
+      if (visible && !still && liveFrame.classList.contains("ready")) {
+        // Resume the canvas before fading out the decoded video.
+        if (!liveRetireTimer) {
+          var retiringFrame = liveFrame;
+          renderer.resume();
+          retiringFrame.classList.add("retiring");
+          liveRetireTimer = setTimeout(function () {
+            layer.removeChild(retiringFrame);
+            liveFrame = null;
+            liveRetireTimer = 0;
+            syncStageFallback();
+          }, 200);
+        }
+      } else {
+        clearTimeout(liveRetireTimer);
+        liveRetireTimer = 0;
+        layer.removeChild(liveFrame);
+        liveFrame = null;
+      }
+    } else if (useFrame && liveRetireTimer) {
+      clearTimeout(liveRetireTimer);
+      liveRetireTimer = 0;
+      liveFrame.classList.remove("retiring");
     }
     if (!still && liveStill) {
       layer.removeChild(liveStill);
@@ -347,8 +380,8 @@
       liveStill.alt = "";
       liveStill.addEventListener("load", syncStageFallback);
       liveStill.src = window.innerHeight > window.innerWidth
-        ? "home/assets/rooms/room-mobile-day.jpg"
-        : "home/assets/rooms/room-pc-day.jpg";
+        ? "./home/assets/rooms/fallback-whale-android.png"
+        : "./home/assets/rooms/fallback-whale-pc.png";
       layer.appendChild(liveStill);
     }
     if (useFrame && !liveFrame) {
@@ -360,14 +393,14 @@
       liveFrame = frame;
       layer.appendChild(frame);
       setTimeout(function () {
-        if (liveFrame === frame && frame.className !== "fh-live-frame ready") {
+        if (liveFrame === frame && !frame.classList.contains("ready")) {
           layer.removeChild(frame);
           liveFrame = null;
           syncStageFallback();
         }
       }, 15000);
     }
-    if (document.hidden || still || (liveFrame && liveFrame.className === "fh-live-frame ready")) {
+    if (!visible || still || (useFrame && liveFrame.classList.contains("ready"))) {
       renderer.pause();
     } else {
       renderer.resume();
@@ -379,8 +412,8 @@
     if (!liveFrame || event.origin !== window.location.origin ||
         event.source !== liveFrame.contentWindow || !event.data ||
         event.data.type !== "dafeiyu-live-ready") return;
-    liveFrame.className = "fh-live-frame ready";
-    renderer.pause();
+    liveFrame.classList.add("ready");
+    if (!liveRetireTimer) renderer.pause();
     syncStageFallback();
   });
 
@@ -393,6 +426,15 @@
     setSegActive("fh-seg-theme", "data-theme", currentTheme);
     syncTopHud(eventEngine.getState());
     wakeHud();
+  }
+
+  function selectVideoScene() {
+    if (currentForm !== "adult") {
+      switchForm("adult", { animate: false, theme: "video" });
+    } else {
+      applyTheme("video");
+    }
+    if (lightweightVideo()) showToast("当前设备或省电设置使用静态画面", 2600);
   }
 
   function applyPerfMode(mode, silent) {
@@ -1449,11 +1491,11 @@
     eventAdapter.runReplayScenario("chat_cycle");
     showToast("开始演练完整消息动画链", 1800);
   };
-  $("fh-dock-theme").onclick = function () {
+  $("fh-dock-video").onclick = selectVideoScene;
+  $("fh-btn-theme-quick").onclick = function () {
     var idx = (THEME_ORDER.indexOf(currentTheme) + 1) % THEME_ORDER.length;
     applyTheme(THEME_ORDER[idx]);
   };
-  $("fh-btn-theme-quick").onclick = $("fh-dock-theme").onclick;
   $("fh-dock-console").onclick = function () { openDrawer("console"); };
   $("fh-btn-drawer-top").onclick = function () { openDrawer("console"); };
   $("fh-drawer-close").onclick = closeDrawer;
@@ -1516,7 +1558,10 @@
   }
 
   wireSeg("fh-seg-form", "data-form", function (val) { switchForm(val, { animate: true }); });
-  wireSeg("fh-seg-theme", "data-theme", function (val) { applyTheme(val); });
+  wireSeg("fh-seg-theme", "data-theme", function (val) {
+    if (val === "video") selectVideoScene();
+    else applyTheme(val);
+  });
   wireSeg("fh-seg-perf", "data-perf", function (val) { applyPerfMode(val, false); });
   wireSeg("fh-seg-home", "data-home", function (val) {
     applyDefaultHome(val, false);

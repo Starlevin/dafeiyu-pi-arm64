@@ -127,10 +127,15 @@ html, body {
 
 .fh-live-frame {
   visibility: hidden;
+  transition: opacity 180ms ease-out;
 }
 
 .fh-live-frame.ready {
   visibility: visible;
+}
+
+.fh-live-frame.retiring {
+  opacity: 0;
 }
 
 .fh-live-static {
