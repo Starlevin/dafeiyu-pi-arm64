@@ -234,7 +234,7 @@ actor UnifiedState {
     private var recentBotReplies: [String: [String]] = [:]  // session -> 最近 BOT 回复（防复读）
     private var capacity: Int
     private var generation: UInt64 = 1
-    private var proactiveScores: [String: (day: Int, count: Int, last: Double)] = [:]
+    private var proactiveScores: [String: BudgetEntry] = [:]
     private struct ProactiveBudgetFile: Codable { var version: Int; var entries: [String: BudgetEntry] }
     private struct BudgetEntry: Codable { var day: Int; var count: Int; var last: Double }
     private let proactiveBudgetURL: URL?
@@ -247,7 +247,7 @@ actor UnifiedState {
             do {
                 let decoded = try JSONDecoder().decode(ProactiveBudgetFile.self, from: Data(contentsOf: url))
                 guard decoded.version == 1 else { throw CocoaError(.fileReadCorruptFile) }
-                self.proactiveScores = decoded.entries.mapValues { ($0.day, $0.count, $0.last) }
+                self.proactiveScores = decoded.entries
             } catch {
                 // A damaged budget must not silently reset the daily allowance.
                 proactiveBudgetUsable = false
@@ -266,22 +266,22 @@ actor UnifiedState {
         // the still-current legacy budget when a full-width key first appears.
         // Keep the old bucket until rollover, since another scope may share it.
         let legacyKey = "00000000" + key.suffix(8)
-        var entry = proactiveScores[key] ?? proactiveScores[legacyKey] ?? (day, 0, 0)
-        if entry.day != day { entry = (day, 0, 0) }
+        var entry = proactiveScores[key] ?? proactiveScores[legacyKey] ?? BudgetEntry(day: day, count: 0, last: 0)
         if entry.count >= dailyLimit { proactiveScores[key] = entry; return "proactive_daily_budget" }
         if entry.last > 0, now - entry.last < cooldown { proactiveScores[key] = entry; return "proactive_score_cooldown" }
-        entry.count += 1; entry.last = now; proactiveScores[key] = entry
-        guard persistProactiveBudgets() else { return "proactive_budget_storage_unavailable" }
+        entry.count += 1
+        entry.last = now
+        var reservation = proactiveScores
+        reservation[key] = entry
+        guard persistProactiveBudgets(reservation) else { return "proactive_budget_storage_unavailable" }
+        proactiveScores = reservation
         return nil
     }
-    private func persistProactiveBudgets() -> Bool {
+    private func persistProactiveBudgets(_ entries: [String: BudgetEntry]) -> Bool {
         guard let url = proactiveBudgetURL else { return true }
         do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let entries = proactiveScores.mapValues { BudgetEntry(day: $0.day, count: $0.count, last: $0.last) }
             let data = try JSONEncoder().encode(ProactiveBudgetFile(version: 1, entries: entries))
-            try data.write(to: url, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try UnifiedIdempotencyJournal.writeAtomically(data, to: url)
             return true
         } catch {
             print("unified_proactive_budget_persist_failed")

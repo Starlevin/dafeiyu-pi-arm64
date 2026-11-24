@@ -244,6 +244,32 @@ private func inbound(_ text: String = "合成消息",
         #expect(FileManager.default.fileExists(atPath: url.path))
     }
 
+    @Test func failedProactiveBudgetWriteAllowsRetryWithoutChargingTwice() async throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let parent = root.appendingPathComponent("budget", isDirectory: true)
+        let saved = root.appendingPathComponent("saved", isDirectory: true)
+        let url = parent.appendingPathComponent("score-budget.json")
+        defer { try? manager.removeItem(at: root) }
+        let first = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        let now = 1_800_000_000.0
+        #expect(await first.reserveProactive("scope", now: now, dailyLimit: 2) == nil)
+
+        try manager.moveItem(at: parent, to: saved)
+        try Data().write(to: parent)
+        #expect(await first.reserveProactive("scope", now: now + 20, dailyLimit: 2)
+                == "proactive_budget_storage_unavailable")
+        try manager.removeItem(at: parent)
+        try manager.moveItem(at: saved, to: parent)
+
+        #expect(await first.reserveProactive("scope", now: now + 21, dailyLimit: 2) == nil)
+        let mode = try manager.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
+        #expect(mode?.intValue == 0o600)
+        let restored = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await restored.reserveProactive("scope", now: now + 40, dailyLimit: 2)
+                == "proactive_daily_budget")
+    }
+
     @Test func corruptProactiveBudgetFailsClosed() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("unified-budget-corrupt-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
