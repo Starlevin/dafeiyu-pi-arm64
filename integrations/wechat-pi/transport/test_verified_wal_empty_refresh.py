@@ -290,7 +290,8 @@ class WalGroupReadPlanningTests(unittest.TestCase):
              patch.object(bridge.time, "monotonic", side_effect=lambda: elapsed), \
              patch.object(bridge.time, "sleep", side_effect=sleep):
             self.assertTrue(bridge.open_chat(app, target))
-        click.assert_called_once_with(150, 48, settle=0)
+        click.assert_called_once_with(150, 48, settle=0,
+                                      move_delay=0.03, hold_delay=0.03)
         self.assertEqual(elapsed, .125)
 
     def test_navigation_ambiguity_after_click_fails_without_clicking_again(self):

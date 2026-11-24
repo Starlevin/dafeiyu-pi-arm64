@@ -81,12 +81,13 @@ def move(x: int, y: int, settle: float = 0.15):
     time.sleep(settle)
 
 
-def click(x: int, y: int, button: int = 1, settle: float = 0.4):
-    move(x, y, 0.18)
+def click(x: int, y: int, button: int = 1, settle: float = 0.4, *,
+          move_delay: float = 0.18, hold_delay: float = 0.12):
+    move(x, y, move_delay)
     _libXtst.XTestFakeButtonEvent.argtypes = [c.c_void_p, c.c_uint, c.c_int, c.c_ulong]
     _libXtst.XTestFakeButtonEvent(_display(), button, 1, 0)
     _sync()
-    time.sleep(0.12)
+    time.sleep(hold_delay)
     _libXtst.XTestFakeButtonEvent(_display(), button, 0, 0)
     _sync()
     time.sleep(settle)

@@ -805,7 +805,10 @@ def open_chat(app, name, *, measure=False):
         return False
     x, y, w, h = matches[0]
     click_started = time.monotonic()
-    xi.click(x + min(40, w // 2), y + h // 2, settle=0)
+    # The sidebar has a freshly verified hit target. Readiness is proved
+    # below, and the composer and other clicks keep their original delays.
+    xi.click(x + min(40, w // 2), y + h // 2, settle=0,
+             move_delay=0.03, hold_delay=0.03)
     click_finished = time.monotonic()
     # Qt can expose the new group immediately or after rendering. Every
     # observation must prove the group, and no retries issue another click.
