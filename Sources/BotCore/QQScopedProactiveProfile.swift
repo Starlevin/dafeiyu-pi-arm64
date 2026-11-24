@@ -77,7 +77,12 @@ public struct QQScopedProactiveProfile: Sendable {
         localCalendar.component(.hour, from: date) < 8
     }
 
-    /// Natural mode evaluates each completed interval. The model still decides whether to speak.
+    /// A scoped group stays ready until it uses a qualifying opportunity.
+    public func advanceParticipationCount(_ count: Int) -> Int {
+        count < interval ? count + 1 : interval
+    }
+
+    /// Once ready, each eligible message has this mode's evaluation probability.
     public func shouldEvaluate(messageCount: Int, roll: Double) -> Bool {
         messageCount >= interval && roll >= 0 && roll < evaluationProbability
     }

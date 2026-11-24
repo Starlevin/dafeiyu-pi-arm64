@@ -92,4 +92,22 @@ struct QQScopedProactiveProfileTests {
         #expect(!p.canSpeak(at: clock(23), confirmed: (0..<30).map { clock(9, $0) }))
         #expect(p.canSpeak(at: clock(23), confirmed: [clock(10)]))
     }
+
+    @Test func quietOpportunityRemainsReadyAfterProbabilityOrCooldownMiss() {
+        let profile = QQScopedProactiveProfile(groupKey: "group:10001", mode: .quiet)
+        var count = 0
+        for _ in 0..<9 {
+            count = profile.advanceParticipationCount(count)
+            #expect(!profile.shouldEvaluate(messageCount: count, roll: 0))
+        }
+        count = profile.advanceParticipationCount(count)
+        #expect(count == 10)
+        #expect(!profile.shouldEvaluate(messageCount: count, roll: 0.9))
+        #expect(!profile.canSpeak(at: clock(10, 19), confirmed: [clock(10)]))
+        count = profile.advanceParticipationCount(count)
+        #expect(count == 10)
+        #expect(profile.canSpeak(at: clock(10, 20), confirmed: [clock(10)]))
+        #expect(profile.shouldEvaluate(messageCount: count, roll: 0.14))
+        #expect(!profile.canSpeak(at: clock(12), confirmed: [clock(9), clock(10), clock(11)]))
+    }
 }

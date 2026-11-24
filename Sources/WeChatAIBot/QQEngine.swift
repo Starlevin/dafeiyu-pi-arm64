@@ -1104,10 +1104,11 @@ struct QQEngineSharedState: Sendable {
             // Real mentions are independent: never increment or reset proactive progress.
             if !message.mentionsSelf {
                 if groupProfile != nil { countProactive(.ordinary, groupKey: message.key) }
-                let count = groupMessageCounts[message.key, default: 0] + 1
+                let previousCount = groupMessageCounts[message.key, default: 0]
+                let count = groupProfile?.advanceParticipationCount(previousCount) ?? (previousCount + 1)
                 let interval = groupProfile?.interval ?? config.effectiveGroupParticipationEvery
                 let reached = count >= interval
-                groupMessageCounts[message.key] = reached ? 0 : count
+                groupMessageCounts[message.key] = groupProfile == nil && reached ? 0 : count
                 guard reached else { return }
                 if let profile = groupProfile {
                     countProactive(.candidate, groupKey: message.key)
@@ -1143,6 +1144,7 @@ struct QQEngineSharedState: Sendable {
         }
         if message.group && !message.mentionsSelf && !proactive { return } // Memory capture alone never authorizes a reply.
         guard queue.count < Self.queueCapacity else { record(target.id, .skipped, "队列已满，本次触发不补发"); return }
+        if proactive && groupProfile != nil { groupMessageCounts[message.key] = 0 }
         let timing = detected.map { QQReplyTiming(detected: $0, group: message.group, proactive: proactive) }
         let work = Work.reply(message, target, proactive, groupContext, timing)
         let referencesBot = message.replyTo.map { reference in
