@@ -934,6 +934,31 @@ class ReviewRegressionTests(unittest.TestCase):
                 self.assertEqual(poller._next_interval(panel, now=now), interval)
         self.assertEqual(poller._next_interval(None, now=now), 2.0)
 
+    def test_concurrent_viewers_share_one_poller_until_last_disconnect(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import importlib.util
+        from unittest.mock import Mock
+        spec = importlib.util.spec_from_file_location(
+            "fh_server_parallel_viewers", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.qq_poller = Mock()
+        barrier = threading.Barrier(2)
+
+        def connect():
+            barrier.wait(timeout=2)
+            return mod.register_live_viewer()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = [pool.submit(connect) for _ in range(2)]
+            clients = [future.result(timeout=3) for future in pending]
+        self.assertEqual(mod.bridge.client_count, 2)
+        mod.qq_poller.start.assert_called_once()
+        mod.unregister_live_viewer(clients[0][0])
+        mod.qq_poller.stop.assert_not_called()
+        mod.unregister_live_viewer(clients[1][0])
+        mod.qq_poller.stop.assert_called_once()
+
     def test_health_file_cache_reads_atomic_replacements(self):
         import importlib.util
         import json

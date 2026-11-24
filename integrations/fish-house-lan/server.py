@@ -973,6 +973,24 @@ bridge = live_ws.LiveBridge(
     panel_reader=qq_panel_view,
     tick=0.25,
 )
+live_viewer_lock = threading.Lock()
+
+
+def register_live_viewer():
+    with live_viewer_lock:
+        registered = bridge.register() if bridge is not None else None
+        if registered is not None and qq_poller is not None and bridge.client_count == 1:
+            qq_poller.start()
+        return registered
+
+
+def unregister_live_viewer(client_id):
+    with live_viewer_lock:
+        if bridge is None:
+            return
+        bridge.unregister(client_id)
+        if qq_poller is not None and bridge.client_count == 0:
+            qq_poller.stop()
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -1328,13 +1346,10 @@ class Handler(SimpleHTTPRequestHandler):
             key = live_ws.validate_key(headers.get("sec-websocket-key"))
         except live_ws.WSError:
             return self._ws_error(400, "Bad key")
-        registered = bridge.register() if bridge is not None else None
+        registered = register_live_viewer()
         if registered is None:
             return self._ws_error(503, "Too many clients")
         cid, queue = registered
-        # 有观众才启动 QQ 后台轮询；最后一个观众离开就停。
-        if qq_poller is not None and bridge.client_count == 1:
-            qq_poller.start()
         try:
             accept = live_ws.compute_accept(key)
             parts = [
@@ -1354,10 +1369,7 @@ class Handler(SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
-            if bridge is not None:
-                bridge.unregister(cid)
-            if qq_poller is not None and bridge is not None and bridge.client_count == 0:
-                qq_poller.stop()
+            unregister_live_viewer(cid)
 
     def _ws_error(self, status, message):
         body = message.encode("utf-8")
@@ -1430,14 +1442,12 @@ class Handler(SimpleHTTPRequestHandler):
         if not live_ws.origin_allowed(self.headers.get("Origin"), self.headers.get("Host") or "",
                                       self.client_address[0], LAN_NET, self.allow_host):
             return self.send_error(403, "Same origin only")
-        registered = bridge.register()
+        registered = register_live_viewer()
         if registered is None:
             return self.send_error(503, "Too many clients")
         client_id, queue = registered
         self.close_connection = True
         try:
-            if qq_poller is not None and bridge.client_count == 1:
-                qq_poller.start()
             self.request.settimeout(5)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -1469,9 +1479,7 @@ class Handler(SimpleHTTPRequestHandler):
         except OSError:
             pass
         finally:
-            bridge.unregister(client_id)
-            if qq_poller is not None and bridge.client_count == 0:
-                qq_poller.stop()
+            unregister_live_viewer(client_id)
 
     def reply(self, data):
         body = safe_json(data)
