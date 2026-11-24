@@ -48,6 +48,7 @@ public struct UnifiedGenerationResult: Sendable {
     public var tokens: Int
     public var sources: [String] = []
     public var shouldSend: Bool = true
+    var proactiveSkipReason: ProactiveSkipReason? = nil
 }
 
 /// 生成器协议。生产实现 `DeepSeekReplyGenerator` 走真实 `DeepSeekClient`；
@@ -77,7 +78,8 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
                 traceID: request.modelTraceID, reserve: {}
             )
             return UnifiedGenerationResult(text: result.text, tokens: result.tokens,
-                                           shouldSend: result.shouldSend)
+                                           shouldSend: result.shouldSend,
+                                           proactiveSkipReason: result.proactiveSkipReason)
         }
         // 与 QQEngine.drain:1261 完全同一个入口；reserve 在 QQ 侧是额度/epoch 守卫，
         // 这里没有跨轮次发送额度需求，传空闭包即可（试点的额度门禁在 UnifiedCore 内）。
@@ -117,10 +119,12 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
         )
         if socialRequested && !succeeded {
             return UnifiedGenerationResult(text: QQSocialTools.unavailableReply, tokens: result.tokens,
-                                           shouldSend: result.shouldSend)
+                                           shouldSend: result.shouldSend,
+                                           proactiveSkipReason: result.proactiveSkipReason)
         }
         return UnifiedGenerationResult(text: result.text, tokens: result.tokens, sources: result.sources,
-                                       shouldSend: result.shouldSend)
+                                       shouldSend: result.shouldSend,
+                                       proactiveSkipReason: result.proactiveSkipReason)
     }
 }
 
@@ -804,9 +808,13 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         do {
             let result = try await generator.generate(request)
             if proactive && !publicQuestionFast && !result.shouldSend {
-                let silent = UnifiedReply.ignore("proactive_participation_declined", scope: scope, trace: trace)
-                await journal.complete(idemKey, reply: silent, ok: false, at: Date().timeIntervalSince1970)
-                return finish(silent, modelCalled: true, gate: "proactive_participation_declined")
+                let invalidDecision = result.proactiveSkipReason == .invalidModelDecision
+                let reason = invalidDecision ? "model_output_rejected" : "proactive_participation_declined"
+                let noReply = invalidDecision
+                    ? UnifiedReply.failure(reason, scope: scope, trace: trace)
+                    : UnifiedReply.ignore(reason, scope: scope, trace: trace)
+                await journal.complete(idemKey, reply: noReply, ok: false, at: Date().timeIntervalSince1970)
+                return finish(noReply, modelCalled: true, gate: reason)
             }
             // 9a) 提交前复核运行代次，撤回后旧结果作废
             let current = await state.currentGeneration()

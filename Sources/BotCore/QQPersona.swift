@@ -128,15 +128,24 @@ public struct QQPersona: Codable, Equatable, Sendable {
         let index = compact.unicodeScalars.reduce(0) { ($0 + Int($1.value)) % lines.count }
         return lines[index]
     }
+    /// Decode the framing shared by all model reply envelopes. Schema and consent
+    /// checks belong to each caller.
+    public static func replyJSONData(_ raw: String) -> Data? {
+        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.hasPrefix("```json"), normalized.hasSuffix("```") {
+            normalized = String(normalized.dropFirst(7).dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard normalized.utf8.count <= 16384 else { return nil }
+        return normalized.data(using: .utf8)
+    }
+
     public func decode(_ raw: String, input: String) -> QQReply {
         if let rebuff = rebuff(for: input) {
             let sharp = effectiveStyle == .tieba || (effectiveStyle == .teasing && banter > 0)
             return QQReply(text: limited(rebuff), emotion: sharp ? .annoyed : .neutral, intensity: sharp ? 3 : 0)
         }
         let fallback = QQReply(text: limited(effectiveStyle == .teasing ? "本鱼这次回复卡住了，没接上；稍后再说一句？" : "这次回复没处理好，请稍后再试一次。"), emotion: .neutral, intensity: 0, isFallback: true)
-        var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if normalized.hasPrefix("```json"), normalized.hasSuffix("```") { normalized = String(normalized.dropFirst(7).dropLast(3)).trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard normalized.utf8.count <= 16384, let data = normalized.data(using: .utf8),
+        guard let data = Self.replyJSONData(raw),
               let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               Set(fields.keys) == Set(["text", "emotion", "intensity"]),
               let reply = try? JSONDecoder().decode(QQReply.self, from: data),

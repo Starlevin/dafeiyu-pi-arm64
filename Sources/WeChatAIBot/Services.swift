@@ -492,8 +492,8 @@ struct DeepSeekClient {
     private func participationResult(_ result: ModelResult) -> ModelResult {
         var result = result
         struct Decision: Decodable { let participate: Bool }
-        let data = Data(result.text.utf8)
-        guard let decision = try? JSONDecoder().decode(Decision.self, from: data),
+        guard let data = QQPersona.replyJSONData(result.text),
+              let decision = try? JSONDecoder().decode(Decision.self, from: data),
               var fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             result.shouldSend = false
             result.proactiveSkipReason = .invalidModelDecision

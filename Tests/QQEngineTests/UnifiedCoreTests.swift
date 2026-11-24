@@ -17,13 +17,15 @@ private struct FixtureReplyGenerator: ReplyGenerating {
     var calls: CallCounter
     var recorder: RequestRecorder? = nil
     var shouldSend = true
+    var proactiveSkipReason: ProactiveSkipReason? = nil
 
     func generate(_ request: UnifiedGenerationRequest) async throws -> UnifiedGenerationResult {
         await calls.increment()
         if fail { throw AppFailure.message("synthetic model failure") }
         // 夹具可以断言「实际复用的人格/知识 prompt 被注入」，而不是只看返回值。
         await recorder?.record(request)
-        return UnifiedGenerationResult(text: replyJSON, tokens: 7, shouldSend: shouldSend)
+        return UnifiedGenerationResult(text: replyJSON, tokens: 7, shouldSend: shouldSend,
+                                       proactiveSkipReason: proactiveSkipReason)
     }
 }
 
@@ -465,16 +467,22 @@ private func inbound(_ text: String = "合成消息",
             proactive: true, contextualParticipation: true,
             publicQuestionContext: ["又看到厂长开会的老梗了"], publicQuestionKnowledge: ["厂长开会：合成梗介绍"]
         )
-        let decisions: [(String, Bool)] = [
-            (#"{"participate":true,"text":"会议室到处都是打卡机。","emotion":"neutral","intensity":1}"#, true),
-            (#"{"participate":false,"text":"","emotion":"neutral","intensity":0}"#, false),
-            (#"{"participate":"true","text":"不得发送","emotion":"neutral","intensity":1}"#, false),
-            (#"{"text":"不得发送","emotion":"neutral","intensity":1}"#, false),
+        let speak = #"{"participate":true,"text":"会议室到处都是打卡机。","emotion":"neutral","intensity":1}"#
+        let silent = #"{"participate":false,"text":"","emotion":"neutral","intensity":0}"#
+        let decisions: [(String, ProactiveSkipReason?)] = [
+            (speak, nil),
+            ("```json\n" + speak + "\n```", nil),
+            (silent, .modelDeclined),
+            ("```json\n" + silent + "\n```", .modelDeclined),
+            ("描述\n```json\n" + speak + "\n```", .invalidModelDecision),
+            (#"{"participate":"true","text":"不得发送","emotion":"neutral","intensity":1}"#, .invalidModelDecision),
+            (#"{"text":"不得发送","emotion":"neutral","intensity":1}"#, .invalidModelDecision),
         ]
-        for (content, expected) in decisions {
+        for (content, skipReason) in decisions {
             PublicQuestionHTTPFixture.reset(content: content)
             let result = try await generator.generate(request)
-            #expect(result.shouldSend == expected)
+            #expect(result.shouldSend == (skipReason == nil))
+            #expect(result.proactiveSkipReason == skipReason)
             let bodies = PublicQuestionHTTPFixture.bodies
             #expect(bodies.count == 1)
             #expect(bodies.first?["model"] as? String == "fixture")
@@ -755,14 +763,16 @@ private func inbound(_ text: String = "合成消息",
         #expect(await modelCalls.value() == 0)
     }
 
-    @Test func proactiveParticipationDeclineNeverReturnsReply() async {
+    @Test(arguments: [false, true])
+    func proactiveSilenceDistinguishesDeclineAndInvalidDecision(invalid: Bool) async {
         var c = makeConfig(requireAt: false)
         c.proactiveAllowedChats = ["fixture-group"]
         c.allowedAccounts = ["fixture-account"]
         let modelCalls = CallCounter()
         let core = UnifiedReplyCore(config: c,
                                     generator: FixtureReplyGenerator(replyJSON: validJSON("即使文本有效也不得发送"),
-                                                                    fail: false, calls: modelCalls, shouldSend: false),
+                                                                    fail: false, calls: modelCalls, shouldSend: false,
+                                                                    proactiveSkipReason: invalid ? .invalidModelDecision : .modelDeclined),
                                     proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: 0.9, calls: CallCounter()) },
                                     journal: freshJournal())
         var candidate = inbound("大家怎么看这个问题？", atMe: false, msgId: "participate-no")
@@ -771,8 +781,9 @@ private func inbound(_ text: String = "合成消息",
         candidate.groupAutoReplyWindowOK = true
         candidate.groupAutoReplySuperseded = false
         let result = await core.handle(candidate)
-        #expect(result.gate == "proactive_participation_declined")
+        #expect(result.gate == (invalid ? "model_output_rejected" : "proactive_participation_declined"))
         #expect(result.reply.action == "ignore")
+        #expect(result.reply.ok == !invalid)
         #expect(await modelCalls.value() == 1)
     }
 
