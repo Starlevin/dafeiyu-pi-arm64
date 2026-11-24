@@ -1,5 +1,6 @@
 import hashlib
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
@@ -21,7 +22,9 @@ class MemoryScopeTests(unittest.TestCase):
         for paths, scope in (([session, message], expected), ([session], None),
                              ([session, message, other], None)):
             with self.subTest(path_count=len(paths)), \
-                 patch.object(Path, "iterdir", return_value=iter(range(len(paths)))), \
+                 patch.object(hint.os, "scandir", return_value=nullcontext([
+                     SimpleNamespace(path=str(i)) for i in range(len(paths))
+                 ])), \
                  patch.object(hint.os, "readlink", side_effect=paths):
                 self.assertEqual(hint.active_account_scope(412, home=home), scope)
 

@@ -19,22 +19,26 @@ def active_account_scope(pid, *, proc=Path("/proc"), home=ROOT):
     """Derive an opaque account scope from one client's open database paths."""
     if type(pid) is not int or pid <= 0:
         return None
+    prefix = os.fspath(home).rstrip(os.sep) + os.sep
     roles = {}
     try:
-        for descriptor in (proc / str(pid) / "fd").iterdir():
-            try:
-                relative = Path(os.readlink(descriptor)).relative_to(home)
-            except (OSError, ValueError):
-                continue
-            parts = relative.parts
-            if len(parts) < 5 or parts[-5] != "xwechat_files" or parts[-3] != "db_storage":
-                continue
-            account, role, name = parts[-4], parts[-2], parts[-1]
-            if role not in {"session", "message"} or not DB_ROLE.fullmatch(name):
-                continue
-            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", account):
-                return None
-            roles.setdefault(parts[:-3], set()).add(role)
+        with os.scandir(proc / str(pid) / "fd") as descriptors:
+            for descriptor in descriptors:
+                try:
+                    target = os.readlink(descriptor.path)
+                except OSError:
+                    continue
+                if not target.startswith(prefix):
+                    continue
+                parts = target.rsplit(os.sep, 5)
+                if len(parts) != 6 or parts[1] != "xwechat_files" or parts[3] != "db_storage":
+                    continue
+                parent, _, account, _, role, name = parts
+                if role not in {"session", "message"} or not DB_ROLE.fullmatch(name):
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", account):
+                    return None
+                roles.setdefault((parent, account), set()).add(role)
     except OSError:
         return None
     if len(roles) != 1 or next(iter(roles.values())) != {"session", "message"}:
