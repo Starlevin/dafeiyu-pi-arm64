@@ -150,6 +150,7 @@
         source: payload.source || "demo",
         platform: payload.platform || payload.source || "demo",
         verified: payload.verified === true,
+        terminal: payload.terminal === true,
         at: payload.at || payload.timestamp || nowSec,
         text: payload.text || payload.bubble || ""
       };
@@ -287,25 +288,13 @@
         conn.consecutiveFailures = 0;
         conn.lastError = "";
         if (conn.transport === "offline") conn.transport = "polling";
-        ingest(data, "polling");
+        if (conn.transport !== "sse" && conn.transport !== "ws") ingest(data, "polling");
         if (wasOffline) notifyConn();
       });
 
       xhrJson(statusUrl, 4500, function (err2, sData) {
         if (!err2 && sData) {
           try { onStatusData(sData); } catch (e) {}
-          var wxAct = (sData.wechat && typeof sData.wechat.activity_state === "string")
-            ? sData.wechat.activity_state : "";
-          if (wxAct && ["idle", "received", "thinking", "replying", "sent", "error"].indexOf(wxAct) >= 0) {
-            if (wxAct !== "idle") {
-              ingest({
-                type: wxAct,
-                source: "wechat",
-                verified: true,
-                at: sData.timestamp || Math.floor(Date.now() / 1000)
-              }, "status");
-            }
-          }
         }
       });
     }

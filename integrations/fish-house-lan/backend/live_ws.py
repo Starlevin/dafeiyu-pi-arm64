@@ -561,7 +561,9 @@ class LiveBridge:
 
     def next_seq(self) -> int:
         with self._lock:
-            self._seq += 1
+            # Browsers also compare sequences across a disconnected/restarted
+            # house. Use wall-clock milliseconds as a floor, still JS-safe.
+            self._seq = max(self._seq + 1, time.time_ns() // 1_000_000)
             return self._seq
 
     def current_frame_kind(self) -> str:
@@ -577,8 +579,13 @@ class LiveBridge:
                 frames.append(self._wrap("config", None, config_message(router)))
             except Exception:
                 pass
-        frames.append(self.frame(force=True))
+        frames.append(self.state_snapshot())
         return frames
+
+    def state_snapshot(self) -> dict[str, Any]:
+        """Read current evidence without consuming the next broadcast transition."""
+        evidence, payload = self.evaluation(force=True)
+        return self._wrap("state", evidence, payload)
 
     def _wrap(self, kind: str, evidence: EvidenceSnapshot | None,
               payload: dict[str, Any]) -> dict[str, Any]:

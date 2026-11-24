@@ -79,4 +79,35 @@ test("5. parseIncomingPayload handles canonical, raw Codex activity, and bridge-
   assert.strictEqual(p2.id, "abc:thinking");
 });
 
+test("6. Connection status cannot create an animation or refresh its timestamp", function () {
+  var original = global.XMLHttpRequest;
+  var eventSource = global.EventSource;
+  var events = [], statusReads = 0;
+  global.EventSource = undefined;
+  global.XMLHttpRequest = function () {
+    this.open = function (_, url) { this.url = url; };
+    this.send = function () {
+      this.readyState = 4;
+      this.status = 200;
+      this.responseText = JSON.stringify(this.url.indexOf("state.json") >= 0
+        ? { phase: "idle", seq: 1, verified: true, source: "wechat", at: NOW }
+        : { wechat: { activity_state: "thinking" }, timestamp: NOW });
+      this.onreadystatechange();
+    };
+  };
+  var adapter = EA.createEventAdapter({
+    engine: { pushEvent: function (event) { events.push(event); return { accepted: true }; } },
+    onStatusData: function () { statusReads += 1; }
+  });
+  try {
+    adapter.start();
+    assert.strictEqual(statusReads, 1);
+    assert.deepStrictEqual(events.map(function (event) { return event.type; }), ["idle"]);
+  } finally {
+    adapter.stop();
+    global.XMLHttpRequest = original;
+    global.EventSource = eventSource;
+  }
+});
+
 console.log("ALL R5.2 EVENT ADAPTER TESTS PASSED:", passed + "/" + passed);

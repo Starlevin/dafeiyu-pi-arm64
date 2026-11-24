@@ -1512,7 +1512,7 @@
     if (ev && renderer.hitTestCharacter(ev.clientX, ev.clientY)) {
       renderer.spawnTapBurst(ev.clientX, ev.clientY);
       var touchRes = eventEngine.pushEvent({
-        type: (Math.random() < 0.5) ? "happy" : "received",
+        type: "happy",
         source: "touch",
         verified: false,
         text: currentForm === "chibi" ? "诶嘿～戳到小肥鱼啦！" : "嗯？找大肥鱼有什么事呀～"

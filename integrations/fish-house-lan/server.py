@@ -23,7 +23,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 from backend import live_ws
-from backend.flow_bridge import (DEFAULT_THEME_URL, SELECTION_FILE, THEME_ROUTE_RE,
+from backend.flow_bridge import (DEFAULT_THEME_URL, PHASE_LABELS, SELECTION_FILE, THEME_ROUTE_RE,
                                  build_router, resolve_selection)
 from backend.status_adapter import normalize_bridge_health
 
@@ -779,96 +779,80 @@ class DiagStore:
 
 diag_snapshot = DiagStore()
 
-# 小屋 5 态 → 视频节点。只用服务端已核验的时间戳驱动，不编造状态。
-PHASE_NODES = {
-    "idle": (("rest", True), "待机"),
-    "notice": (("phone_pickup", False), "看到消息，拿起手机"),
-    "thinking": (("phone_loop", True), "正在想怎么回"),
-    "reply": (("phone_putdown", False), "回复发出，放下手机"),
-    "work": (("computer_loop", True), "在电脑前干活"),
+LEGACY_NODES = {
+    "idle": ("rest", True),
+    "received": ("phone_pickup", False),
+    "thinking": ("phone_loop", True),
+    "replying": ("phone_loop", True),
+    "sent": ("phone_putdown", False),
+    "error": ("rest", True),
 }
-NOTICE_WINDOW = 4.0      # 收到消息后的「注意到」窗口
-THINKING_WINDOW = 90.0   # 未回复且不超过 90s 视为生成中
-REPLY_WINDOW = 8.0       # 发出回复后的展示窗口
 
 
-def house_phase(live, now):
-    """从真实收发时间戳推阶段：notice → thinking → reply → idle。"""
-    qq = live.get("qq") or {}
-    if qq.get("busy") is True:
-        return "work", "qq"
-    activity = ((live.get("wechat") or {}).get("last_activity") or {})
-    inbound = activity.get("at")
-    replied = activity.get("last_reply_at")
-    if isinstance(inbound, int) and 0 <= now - inbound <= NOTICE_WINDOW:
-        return "notice", "wechat"
-    if (isinstance(inbound, int) and (not isinstance(replied, int) or replied <= inbound)
-            and 0 <= now - inbound <= THINKING_WINDOW):
-        return "thinking", "wechat"
-    if isinstance(replied, int) and 0 <= now - replied <= REPLY_WINDOW:
-        return "reply", "wechat"
-    return "idle", None
+def house_event(frame):
+    """Project one verified wallpaper state onto the compatibility feed."""
+    stamp = frame.get("event_at") if frame.get("verified") is True else None
+    phase = frame["phase"] if stamp is not None else "idle"
+    source = frame["source"]
+    return {
+        "id": f"{source}:{phase}:{stamp}" if stamp is not None else "",
+        "seq": frame["seq"], "phase": phase, "source": source,
+        "verified": True, "at": stamp if stamp is not None else frame["ts"],
+        "terminal": phase == "error",
+    }
 
 
-class HouseSeq:
-    """节点切换序号：只在 phase 真的变了才 +1，客户端据此判断要不要换片。"""
+def live_event_key(frame):
+    return (frame["source"], frame["phase"], frame.get("event_at"))
 
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.value = 1
-        self.key = ""
 
-    def bump(self, key):
-        with self.lock:
-            if key != self.key:
+class LiveCursor:
+    """Keep a client's snapshot from replaying as a queued transition."""
+
+    def __init__(self, snapshot_frame):
+        self.seq = snapshot_frame["seq"]
+        self.key = live_event_key(snapshot_frame)
+
+    def accept(self, frame):
+        if frame["seq"] <= self.seq:
+            return False
+        self.seq = frame["seq"]
+        kind = frame["type"]
+        if kind == "config":
+            self.key = None
+        if kind in ("state", "flow_goto"):
+            key = live_event_key(frame)
+            if key == self.key:
+                return False
+            if kind == "state":
                 self.key = key
-                self.value += 1
-            return self.value
-
-
-house_seq = HouseSeq()
+        return True
 
 
 def house_state():
-    live = snapshot.get()
-    now = int(time.time())
-    wx = live.get("wechat") or {}
-    wx_act = str(wx.get("activity_state") or "idle")
-    phase, source = house_phase(live, now)
-    if wx_act in ("received", "thinking", "replying", "sent", "error"):
-        legacy_phase = "thinking" if wx_act in ("received", "thinking") else ("reply" if wx_act in ("replying", "sent") else "idle")
-        node, loop = PHASE_NODES.get(legacy_phase, PHASE_NODES["idle"])[0]
-        seq = house_seq.bump("%s|%s" % (wx_act, node))
-        effective_phase = wx_act
-        effective_source = "wechat"
-        verified = True
-    else:
-        node, loop = PHASE_NODES[phase][0]
-        seq = house_seq.bump("%s|%s" % (phase, node))
-        effective_phase = phase
-        effective_source = source
-        verified = phase != "idle"
-    activity = (wx.get("last_activity") or {})
+    frame = bridge.state_snapshot()
+    event = house_event(frame)
+    phase = event["phase"]
+    node, loop = LEGACY_NODES[phase]
+    wx_phase = phase if event["source"] == "wechat" else "idle"
+    stamp = event["at"]
+    age = max(0, frame["ts"] - stamp)
     return {
-        "seq": seq,
-        "phase": effective_phase,
-        "wechat_activity_state": wx_act,
-        "source": effective_source,
+        **event,
+        "wechat_activity_state": wx_phase,
         "node_id": node,
-        "node_label": PHASE_NODES.get(phase, PHASE_NODES["idle"])[1],
+        "node_label": PHASE_LABELS[phase],
         "node_video": VIDEO[node],
         "node_loop": loop,
         "bubble": "",
         "bubble_until": 0,
-        "verified": verified,
         "events": {
-            "inbound_at": activity.get("at"),
-            "inbound_ago_sec": activity.get("ago_sec"),
-            "reply_at": activity.get("last_reply_at"),
-            "reply_ago_sec": activity.get("last_reply_ago_sec"),
-            "reply_reason": activity.get("last_reply_reason") or "",
+            "inbound_at": stamp if wx_phase == "received" else None,
+            "inbound_ago_sec": age if wx_phase == "received" else None,
+            "reply_at": stamp if wx_phase == "sent" else None,
+            "reply_ago_sec": age if wx_phase == "sent" else None,
+            "reply_reason": "visible_receipt" if wx_phase == "sent" else "",
         },
-        "at": now,
     }
 
 
@@ -1386,11 +1370,15 @@ class Handler(SimpleHTTPRequestHandler):
         读取走 select，闲置不会把 rfile 留在读不到的 timeout 状态。
         """
         conn = live_ws.ClientConnection(self.request, queue, rfile=self.rfile)
-        for frame in bridge.snapshot_frames():
-            queue.push(frame)
-        conn.flush()
+        snapshots = bridge.snapshot_frames()
+        cursor = LiveCursor(snapshots[-1])
+        for frame in snapshots:
+            if not conn.send(live_ws.encode_frame(live_ws.OPCODE_TEXT, safe_json(frame))):
+                return
         while not conn.closed and not closed_flag():
             for payload in queue.drain():
+                if not cursor.accept(json.loads(payload)):
+                    continue
                 if not conn.send(live_ws.encode_frame(live_ws.OPCODE_TEXT, payload)):
                     break
             if conn.closed:
@@ -1405,39 +1393,10 @@ class Handler(SimpleHTTPRequestHandler):
             pass
 
     def serve_sse(self):
-        """只读轻量 SSE：向家园前端实时推送脱敏后的 wechat.activity_state，不泄露 trace 或聊天内容。"""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        last_sig = ""
-        last_ping = time.monotonic()
-        try:
-            while True:
-                st = house_state()
-                sig = "%s|%s|%s" % (st["seq"], st["phase"], st["verified"])
-                if sig != last_sig:
-                    payload = {
-                        "seq": st["seq"],
-                        "phase": st["phase"],
-                        "source": st["source"],
-                        "verified": st["verified"],
-                        "at": st["at"],
-                    }
-                    self.wfile.write(b"data: " + safe_json(payload) + b"\n\n")
-                    self.wfile.flush()
-                    last_sig = sig
-                    last_ping = time.monotonic()
-                elif time.monotonic() - last_ping >= 15.0:
-                    self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-                    last_ping = time.monotonic()
-                time.sleep(1.2)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+        """Keep the compatibility event shape using the wallpaper's producer."""
+        return self.serve_live_sse(compatibility=True)
 
-    def serve_live_sse(self):
+    def serve_live_sse(self, *, compatibility=False):
         """Serve the wallpaper's real flow frames on an HTTP event stream."""
         if not live_ws.origin_allowed(self.headers.get("Origin"), self.headers.get("Host") or "",
                                       self.client_address[0], LAN_NET, self.allow_host):
@@ -1457,19 +1416,25 @@ class Handler(SimpleHTTPRequestHandler):
             # The snapshot has fresh sequence numbers. Drain frames queued before
             # registration completed first so they cannot precede the config.
             snapshots = bridge.snapshot_frames()
-            latest = snapshots[-1]["seq"]
+            cursor = LiveCursor(snapshots[-1])
+            if compatibility:
+                snapshots = [house_event(snapshots[-1])]
             for frame in snapshots:
                 self.wfile.write(b"data: " + safe_json(frame) + b"\n\n")
             self.wfile.flush()
             last_write = time.monotonic()
             while not queue.closed and not queue.overflow and not closed_flag():
                 for payload in queue.drain():
-                    seq = json.loads(payload)["seq"]
-                    if seq > latest:
-                        self.wfile.write(b"data: " + payload + b"\n\n")
-                        self.wfile.flush()
-                        latest = seq
-                        last_write = time.monotonic()
+                    frame = json.loads(payload)
+                    if not cursor.accept(frame):
+                        continue
+                    if compatibility:
+                        if frame["type"] != "state":
+                            continue
+                        payload = safe_json(house_event(frame))
+                    self.wfile.write(b"data: " + payload + b"\n\n")
+                    self.wfile.flush()
+                    last_write = time.monotonic()
                 if time.monotonic() - last_write >= 5:
                     self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()

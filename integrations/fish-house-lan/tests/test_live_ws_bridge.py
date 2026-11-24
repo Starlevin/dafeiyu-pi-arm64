@@ -736,6 +736,55 @@ class LoopbackWebSocketTests(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_compat_events_and_polling_require_the_same_wallpaper_evidence(self):
+        origin = "http://127.0.0.1:%d" % self.port
+        self.state["wechat_activity"] = "idle"
+        self.state["panel"] = {"runtimeRecords": [
+            {"state": "generating", "timestamp": time.time(), "detail": "unrelated work"}]}
+        with patch.object(self.server.snapshot, "get", return_value={
+                "wechat": {"activity_state": "idle", "last_activity": {"at": int(time.time()) - 6}}}):
+            # A recent raw ingress is not proof that generation actually started.
+            with urllib.request.urlopen(origin + "/fish_house/state.json", timeout=5) as response:
+                self.assertEqual(json.load(response)["phase"], "idle")
+        with urllib.request.urlopen(origin + "/api/house/events", timeout=5) as stream:
+            self.assertTrue(stream.readline().startswith(b"data: "))
+            self.assertEqual(stream.readline(), b"\n")
+            stamp = time.time()
+            self.state["panel"] = {"runtimeRecords": [
+                {"state": "generating", "timestamp": stamp, "detail": "QQ聊天模型请求中"}]}
+            for _ in range(8):
+                line = stream.readline()
+                if line.startswith(b"data: "):
+                    received = json.loads(line[6:])
+                    if received["phase"] == "thinking":
+                        break
+            else:
+                self.fail("Verified QQ generation did not reach the compatibility stream")
+            self.assertEqual(received["source"], "qq")
+            self.assertEqual(received["at"], stamp)
+            self.assertNotIn("detail", received)
+            with urllib.request.urlopen(origin + "/fish_house/state.json", timeout=5) as response:
+                polled = json.load(response)
+            self.assertEqual(polled["id"], received["id"])
+            self.assertGreater(polled["seq"], received["seq"])
+
+    def test_polling_snapshot_does_not_consume_a_wallpaper_change(self):
+        router = FlowRouter(ThemeFlow(THEME))
+        bridge = live_ws.LiveBridge(router_factory=lambda: router, snapshot_getter=lambda: {
+            "wechat": {"activity_state": "received", "activity_at": time.time() - 0.1},
+        })
+        self.assertEqual(bridge.state_snapshot()["phase"], "received")
+        self.assertEqual([f["type"] for f in bridge.produce()], ["flow_goto", "state"])
+
+    def test_sequence_keeps_browser_events_fresh_after_service_restart(self):
+        before = live_ws.LiveBridge(router_factory=lambda: None, snapshot_getter=dict)
+        with patch.object(live_ws.time, "time_ns", return_value=NOW * 10**9):
+            previous = before.next_seq()
+            self.assertEqual(before.next_seq(), previous + 1)
+        after = live_ws.LiveBridge(router_factory=lambda: None, snapshot_getter=dict)
+        with patch.object(live_ws.time, "time_ns", return_value=(NOW + 1) * 10**9):
+            self.assertGreater(after.next_seq(), previous + 1)
+
     def test_original_routes_still_work(self):
         import urllib.request
 

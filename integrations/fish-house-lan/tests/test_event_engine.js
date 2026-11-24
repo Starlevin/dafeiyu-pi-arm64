@@ -97,6 +97,18 @@ test("5. Interrupt & Recovery Stack restores fresh interrupted real state after 
   assert.strictEqual(eng.getState().stats.interruptedRestored, 1);
 });
 
+test("A terminal send failure cannot revive a finished model animation", function () {
+  var eng = EE.createEngine({ nowFn: clock });
+  eng.pushEvent({ type: "thinking", source: "qq", verified: true, seq: 1, at: fakeNow });
+  advance(1000);
+  eng.pushEvent({ type: "error", source: "qq", verified: true, terminal: true, seq: 2, at: fakeNow });
+  assert.strictEqual(eng.getState().state, "error");
+  assert.strictEqual(eng.getState().hasInterrupted, false);
+  advance(9000);
+  eng.tick();
+  assert.strictEqual(eng.getState().state, "confused");
+});
+
 test("6. Event deduplication by ID and polling signature prevents flicker", function () {
   var eng = EE.createEngine({ nowFn: clock });
   var a = eng.pushEvent({ id: "msg-101", type: "received", source: "qq", verified: true, seq: 10, at: fakeNow });

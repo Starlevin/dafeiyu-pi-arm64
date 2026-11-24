@@ -378,7 +378,7 @@
       }
 
       // 6. Save interrupted active state if high-priority transient interrupt (e.g. error or explicit interrupt)
-      if ((ev.interrupt === true || normEvent === "error") &&
+      if ((ev.interrupt === true || (normEvent === "error" && ev.terminal !== true)) &&
           (state === "thinking" || state === "replying") &&
           source === "real" && normEvent !== state) {
         interruptedState = {
@@ -392,7 +392,7 @@
           ttlMs: opts.ttlMs[state] || opts.maxEventAgeMs
         };
         stats.interruptedSaved += 1;
-      } else if (normEvent === "idle" || normEvent === "sent") {
+      } else if (normEvent === "idle" || normEvent === "sent" || ev.terminal === true) {
         interruptedState = null;
       }
 
