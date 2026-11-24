@@ -1464,7 +1464,8 @@
       if (request === wechatAccountRequest) {
         wechatAccountBusy = false;
         refresh.disabled = false;
-        scan.disabled = !result || result.canScan !== true;
+        scan.textContent = result && result.canOpenQr ? '打开微信扫码页' : '获取登录二维码';
+        scan.disabled = !result || !(result.canScan === true || result.canOpenQr === true);
         reconnect.disabled = !result || result.canReconnect !== true;
       }
     }

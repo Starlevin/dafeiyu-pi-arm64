@@ -1,11 +1,13 @@
 """On-demand WeChat login inspection on the dedicated client display."""
 import ctypes as c
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import sys
+import time
 from urllib.parse import urlsplit
 
 
@@ -14,6 +16,8 @@ SCAN = {"scan to log in", "scan qr code to log in", "scan the qr code to log in"
         "扫码登录", "请使用微信扫码登录", "请用微信扫码登录", "使用手机微信扫码登录"}
 CONFIRM = {"confirm on phone", "confirm login on your phone", "请在手机上确认", "请在手机上确认登录", "手机上确认"}
 QR_LABELS = {"qr code", "login qr code", "qrcode", "二维码", "登录二维码", "微信登录二维码"}
+SWITCH_LABELS = {"switch account", "切换账号"}
+WINDOW_TOLERANCE = 24
 
 
 @dataclass(frozen=True)
@@ -22,9 +26,18 @@ class Login:
     pid: int = 0
     window: tuple = ()
     region: tuple = ()
+    switch: tuple = ()
 
 
-def inspect(app, showing, extents):
+def _contains(window, rect):
+    if not window or not rect:
+        return False
+    x, y, w, h = window
+    rx, ry, rw, rh = rect
+    return rw > 0 and rh > 0 and x <= rx and y <= ry and rx + rw <= x + w and ry + rh <= y + h
+
+
+def inspect(app, showing, extents, enabled=lambda _node: True):
     if app is None:
         return Login("unknown")
     windows = [node for index in range(min(app.get_child_count(), 16))
@@ -32,6 +45,7 @@ def inspect(app, showing, extents):
     scan, confirm, login = False, False, False
     navigation = set()
     images = []
+    switches = []
     queue = deque((node, 0) for node in windows)
     budget = 256
     incomplete = False
@@ -47,6 +61,8 @@ def inspect(app, showing, extents):
         if role in {"list", "list box"} and name in {"chats", "聊天", "会话"}:
             return Login("online")
         if role in {"button", "push button"}:
+            if name in SWITCH_LABELS and enabled(node):
+                switches.append(extents(node))
             if name in {"contacts", "通讯录"}:
                 navigation.add("contacts")
             if name in {"moments", "朋友圈"}:
@@ -56,7 +72,7 @@ def inspect(app, showing, extents):
         if role not in {"list", "list box", "table", "tree table"}:
             scan |= name in SCAN
             confirm |= name in CONFIRM
-            login |= role in {"push button", "button"} and name in {"log in", "登录", "switch account", "切换账号"}
+            login |= role in {"push button", "button"} and name in {"log in", "登录", *SWITCH_LABELS}
             if role == "image" and name in QR_LABELS:
                 images.append(extents(node))
             children = node.get_child_count()
@@ -69,9 +85,12 @@ def inspect(app, showing, extents):
         return Login("unknown")
     if confirm:
         return Login("confirm")
-    if not scan:
-        return Login("login" if login else "unknown")
     window = extents(windows[0])
+    if not scan:
+        if (login and window and 190 <= window[2] <= 480 and 210 <= window[3] <= 650
+                and len(switches) == 1 and _contains(window, switches[0])):
+            return Login("login", app.get_process_id(), window, switch=switches[0])
+        return Login("login" if login else "unknown")
     if not window or not (190 <= window[2] <= 480 and 210 <= window[3] <= 650):
         return Login("scan")
     x, y, width, height = window
@@ -121,7 +140,8 @@ def native_status():
         bounds = node.get_extents(Atspi.CoordType.SCREEN)
         return bounds.x, bounds.y, bounds.width, bounds.height
 
-    return inspect(candidates[0], lambda node: node.get_state_set().contains(Atspi.StateType.SHOWING), rect)
+    return inspect(candidates[0], lambda node: node.get_state_set().contains(Atspi.StateType.SHOWING),
+                   rect, lambda node: node.get_state_set().contains(Atspi.StateType.ENABLED))
 
 
 def _function(library, name, result, *args):
@@ -131,59 +151,100 @@ def _function(library, name, result, *args):
     return fn
 
 
-def capture_region(state):
-    """Read a bounded region of the verified client's X drawable, never the root."""
+@contextmanager
+def _x_display():
     xlib = c.CDLL("libX11.so.6")
-    P, W, I, U = c.c_void_p, c.c_ulong, c.c_int, c.c_uint
+    P, I = c.c_void_p, c.c_int
     x = lambda name, result, *args: _function(xlib, "X" + name, result, *args)
     display = x("OpenDisplay", P, c.c_char_p)(None)
     if not display:
-        return None
+        yield None
+        return
+    try:
+        yield display, x
+    finally:
+        x("CloseDisplay", I, P)(display)
+
+
+def _matching_geometry(expected, actual):
+    # Qt's accessible bounds omit small X11 frame offsets on the Pi session.
+    return (len(expected) == len(actual) == 4
+            and all(abs(a - b) <= WINDOW_TOLERANCE for a, b in zip(expected, actual)))
+
+
+def _login_drawable(state, display, x):
+    """Resolve a unique top-level drawable owned by the verified login app."""
+    P, W, I, U = c.c_void_p, c.c_ulong, c.c_int, c.c_uint
     query = x("QueryTree", I, P, W, c.POINTER(W), c.POINTER(W), c.POINTER(c.POINTER(W)), c.POINTER(U))
     free = x("Free", I, P)
     root = x("DefaultRootWindow", W, P)(display)
     atom_pid = x("InternAtom", W, P, c.c_char_p, I)(display, b"_NET_WM_PID", 1)
+    if not atom_pid or state.pid <= 0:
+        return None
+    root_return, parent = W(), W()
+    children, count = c.POINTER(W)(), U()
+    if not query(display, root, c.byref(root_return), c.byref(parent), c.byref(children), c.byref(count)):
+        return None
     try:
-        if not atom_pid:
+        if count.value > 160:
             return None
-        root_return, parent = W(), W()
-        children, count = c.POINTER(W)(), U()
-        if not query(display, root, c.byref(root_return), c.byref(parent), c.byref(children), c.byref(count)):
-            return None
+        window_ids = tuple(children[:count.value]) if children else ()
+    finally:
+        if children:
+            free(children)
+    property_get = x("GetWindowProperty", I, P, W, W, c.c_long, c.c_long, I, W, c.POINTER(W),
+                     c.POINTER(I), c.POINTER(W), c.POINTER(W), c.POINTER(c.POINTER(c.c_ubyte)))
+    geometry = x("GetGeometry", I, P, W, c.POINTER(W), c.POINTER(I), c.POINTER(I),
+                 *(c.POINTER(U),) * 4)
+    matches = []
+    for window in window_ids:
+        kind, length, left, fmt, value = W(), W(), W(), I(), c.POINTER(c.c_ubyte)()
+        status = property_get(display, window, atom_pid, 0, 1, 0, 6, c.byref(kind), c.byref(fmt),
+                              c.byref(length), c.byref(left), c.byref(value))
         try:
-            if count.value > 160:
-                return None
-            window_ids = tuple(children[:count.value]) if children else ()
+            owner = c.cast(value, c.POINTER(W))[0] if value and length.value == 1 and fmt.value == 32 else 0
         finally:
-            if children:
-                free(children)
-        property_get = x("GetWindowProperty", I, P, W, W, c.c_long, c.c_long, I, W, c.POINTER(W),
-                         c.POINTER(I), c.POINTER(W), c.POINTER(W), c.POINTER(c.POINTER(c.c_ubyte)))
-        geometry = x("GetGeometry", I, P, W, c.POINTER(W), c.POINTER(I), c.POINTER(I),
-                     *(c.POINTER(U),) * 4)
-        matches = []
-        for window in window_ids:
-            kind, length, left, fmt, value = W(), W(), W(), I(), c.POINTER(c.c_ubyte)()
-            status = property_get(display, window, atom_pid, 0, 1, 0, 6, c.byref(kind), c.byref(fmt),
-                                  c.byref(length), c.byref(left), c.byref(value))
-            try:
-                owner = c.cast(value, c.POINTER(W))[0] if value and length.value == 1 and fmt.value == 32 else 0
-            finally:
-                if value:
-                    free(value)
-            if status or owner != state.pid:
-                continue
-            wx, wy, ww, wh, border, depth = I(), I(), U(), U(), U(), U()
-            if geometry(display, window, c.byref(root_return), c.byref(wx), c.byref(wy), c.byref(ww),
-                        c.byref(wh), c.byref(border), c.byref(depth)):
-                if (wx.value, wy.value, ww.value, wh.value) == state.window and depth.value in (24, 32):
-                    matches.append(window)
-        if len(matches) != 1:
+            if value:
+                free(value)
+        if status or owner != state.pid:
+            continue
+        wx, wy, ww, wh, border, depth = I(), I(), U(), U(), U(), U()
+        if geometry(display, window, c.byref(root_return), c.byref(wx), c.byref(wy), c.byref(ww),
+                    c.byref(wh), c.byref(border), c.byref(depth)):
+            bounds = (wx.value, wy.value, ww.value, wh.value)
+            if depth.value in (24, 32) and _matching_geometry(state.window, bounds):
+                matches.append((window, bounds))
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def _drawable_region(state, bounds, rect):
+    """Map a Qt-relative rectangle into the actual X11 window without clipping."""
+    if not _contains(state.window, rect):
+        return None
+    left, top = state.window[:2]
+    rx, ry, w, h = rect
+    region = (rx - left, ry - top, w, h)
+    return region if _contains((0, 0, bounds[2], bounds[3]), region) else None
+
+
+def capture_region(state):
+    """Read a bounded region of the verified client's X drawable, never the root."""
+    if state.state != "scan" or not state.region:
+        return None
+    P, W, I, U = c.c_void_p, c.c_ulong, c.c_int, c.c_uint
+    with _x_display() as connection:
+        if connection is None or not (match := _login_drawable(state, *connection)):
             return None
-        rx, ry, w, h = state.region
-        left, top = state.window[:2]
+        display, x = connection
+        window, bounds = match
+        region = _drawable_region(state, bounds, state.region)
+        if region is None:
+            return None
+        dx, dy, w, h = region
         image = x("GetImage", P, P, W, I, I, U, U, W, I)(
-            display, matches[0], rx - left, ry - top, w, h, W(-1), 2)
+            display, window, dx, dy, w, h, W(-1), 2)
         if not image:
             return None
         try:
@@ -197,8 +258,28 @@ def capture_region(state):
             return w, h, bytes(pixels)
         finally:
             x("DestroyImage", I, P)(image)
-    finally:
-        x("CloseDisplay", I, P)(display)
+
+
+def open_scan_page(state):
+    """Activate only the verified account chooser on the dedicated display."""
+    if state.state != "login" or not state.switch or os.environ.get("DISPLAY") != ":99":
+        return False
+    import pi_xinput as xi
+
+    with _x_display() as connection:
+        if connection is None or not (match := _login_drawable(state, *connection)):
+            return False
+        window, bounds = match
+        region = _drawable_region(state, bounds, state.switch)
+        if region is None:
+            return False
+        dx, dy, w, h = region
+        x, y = bounds[0] + dx + w // 2, bounds[1] + dy + h // 2
+        xi.move(x, y)
+        if xi.pointer() != (x, y, window) or native_status() != state:
+            return False
+        xi.click(x, y, settle=0.1)
+    return True
 
 
 def decode_login_qr(frame):
@@ -239,15 +320,29 @@ def decode_login_qr(frame):
             z("image_scanner_destroy", None, P)(scanner)
 
 
-def run(action, inspect_fn=native_status, capture=capture_region, decode=decode_login_qr):
+def _status(state):
+    payload = {"state": state.state, "canScan": bool(state.region)}
+    if state.state == "login" and state.switch:
+        payload["canOpenQr"] = True
+    return payload
+
+
+def run(action, inspect_fn=native_status, capture=capture_region, decode=decode_login_qr,
+        open_page=open_scan_page, sleep=time.sleep):
     before = inspect_fn()
-    payload = {"state": before.state, "canScan": bool(before.region)}
+    if action == "qr" and before.state == "login" and before.switch and open_page(before):
+        for _ in range(3):
+            sleep(0.2)
+            before = inspect_fn()
+            if before.state != "login":
+                break
+    payload = _status(before)
     if action != "qr" or before.state != "scan" or not before.region:
         return payload
     token = decode(capture(before))
     after = inspect_fn()
     if after != before:
-        return {"state": after.state, "canScan": bool(after.region)}
+        return _status(after)
     if token:
         payload["qr"] = token
     return payload

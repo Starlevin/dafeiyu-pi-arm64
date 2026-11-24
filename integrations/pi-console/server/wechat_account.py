@@ -38,7 +38,8 @@ def _native(root, action):
         if not NATIVE_LOCK.acquire(blocking=False):
             return None
         try:
-            result = subprocess.run([sys.executable, "-B", str(helper), action], env=env, timeout=5,
+            result = subprocess.run([sys.executable, "-B", str(helper), action], env=env,
+                                    timeout=10 if action == "qr" else 5,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
         finally:
             NATIVE_LOCK.release()
@@ -57,12 +58,15 @@ def _status(root, action):
     state = native.get("state", "unknown")
     result = {"ok": True, "state": state, "label": STATE_LABELS[state],
               "canScan": state == "scan" and native.get("canScan") is True,
+              "canOpenQr": state == "login" and native.get("canOpenQr") is True,
               "canReconnect": root is not None}
     token = native.get("qr")
     if action == "qr" and result["canScan"] and isinstance(token, str) and 1 <= len(token) <= 1000:
         result["image"] = _make_qr_png(token)
     elif action == "qr" and state == "scan":
         result["label"] = "暂未读到有效二维码，微信登录窗口就绪后可重试"
+    elif action == "qr" and state == "login":
+        result["label"] = "微信尚未进入扫码页，可刷新窗口状态后重试"
     return result
 
 

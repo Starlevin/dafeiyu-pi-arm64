@@ -1,5 +1,7 @@
+from contextlib import nullcontext
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import wx_account_probe as probe
 
@@ -73,6 +75,58 @@ class AccountProbeTests(unittest.TestCase):
         frames = [Node("frame", children=[Node("label", "扫码登录", showing=False),
                                           Node("text", "扫码登录")], bounds=(0, 0, 280, 320))]
         self.assertEqual(self.inspection(*frames), probe.Login("unknown"))
+
+    def test_login_can_offer_opening_scan_page_without_reading_pixels(self):
+        switch = Node("button", "Switch Account", bounds=(25, 310, 114, 25))
+        window = Node("frame", children=[switch], bounds=(20, 20, 280, 380))
+        login = self.inspection(window)
+        self.assertEqual(login.switch, switch.bounds)
+        self.assertFalse(self.inspection(window, Node("dialog")).switch)
+        disabled = probe.inspect(Node("application", children=[window]),
+                                 lambda node: node.showing, lambda node: node.bounds,
+                                 lambda _node: False)
+        self.assertFalse(disabled.switch)
+        open_page, capture = Mock(), Mock()
+        self.assertEqual(probe.run("status", lambda: login, capture, open_page=open_page),
+                         {"state": "login", "canScan": False, "canOpenQr": True})
+        open_page.assert_not_called()
+        capture.assert_not_called()
+
+    def test_qr_request_opens_scan_page_once_then_validates_capture(self):
+        login = probe.Login("login", 123, (20, 20, 280, 380), switch=(25, 310, 114, 25))
+        scan = probe.Login("scan", 123, (20, 20, 280, 380), (32, 65, 180, 180))
+        inspect_fn = Mock(side_effect=[login, login, scan, scan])
+        capture, decode, open_page = Mock(return_value=b"pixels"), Mock(return_value="fixture"), Mock(return_value=True)
+        result = probe.run("qr", inspect_fn, capture, decode, open_page, sleep=Mock())
+        self.assertEqual(result, {"state": "scan", "canScan": True, "qr": "fixture"})
+        open_page.assert_called_once_with(login)
+        capture.assert_called_once_with(scan)
+
+    def test_window_mapping_handles_measured_offsets_and_rejects_clipping(self):
+        accessibility = (351, 178, 280, 380)
+        x_window = (366, 185, 292, 396)
+        self.assertTrue(probe._matching_geometry(accessibility, x_window))
+        self.assertFalse(probe._matching_geometry(accessibility, (366, 185, 880, 640)))
+        state = probe.Login("login", 123, accessibility, switch=(354, 513, 116, 22))
+        self.assertEqual(probe._drawable_region(state, x_window, state.switch), (3, 335, 116, 22))
+        self.assertIsNone(probe._drawable_region(state, (366, 185, 292, 350), state.switch))
+
+    def test_open_page_requires_same_window_under_pointer_and_fresh_login(self):
+        state = probe.Login("login", 123, (351, 178, 280, 380), switch=(354, 513, 116, 22))
+        pointer = (427, 531, 777)
+        fake_input = SimpleNamespace(move=Mock(), click=Mock(), pointer=Mock(return_value=pointer))
+        with patch.dict("os.environ", {"DISPLAY": ":99"}), patch.dict("sys.modules", {"pi_xinput": fake_input}), \
+             patch.object(probe, "_x_display", return_value=nullcontext((object(), object()))), \
+             patch.object(probe, "_login_drawable", return_value=(777, (366, 185, 292, 396))), \
+             patch.object(probe, "native_status", return_value=probe.Login("online")) as native:
+            self.assertFalse(probe.open_scan_page(state))
+            native.return_value = state
+            fake_input.pointer.return_value = (427, 531, 999)
+            self.assertFalse(probe.open_scan_page(state))
+            fake_input.click.assert_not_called()
+            fake_input.pointer.return_value = pointer
+            self.assertTrue(probe.open_scan_page(state))
+            fake_input.click.assert_called_once_with(427, 531, settle=0.1)
 
 
 if __name__ == "__main__":
