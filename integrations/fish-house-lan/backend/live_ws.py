@@ -352,6 +352,7 @@ QQ_RECORD_STATES = {"queued", "generating", "sending", "confirmed",
                     "skipped", "failed", "uncertain", "cancelled"}
 # Only this exact OneBot acceptance line counts as a chat receipt.
 QQ_CHAT_CONFIRM_PREFIX = "OneBot 已接受发送"
+QQ_FALLBACK_NOTICE = "模型输出格式无效，已发送一次短句兜底；未写入上下文或记忆"
 QQ_NATIVE_CHAT_INGRESS_DETAIL = "QQ原生聊天已入队"
 QQ_TOOL_DETAIL = "QQ聊天工具执行中"
 # Image generation may take 150 s before trying its fallback. The Core removes
@@ -394,6 +395,13 @@ def qq_confirmed_chat(item: Any) -> bool:
     return _record_detail(item).strip().startswith(QQ_CHAT_CONFIRM_PREFIX)
 
 
+def qq_fallback_notice(item: Any) -> bool:
+    """The core logs this format warning after an accepted fallback send."""
+    return (isinstance(item, dict) and item.get("state") == "failed"
+            and (item.get("_fallback_notice") is True
+                 or _record_detail(item).strip() == QQ_FALLBACK_NOTICE))
+
+
 def qq_native_chat_ingress(item: Any) -> bool:
     """True only for the fixed marker emitted after scoped native @ enqueue."""
     if not isinstance(item, dict) or str(item.get("state") or "") != "queued":
@@ -424,6 +432,7 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
 
     records = (panel or {}).get("runtimeRecords")
     latest: dict[str, Any] | None = None
+    latest_notice: dict[str, Any] | None = None
     if isinstance(records, list):
         for item in records:
             if not isinstance(item, dict):
@@ -431,8 +440,18 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
             ts = item.get("timestamp")
             if isinstance(ts, bool) or not isinstance(ts, (int, float)):
                 continue
+            if qq_fallback_notice(item):
+                if latest_notice is None or ts >= latest_notice["timestamp"]:
+                    latest_notice = item
+                continue
             if latest is None or float(ts) >= float(latest.get("timestamp") or 0):
                 latest = item
+    if latest_notice is not None and (latest is None or latest_notice["timestamp"] >= latest["timestamp"]):
+        notice_age = _age({"time": latest_notice["timestamp"]}, now)
+        # Only the separate OneBot receipt can prove delivery. A notice
+        # without it still ends the previous received/thinking animation.
+        if notice_age is None or notice_age > SENT_WINDOW_SEC or not qq_confirmed_chat(latest):
+            latest = latest_notice
     if latest is not None:
         age = _age({"time": latest.get("timestamp")}, now)
         state = str(latest.get("state") or "")

@@ -453,6 +453,7 @@ def qq_panel_evidence(panel):
     ``ingress`` 是布尔：只有固定原生聊天入队标记才为 True。
     ``active`` 是布尔：只有核心当前的聊天模型或 OneBot 调用才为 True。
     ``tool`` 是布尔：只有核心当前的聊天工具执行标记才为 True。
+    ``fallback_notice`` 是布尔：模型格式警告和 OneBot 发送回执分别取证。
     """
     records = []
     raw = panel.get("runtimeRecords") if isinstance(panel, dict) else None
@@ -472,7 +473,8 @@ def qq_panel_evidence(panel):
             ingress = live_ws.qq_native_chat_ingress(item)
             records.append({"state": state, "timestamp": float(ts),
                             "chat": chat, "ingress": ingress, "active": live_ws.qq_active_chat(item),
-                            "tool": live_ws.qq_tool_running(item)})
+                            "tool": live_ws.qq_tool_running(item),
+                            "fallback_notice": live_ws.qq_fallback_notice(item)})
     queued = panel.get("queued") if isinstance(panel, dict) else None
     return {
         "available": isinstance(panel, dict),
@@ -605,7 +607,7 @@ def qq_panel_view():
     return {"runtimeRecords": [
         {"state": item["state"], "timestamp": item["timestamp"],
          "_chat": item["chat"], "_ingress": item["ingress"], "_active": item["active"],
-         "_tool": item["tool"]}
+         "_tool": item["tool"], "_fallback_notice": item["fallback_notice"]}
         for item in evidence["runtime_records"]]}
 
 

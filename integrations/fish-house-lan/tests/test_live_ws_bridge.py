@@ -262,6 +262,20 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(live_ws.qq_evidence(live, recent, now=NOW).phase, "sent")
         self.assertEqual(live_ws.qq_evidence(live, stale, now=NOW).phase, "idle")
 
+    def test_fallback_format_notice_cannot_replace_or_invent_a_receipt(self):
+        live = self.live(qq={"service_running": True})
+        warning = {"state": "failed", "timestamp": NOW - 1, "detail": live_ws.QQ_FALLBACK_NOTICE}
+        receipt = {"state": "confirmed", "timestamp": NOW - 2, "_chat": True}
+        failure = {"state": "failed", "timestamp": NOW - 1.5, "detail": "发送失败"}
+        old_ingress = {"state": "queued", "timestamp": NOW - 2, "_ingress": True}
+        evidence = live_ws.qq_evidence(live, {"runtimeRecords": [warning, receipt]}, now=NOW)
+        self.assertEqual((evidence.phase, evidence.at, evidence.reason), ("sent", NOW - 2, "chat_receipt"))
+        for records in ([warning], [warning, old_ingress], [warning, failure, receipt],
+                        [warning, dict(receipt, timestamp=NOW - 60)],
+                        [dict(warning, timestamp=NOW + 1), receipt]):
+            with self.subTest(records=records):
+                self.assertEqual(live_ws.qq_evidence(live, {"runtimeRecords": records}, now=NOW).phase, "idle")
+
     def test_only_fixed_native_chat_queue_marker_yields_recent_received(self):
         live = self.live(qq={"service_running": True})
         marker = live_ws.QQ_NATIVE_CHAT_INGRESS_DETAIL
@@ -1458,7 +1472,7 @@ class ReviewRegressionTests(unittest.TestCase):
         # newest-first 保留头部 6 条，而不是尾部。
         self.assertEqual(kept[0]["timestamp"], 300.0)
         self.assertEqual(len(kept), 6)
-        self.assertEqual(set(kept[0]), {"state", "timestamp", "chat", "ingress", "active", "tool"})
+        self.assertEqual(set(kept[0]), {"state", "timestamp", "chat", "ingress", "active", "tool", "fallback_notice"})
         self.assertTrue(kept[0]["chat"])
         self.assertFalse(kept[0]["ingress"])
         blob = json.dumps(panel, ensure_ascii=False)
@@ -1478,7 +1492,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertTrue(panel["runtime_records"][0]["ingress"])
         self.assertFalse(panel["runtime_records"][1]["ingress"])
         self.assertEqual(set(panel["runtime_records"][0]),
-                         {"state", "timestamp", "chat", "ingress", "active", "tool"})
+                         {"state", "timestamp", "chat", "ingress", "active", "tool", "fallback_notice"})
         self.assertNotIn("真实消息正文", json.dumps(panel, ensure_ascii=False))
 
     def test_non_chat_confirm_is_not_a_receipt(self):
@@ -1503,7 +1517,8 @@ class ReviewRegressionTests(unittest.TestCase):
         view = mod.qq_panel_view()
         self.assertEqual(view["runtimeRecords"][0],
                          {"state": "generating", "timestamp": NOW - 10,
-                          "_chat": False, "_ingress": False, "_active": True, "_tool": False})
+                          "_chat": False, "_ingress": False, "_active": True, "_tool": False,
+                          "_fallback_notice": False})
         self.assertEqual(live_ws.qq_evidence({}, view, now=NOW).phase, "thinking")
         with patch.object(mod.time, "monotonic", return_value=mod.qq_poller._read_at + 6):
             self.assertIsNone(mod.qq_panel_view())
@@ -1514,9 +1529,16 @@ class ReviewRegressionTests(unittest.TestCase):
         spec.loader.exec_module(mod)
         record = {"state": "confirmed", "timestamp": time.time() - 2,
                   "detail": "OneBot 已接受发送（测试）"}
-        poller = mod.QQEvidencePoller(lambda: {"runtimeRecords": [record]}, interval=0.01, timeout=1.0)
+        warning = {"state": "failed", "timestamp": record["timestamp"] + 0.5,
+                   "detail": live_ws.QQ_FALLBACK_NOTICE}
+        poller = mod.QQEvidencePoller(lambda: {"runtimeRecords": [warning, record]},
+                                     interval=0.01, timeout=1.0)
         mod.qq_poller = poller
         poller.tick()
+        projection = mod.qq_panel_view()
+        self.assertTrue(projection["runtimeRecords"][0]["_fallback_notice"])
+        self.assertFalse(projection["runtimeRecords"][0]["_chat"])
+        self.assertNotIn(live_ws.QQ_FALLBACK_NOTICE, json.dumps(projection, ensure_ascii=False))
         bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: {}, mod.qq_panel_view)
         for _ in range(2):
             frames = bridge.produce()
