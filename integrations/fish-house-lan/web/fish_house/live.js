@@ -7,7 +7,8 @@
   var lastOrderEvent = "";
   var expiry = 0, bubbleExpiry = 0, transitionTimer = 0, startedAt = 0;
   var idleDelay = 0, showBubble = true, bubbleOverride = null, themeBase = "", idleNode = "", phoneNode = "";
-  var pickupPreload = null, themeEpoch = 0;
+  var pickupPreload = null, themeEpoch = 0, pendingTheme = null;
+  var fadeMs = 450;
   var embedded = new URLSearchParams(location.search).get("mode") === "home";
   var allowedSources = { qq: true, wechat: true };
   var allowedPhases = { idle: true, received: true, thinking: true, replying: true, sent: true, error: true };
@@ -139,7 +140,7 @@
     clearTimeout(transitionTimer);
     transitionTimer = setTimeout(advance, Math.max(250, seconds * 1000));
   }
-  function playNode(id) {
+  function playNode(id, hasPreviousFrame) {
     var n = node(id), file = srcFor(n);
     if (!n || !file) return Promise.resolve(false);
     if (id === currentNode && !videos[active].paused && videos[active].readyState >= 2) return Promise.resolve(true);
@@ -156,7 +157,7 @@
         pause(next); next.removeAttribute("src"); next.load();
       }
     }
-    if (currentNode) {
+    if (currentNode || hasPreviousFrame) {
       // A new request can reuse the back layer before the previous fade ends.
       // Finish revealing the last presented frame before reloading that layer.
       prev.style.transition = "none";
@@ -210,7 +211,7 @@
           pause(prev); prev.removeAttribute("src"); prev.load();
           if (cover) cover.classList.add("cover-hidden");
           if (id === idleNode) preloadPickup();
-        }, 450);
+        }, fadeMs);
         next.onended = advance;
         if (firstFrame && embedded && window.parent !== window) {
           window.parent.postMessage({ type: "dafeiyu-live-ready" }, location.origin);
@@ -248,7 +249,12 @@
     if (!queue.length) return;
     var next = queue.shift(), graph = edges();
     if (!graph[currentNode] || !graph[currentNode][next]) { queue = []; return; }
-    playNode(next).then(function (ok) { if (!ok) { queue = []; return; } if (queue.length && node(next).loop) queueAfterLoop(next); });
+    var epoch = themeEpoch;
+    playNode(next).then(function (ok) {
+      if (epoch !== themeEpoch) return;
+      if (!ok) { queue = []; return; }
+      if (queue.length && node(next).loop) queueAfterLoop(next);
+    });
   }
   function enqueuePath(waypoints) {
     if (!waypoints || !waypoints.length || waypoints.some(function (id) { return !validNode(id); })) return false;
@@ -266,8 +272,9 @@
     clearTimeout(transitionTimer);
     if (pendingNode) return true;
     if (!currentNode) {
+      var epoch = themeEpoch;
       queue.shift();
-      playNode(queue.length ? queue[0] : waypoints[0]).then(function (ok) { if (!ok) queue = []; });
+      playNode(queue.length ? queue[0] : waypoints[0]).then(function (ok) { if (!ok && epoch === themeEpoch) queue = []; });
       return true;
     }
     if (currentNode && node(currentNode) && node(currentNode).loop && currentNode !== idleNode) {
@@ -302,8 +309,9 @@
     clearTimeout(transitionTimer);
     if (pendingNode) return true;
     if (!currentNode) {
+      var epoch = themeEpoch;
       var initial = queue.shift();
-      playNode(initial).then(function (ok) { if (!ok) queue = []; });
+      playNode(initial).then(function (ok) { if (!ok && epoch === themeEpoch) queue = []; });
     } else if (node(currentNode) && node(currentNode).loop) advance();
     else if (node(currentNode) && videos[active].ended) advance();
     return true;
@@ -321,8 +329,18 @@
       if (Number.isFinite(Number(config.idle_timeout_ms))) idleDelay = Math.max(0, Number(config.idle_timeout_ms));
       return;
     }
-    if (message.type === "bubble") { showText(message); return; }
     showText(message);
+    if (message.type === "bubble") return;
+    if (pendingTheme) {
+      // The next server frame may already refer to the requested theme.
+      // Keep only the latest playback state and preserve its original lifetime.
+      pendingTheme.frame = message;
+      pendingTheme.frameAt = Date.now();
+      return;
+    }
+    applyPlayback(message);
+  }
+  function applyPlayback(message) {
     var phase = message.phase;
     var requested = message.node_id && validNode(message.node_id) ? message.node_id : "";
     if (message.node_id && !requested) return;
@@ -345,12 +363,18 @@
     if (phase !== "idle" && Number(message.ttl_ms) > 0) expiry = setTimeout(function () { queue = []; enqueuePath([idleNode]); }, Number(message.ttl_ms));
     enqueuePath(targetPath);
   }
+  function resetStream() {
+    firstStateOnSocket = true;
+    lastSeq = -1;
+    if (pendingTheme) pendingTheme.frame = null;
+  }
   function connect() {
     if (embedded) {
       if (socket || !window.EventSource) return;
       var events = new EventSource("/api/house/live-events");
       socket = events;
-      events.onopen = function () { firstStateOnSocket = true; lastSeq = -1; };
+      events.onopen = resetStream;
+      events.onerror = function () { if (pendingTheme) pendingTheme.frame = null; };
       events.onmessage = receive;
       return;
     }
@@ -358,9 +382,14 @@
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var ws;
     try { ws = new WebSocket(proto + "//" + location.host + "/ws"); } catch (_) { scheduleReconnect(); return; }
-    socket = ws; firstStateOnSocket = true; lastSeq = -1;
+    socket = ws; resetStream();
     ws.onmessage = receive;
-    ws.onclose = function () { if (socket === ws) socket = null; scheduleReconnect(); };
+    ws.onclose = function () {
+      if (socket !== ws) return;
+      socket = null;
+      if (pendingTheme) pendingTheme.frame = null;
+      scheduleReconnect();
+    };
     ws.onerror = function () {};
   }
   function receive(event) {
@@ -372,23 +401,68 @@
   function loadTheme(url) {
     var absolute = safeThemeUrl(url);
     if (!absolute) return Promise.resolve(false);
+    if (pendingTheme && pendingTheme.url === absolute.href) return pendingTheme.promise;
+    pendingTheme = null;
     if (theme && themeBase && new URL("theme.json", themeBase).href === absolute.href) return Promise.resolve(true);
-    return fetch(absolute.href, { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error("theme HTTP " + r.status); return r.json(); }).then(function (data) {
+    var request = { url: absolute.href, frame: null, frameAt: 0, promise: null };
+    pendingTheme = request;
+    request.promise = fetch(absolute.href, { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error("theme HTTP " + r.status); return r.json(); }).then(function (data) {
+      if (pendingTheme !== request) return false;
       if (!data || !data.config || !data.config.videos || !data.config.flow || !Array.isArray(data.config.flow.nodes) || !Array.isArray(data.config.flow.edges)) throw new Error("unsupported theme");
+      pendingTheme = null;
       startedAt++;
       clearTimeout(expiry);
       clearTimeout(transitionTimer);
       themeEpoch++;
       clearPickupPreload(false);
       theme = data; themeBase = new URL("./", absolute.href); chooseThemeNodes();
+      var previous = videos[active];
+      var keepFrame = previous.style.opacity === "1" && previous.readyState >= 2
+        && previous.videoWidth > 0 && Boolean(srcFor(node(idleNode)));
       var coverFile = assetUrl(data.meta && data.meta.cover, "cover");
-      if (cover && coverFile) { cover.src = coverFile; cover.classList.remove("cover-hidden"); }
-      videos.forEach(function (video) { pause(video); video.removeAttribute("src"); video.load(); video.style.opacity = "0"; });
-      active = 0; currentNode = ""; pendingNode = ""; queue = [];
+      if (cover && coverFile) {
+        cover.src = coverFile;
+        if (!keepFrame) cover.classList.remove("cover-hidden");
+      }
+      videos.forEach(function (video) {
+        if (keepFrame && video === previous) {
+          video.onended = video.onerror = null;
+          return;
+        }
+        pause(video); video.removeAttribute("src"); video.load(); video.style.opacity = "0";
+      });
+      if (!keepFrame) active = 0;
+      currentNode = ""; pendingNode = ""; queue = [];
       lastOrders = ""; lastOrdersAt = 0; lastOrderEvent = "";
-      if (idleNode) playNode(idleNode).then(function (ok) { if (ok && queue.length) { if (node(idleNode).loop) queueAfterLoop(idleNode); else advance(); } });
+      lastTransition = ""; lastTransitionAt = 0;
+      var frame = request.frame, ttl = frame ? Number(frame.ttl_ms) : 0;
+      var remaining = ttl - (Date.now() - request.frameAt);
+      var resume = frame && (ttl === 0 || remaining > 0);
+      var epoch = themeEpoch;
+      if (idleNode) playNode(idleNode, keepFrame).then(function (ok) {
+        if (epoch !== themeEpoch) return;
+        if (!ok) {
+          if (keepFrame) {
+            if (cover) cover.classList.remove("cover-hidden");
+            pause(previous); previous.removeAttribute("src"); previous.load(); previous.style.opacity = "0";
+          }
+          return;
+        }
+        if (!queue.length) return;
+        if (keepFrame && resume) transitionTimer = setTimeout(advance, fadeMs);
+        else if (resume || !node(idleNode).loop) advance();
+        else queueAfterLoop(idleNode);
+      });
+      if (resume) applyPlayback(Object.assign({}, frame, { ttl_ms: Math.max(0, remaining) }));
       return true;
-    }).catch(function (error) { console.error("Fish House theme load failed", error); return false; });
+    }).catch(function (error) {
+      if (pendingTheme === request) {
+        pendingTheme = null;
+        console.error("Fish House theme load failed", error);
+      }
+      return false;
+    });
+    return request.promise;
   }
   bubbleOverride = new URLSearchParams(location.search).get("bubble");
   if (bubbleOverride === "0") showBubble = false;

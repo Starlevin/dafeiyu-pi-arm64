@@ -1,8 +1,10 @@
 "use strict";
 // Isolated real-Chrome test: serves only the workspace UI and an in-memory /ws fixture.
 const fs = require("fs"), os = require("os"), path = require("path"), { spawn, spawnSync } = require("child_process");
-const ROOT = path.resolve(__dirname, "../web"), OUT = path.join(os.tmpdir(), "fish-house-live-player-report.json");
-const PORT = 18931, CDP = 9239, CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const ROOT = path.resolve(__dirname, "../web");
+const OUT = process.env.FISH_HOUSE_TEST_REPORT || path.join(os.tmpdir(), "fish-house-live-player-report.json");
+const PORT = Number(process.env.FISH_HOUSE_TEST_PORT || 18931), CDP = Number(process.env.FISH_HOUSE_TEST_CDP || 9239);
+const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const py = String.raw`import asyncio,json,os
 from aiohttp import web
@@ -89,6 +91,7 @@ async function main() {
           else callback(time, metadata);
         });
       };
+      window.fhControlledFrameCallback = HTMLVideoElement.prototype.requestVideoFrameCallback;
     ` });
     await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/live` });
     await until(() => cdp.js("[...document.querySelectorAll('video')].some(v => !v.paused && v.currentTime > .1)"),
@@ -324,6 +327,69 @@ async function main() {
     check("legacy frame readiness requires advancing real playback",
       await cdp.js("[...document.querySelectorAll('video')].some(v => v.style.opacity === '1' && v.currentTime > 0 && v.videoWidth > 0)"),
       "playback clock and decoded dimensions are both available");
+    const themeUrl = name => `/fish_house/themes/${name}/theme.json`;
+    const injectFrame = msg => fetch(`http://127.0.0.1:${PORT}/inject`, {
+      method: "POST", headers: {"content-type":"application/json"}, body: JSON.stringify(msg)
+    });
+    await cdp.js(`(function () {
+      var fetchTheme = window.fetch;
+      window.fhHeldTheme = {};
+      window.fhThemeToHold = 'rekeyed';
+      window.fetch = function (url, options) {
+        var name = window.fhThemeToHold;
+        if (!name || !String(url).endsWith('/themes/' + name + '/theme.json')) return fetchTheme(url, options);
+        return new Promise(function (resolve) {
+          window.fhHeldTheme[name] = function () {
+            var result = fetchTheme(url, options);
+            delete window.fhHeldTheme[name];
+            resolve(result);
+            return result;
+          };
+        });
+      };
+    })()`);
+    await injectFrame(configFrame(13, themeUrl("rekeyed"), true));
+    await until(() => cdp.js("Boolean(window.fhHeldTheme.rekeyed)"), "theme request paused");
+    await send(14, "thinking", "wechat", "state", rekeyPhone.id);
+    await until(() => cdp.js("window.__fishHouseLive.getState().lastSeq === 14"), "state arrives before delayed theme");
+    check("the existing theme remains visible during the request",
+      await cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-clone' && window.__fishHouseLive.getState().currentNode === 'rest'"),
+      "the new graph is still pending");
+    await cdp.js("HTMLVideoElement.prototype.requestVideoFrameCallback=window.fhControlledFrameCallback; window.fhHoldFrame=true; window.fhHeldTheme.rekeyed(); true");
+    await until(() => cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-rekeyed' && window.fhHeldFrames.length > 0"),
+      "new theme's first presented frame paused");
+    check("theme change retains the old video while the new frame is pending",
+      await cdp.js("[...document.querySelectorAll('video')].some(v => v.currentSrc.includes('/themes/cloned/videos/') && v.style.opacity === '1' && v.readyState >= 2)"),
+      "visible old-theme video remains available after new metadata loads");
+    await cdp.js("window.fhHoldFrame=false; window.fhHeldFrames.splice(0).forEach(release => release())");
+    await until(() => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(rekeyPhone.id)}`),
+      "the state received during a theme load is played by the new graph");
+    check("the retained state selects a decoded video in the new theme",
+      await cdp.js("[...document.querySelectorAll('video')].some(v => v.currentSrc.includes('/themes/rekeyed/videos/') && !v.paused && v.readyState >= 2)"),
+      `node=${rekeyPhone.id}`);
+
+    await cdp.js("window.fhThemeToHold='cloned'");
+    await injectFrame(configFrame(15, themeUrl("cloned"), true));
+    await until(() => cdp.js("Boolean(window.fhHeldTheme.cloned)"), "obsolete theme request paused");
+    await injectFrame(configFrame(16, themeUrl("retry"), true));
+    await until(() => cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-retry'"), "newer theme loads first");
+    await cdp.js("window.fhHeldTheme.cloned().then(function () { return true; })");
+    await sleep(400);
+    check("a late response cannot replace the newer theme",
+      await cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-retry'"), "latest selection remains active");
+
+    await injectFrame(configFrame(17, themeUrl("cloned"), true));
+    await until(() => cdp.js("Boolean(window.fhHeldTheme.cloned)"), "theme request paused for expiry");
+    await injectFrame({type:"state", seq:18, ts:Math.floor(Date.now()/1000), source:"qq", phase:"thinking",
+      node_id:defaultPhone.id, bubble_text:"", ttl_ms:80});
+    await until(() => cdp.js("window.__fishHouseLive.getState().lastSeq === 18"), "short-lived state delivered");
+    await sleep(200);
+    await cdp.js("window.fhHeldTheme.cloned(); true");
+    await until(() => cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-clone' && window.__fishHouseLive.getState().currentNode === 'rest'"),
+      "cloned theme remains at idle after retained state expires");
+    check("expired state cannot trigger an animation after a slow theme load",
+      await cdp.js("(function(){var s=window.__fishHouseLive.getState(); return s.currentNode==='rest' && !s.pendingNode && !s.queued.length;})()"),
+      "expired thinking event did not enter the queue");
     const s = await cdp.send("Page.captureScreenshot", { format:"png" }); fs.writeFileSync(path.join(os.tmpdir(), "fish-house-live-frame.png"), Buffer.from(s.data,"base64"));
     const expectedRetryErrors = cdp.errors.filter(e => e.method === "Log.entryAdded" && e.params.entry.url === retryUrl && /503/.test(e.params.entry.text));
     const unexpectedBrowserErrors = cdp.errors.filter(e => !expectedRetryErrors.includes(e));
