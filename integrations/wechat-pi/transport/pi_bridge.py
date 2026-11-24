@@ -1319,8 +1319,14 @@ def _tx_observe(target, text_composer=None):
         raw_title = header["raw_title"]
         group_suffix = bool(raw_title and tx_guard.norm_target(raw_title) != raw_title)
         fp = _tx_composer_fp(node)
-        if text_composer is not None and not text_composer:
-            text_composer.update(app=app, node=node, rect=rect, reader=reader, editor=editor, fp=fp)
+        if text_composer is not None:
+            if fp is None:
+                return {"ok": False, "reason": "composer_unreadable", "app_ok": True}
+            # Qt can change the name when focus or draft changes. The original
+            # accessible object and rectangle were already checked above.
+            fp = (fp[0], fp[2])
+            if not text_composer:
+                text_composer.update(app=app, node=node, rect=rect, reader=reader, editor=editor, fp=fp)
         return {
             "ok": True,
             "app_ok": True,
@@ -1828,7 +1834,8 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
         if not ready_to_return:
             # Re-observe the current chat and exact draft before clearing it.
             try:
-                if guard.clear_proof(text, own_fp).allow:
+                if (guard.clear_proof(text, own_fp).allow and get_app() == app
+                        and (not memory_account or app_memory_account(app) == memory_account)):
                     editor.set_text_contents("")
             except Exception:
                 pass

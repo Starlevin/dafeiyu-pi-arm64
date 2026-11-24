@@ -683,8 +683,10 @@ class SendReceiptTests(unittest.TestCase):
     def test_login_switch_before_return_prevents_submission(self):
         harness = SendReplyHarness()
         harness.ns["app_memory_account"] = lambda _app: "other-account"
+        harness.guard.clear_proof = Mock(return_value=TxVerdict(True))
         self.assertEqual(harness.send(memory_account="initial-account"), "memory_account_changed")
         self.assertEqual(harness.state["return_key_count"], 0)
+        self.assertEqual(harness.reader.text, "我的回复")
 
     def test_unknown_return_submission_never_clears_the_draft_or_retries(self):
         harness = SendReplyHarness()
