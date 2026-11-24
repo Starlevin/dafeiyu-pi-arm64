@@ -551,6 +551,26 @@ def cancel_filtered_empty_refreshes(queue, due_targets, allowed_targets):
     return cancelled
 
 
+def visible_group_title(app):
+    raw_title = chat_title(app, normalize=False)
+    title = norm_title(raw_title)
+    return title if title and title != raw_title else None
+
+
+def plan_verified_wal_targets(queue, groups, app, short_target, now):
+    """Rank only scopes that look open; the read still requires full proof."""
+    due = {target for target in groups if queue.due(target, now=now)}
+    planned = due & {short_target}
+    remaining = due - planned
+    if remaining and app is not None:
+        title = visible_group_title(app)
+        if title in remaining:
+            planned.add(title)
+    for target in due - planned:
+        queue.cancel_empty_refresh(target)
+    return planned
+
+
 def keep_short_wal_refresh(queue, target, app, targets, *, competing_activity=False):
     """Keep the verified group open, yielding a delayed retry to other traffic."""
     attempt = queue.empty_refresh_attempt(target) if target is not None else 0
@@ -566,8 +586,7 @@ def keep_short_wal_refresh(queue, target, app, targets, *, competing_activity=Fa
         # Keeping the window idle cannot send or read a message. Use just
         # the visible title here. The scan still checks the full open-group
         # proof immediately before reading its rows.
-        title = chat_title(app, normalize=False)
-        if title != target and norm_title(title) == target:
+        if visible_group_title(app) == target:
             return target
         reason = "scope_changed"
     if queue.cancel_empty_refresh(target):
@@ -698,16 +717,15 @@ def _dismiss_bieye_search_overlay(app):
 
 
 def group_is_open(app, name):
+    # Reject title mismatches before traversing the overlay or sidebar.
+    if visible_group_title(app) != name:
+        return False
     # In the explicitly authorized Bieye group, visible search results can
     # obscure the current room; even a matching title must fail closed.
     if name == "别野" and _bieye_search_overlay_visible(app):
         return False
-    raw_title = chat_title(app, normalize=False)
     # A title alone cannot distinguish two groups with the same display name.
-    # Even for an already-open conversation, fail closed unless exactly one
-    # matching visible sidebar entry can be resolved.
-    return (raw_title != name and norm_title(raw_title) == name
-            and len(visible_chat_matches(app, name)) == 1)
+    return visible_group_title(app) == name and len(visible_chat_matches(app, name)) == 1
 
 
 def open_chat(app, name):
@@ -2873,16 +2891,8 @@ def main():
                 targets = [short_refresh_target]
         verified_recheck_targets = set()
         if verified_rechecks is not None:
-            recheck_now = time.monotonic()
-            for target in args.group:
-                if not verified_rechecks.due(target, now=recheck_now):
-                    continue
-                if target == short_refresh_target or (app_now is not None and group_is_open(app_now, target)):
-                    verified_recheck_targets.add(target)
-                else:
-                    # A short refresh is valid only while the same
-                    # independently verified group remains selected.
-                    verified_rechecks.cancel_empty_refresh(target)
+            verified_recheck_targets = plan_verified_wal_targets(
+                verified_rechecks, args.group, app_now, short_refresh_target, time.monotonic())
             # Another group's settle window can temporarily filter this target
             # out. Drop its short deadline instead of waking the full Qt scan
             # every 10 ms after it expires.

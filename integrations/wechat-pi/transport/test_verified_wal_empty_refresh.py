@@ -203,5 +203,47 @@ class WalPollPriorityTests(unittest.TestCase):
         self.assertEqual(sweep.pending_count(), 0)
 
 
+class WalGroupReadPlanningTests(unittest.TestCase):
+    def test_due_groups_are_planned_using_one_visible_title_read(self):
+        queue = VerifiedWalRescanQueue(lambda: 102)
+        queue.hint("第一个群", now=100)
+        queue.hint("第二个群", now=100)
+        queue.hint("未启用群", now=100)
+        app = object()
+        with patch.object(bridge, "chat_title", return_value="第二个群(5)") as title, \
+             patch.object(bridge, "group_is_open") as full_proof:
+            planned = bridge.plan_verified_wal_targets(
+                queue, ["第一个群", "第二个群"], app, None, 102)
+        self.assertEqual(planned, {"第二个群"})
+        title.assert_called_once_with(app, normalize=False)
+        full_proof.assert_not_called()
+
+    def test_matching_private_title_does_not_schedule_a_group_read(self):
+        queue = VerifiedWalRescanQueue(lambda: 102)
+        queue.hint("同名会话", now=100)
+        with patch.object(bridge, "chat_title", return_value="同名会话"):
+            self.assertEqual(bridge.plan_verified_wal_targets(
+                queue, ["同名会话"], object(), None, 102), set())
+
+    def test_group_proof_short_circuits_the_other_visible_room(self):
+        with patch.object(bridge, "chat_title", return_value="另一个群(5)"), \
+             patch.object(bridge, "visible_chat_matches") as sidebar, \
+             patch.object(bridge, "_bieye_search_overlay_visible") as overlay:
+            self.assertFalse(bridge.group_is_open(object(), "夹具群"))
+        sidebar.assert_not_called()
+        overlay.assert_not_called()
+
+    def test_full_proof_rejects_a_switch_or_duplicate_before_reading(self):
+        for titles, matches, expected in [
+            (["夹具群(5)", "另一个群(5)"], [object()], False),
+            (["夹具群(5)", "夹具群(5)"], [object(), object()], False),
+            (["夹具群(5)", "夹具群(5)"], [object()], True),
+        ]:
+            with self.subTest(expected=expected, matching_rows=len(matches)), \
+                 patch.object(bridge, "chat_title", side_effect=titles), \
+                 patch.object(bridge, "visible_chat_matches", return_value=matches):
+                self.assertEqual(bridge.group_is_open(object(), "夹具群"), expected)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
