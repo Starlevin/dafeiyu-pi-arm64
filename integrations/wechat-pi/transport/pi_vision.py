@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import ctypes as c
 import hashlib
 import json
@@ -145,26 +146,30 @@ def _png(W: int, H: int, rows: list[bytes]) -> bytes:
     return out
 
 
-def crop(x: int, y: int, w: int, h: int) -> bytes | None:
-    """从根窗口截取矩形，返回 PNG 字节。越界会被裁到屏幕内。"""
+@contextmanager
+def _screen():
     L = _lib()
     d = L["od"](None)
     if not d:
-        return None
-    root = L["rr"](d)
-    r_ret, x_ret, y_ret = c.c_ulong(), c.c_int(), c.c_int()
-    sw, sh, bw, dp = c.c_uint(), c.c_uint(), c.c_uint(), c.c_uint()
-    L["geo"](d, root, c.byref(r_ret), c.byref(x_ret), c.byref(y_ret),
-             c.byref(sw), c.byref(sh), c.byref(bw), c.byref(dp))
-    SW, SH = sw.value, sh.value
-    x = max(0, min(x, SW - 1))
-    y = max(0, min(y, SH - 1))
-    w = max(1, min(w, SW - x))
-    h = max(1, min(h, SH - y))
-    img = L["gi"](d, root, x, y, w, h, c.c_ulong(0xFFFFFFFF), 2)
+        yield None
+        return
     try:
-        if not img:
-            return None
+        root = L["rr"](d)
+        r_ret, x_ret, y_ret = c.c_ulong(), c.c_int(), c.c_int()
+        sw, sh, bw, dp = c.c_uint(), c.c_uint(), c.c_uint(), c.c_uint()
+        found = L["geo"](d, root, c.byref(r_ret), c.byref(x_ret), c.byref(y_ret),
+                         c.byref(sw), c.byref(sh), c.byref(bw), c.byref(dp))
+        yield (L, d, root, sw.value, sh.value) if found and sw.value and sh.value else None
+    finally:
+        L["cd"](d)
+
+
+def _capture_rows(screen, x, y, w, h):
+    L, d, root, _, _ = screen
+    img = L["gi"](d, root, x, y, w, h, c.c_ulong(0xFFFFFFFF), 2)
+    if not img:
+        return None
+    try:
         rows = []
         gp = L["gp"]
         for yy in range(h):
@@ -173,28 +178,49 @@ def crop(x: int, y: int, w: int, h: int) -> bytes | None:
                 px = gp(img, xx, yy) & 0xFFFFFF
                 row += bytes(((px >> 16) & 0xFF, (px >> 8) & 0xFF, px & 0xFF))
             rows.append(bytes(row))
-        return _png(w, h, rows)
+        return rows
     finally:
-        if img:
-            L["di"](img)
-        L["cd"](d)
+        L["di"](img)
 
 
-def sample_avatar(x, y, w, h):
-    """Use pixel variation to distinguish an avatar from the flat chat background."""
-    data = crop(x, y, w, h)
-    if not data:
+def crop(x: int, y: int, w: int, h: int) -> bytes | None:
+    """从根窗口截取矩形，返回 PNG 字节。越界会被裁到屏幕内。"""
+    with _screen() as screen:
+        if screen is None:
+            return None
+        _, _, _, sw, sh = screen
+        x = max(0, min(x, sw - 1))
+        y = max(0, min(y, sh - 1))
+        w = max(1, min(w, sw - x))
+        h = max(1, min(h, sh - y))
+        rows = _capture_rows(screen, x, y, w, h)
+    return _png(w, h, rows) if rows else None
+
+
+def _avatar_from_rows(rows):
+    if not rows:
         return None
-    width, height = struct.unpack_from(">II", data, 16)
-    if (width, height) != (w, h):
-        return None
-    rows = zlib.decompress(data[41:-16])
     pixels = {
-        rows[row * (3 * w + 1) + i:row * (3 * w + 1) + i + 3]
-        for row in range(h)
-        for i in range(1, 3 * w + 1, 3)
+        row[i:i + 3]
+        for row in rows
+        for i in range(1, len(row), 3)
     }
-    return len(pixels) >= 16, hashlib.sha256(rows).digest()
+    return len(pixels) >= 16, hashlib.sha256(b"".join(rows)).digest()
+
+
+def sample_avatars(*rects):
+    """Measure small avatar strips locally on one X11 connection."""
+    with _screen() as screen:
+        if screen is None:
+            return (None,) * len(rects)
+        _, _, _, sw, sh = screen
+        samples = []
+        for x, y, w, h in rects:
+            if x < 0 or y < 0 or w <= 0 or h <= 0 or x + w > sw or y + h > sh:
+                samples.append(None)
+                continue
+            samples.append(_avatar_from_rows(_capture_rows(screen, x, y, w, h)))
+        return tuple(samples)
 
 
 def describe(png: bytes, prompt: str, timeout: int = 120,

@@ -1028,8 +1028,8 @@ def avatar_side(rect, bounds):
     bx, by, bw, bh = bounds
     if x != bx or w != bw or w < 300 or h < 45 or y < by or y + 38 > by + bh:
         return None
-    left = pv.sample_avatar(x + 26, y + 15, 24, 23)
-    right = pv.sample_avatar(x + w - 19, y + 15, 16, 23)
+    left, right = pv.sample_avatars(
+        (x + 26, y + 15, 24, 23), (x + w - 19, y + 15, 16, 23))
     if left and right and left[0] != right[0]:
         return ("incoming", left[1]) if left[0] else ("outgoing", right[1])
     return None
