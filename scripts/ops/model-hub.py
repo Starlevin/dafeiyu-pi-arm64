@@ -513,7 +513,7 @@ def _normalize_memory_json(result, body):
     return result
 
 
-def _invoke(profile, body, _allow_auto=True):
+def _invoke(profile, body, _allow_auto=True, *, retry_timeout=None):
     """发一次上游请求。可回退故障统一抛 Fallbackable，其余异常原样上抛。"""
     profile = _profile_with_override(profile)
     payload = copy.deepcopy(body)
@@ -547,7 +547,8 @@ def _invoke(profile, body, _allow_auto=True):
             limit = 150
         try:
             _result = http('POST', profile['base_url'].rstrip('/') + '/chat/completions', key,
-                           profile.get('proxy', False), payload, timeout=(10, limit))
+                           profile.get('proxy', False), payload,
+                           timeout=retry_timeout if retry_timeout is not None else (10, limit))
         except requests.exceptions.Timeout:
             _usage_note(profile, None, 'timeout')
             raise Fallbackable('timeout')
@@ -808,6 +809,11 @@ def complete(body):
             body.get('max_tokens'), '[omitted]'), flush=True)
     except Exception:
         pass
+    budget = body.get('max_tokens')
+    short_wechat_reply = (strict_mode and is_proactive and '本轮来自 wechat 客户端适配层' in sys_text
+                          and type(budget) is int and 0 < budget <= 160 and not body.get('tools')
+                          and profile.get('id') == 'workbuddy-deepseek' and profile.get('protocol') == 'chat'
+                          and profile.get('base_url', '').rstrip('/') == GATEWAY_URL)
     # The participation instructions mention sticker_id even when no candidates were sent.
     sticker_mode = strict_mode and (
         '本轮可选表情 JSON：\n[' in sys_text if is_proactive else 'sticker_id' in sys_text)
@@ -824,10 +830,37 @@ def complete(body):
                    'latency_ms': int((time.monotonic() - started) * 1000)})
         return result
 
+    def short_backup_is_empty(result):
+        if empty_reply(result):
+            return True
+        choice = result['choices'][0]
+        message = choice.get('message') or {}
+        if choice.get('finish_reason') in ('content_filter', 'sensitive') or message.get('tool_calls'):
+            return False
+        try:
+            fields = json.loads(_strip_fence(message.get('content') or '').strip())
+        except ValueError:
+            return True
+        return not isinstance(fields, dict) or (
+            fields.get('participate') is not False and not str(fields.get('text') or '').strip())
+
+    def attempt_backup():
+        result = _invoke(backup, body)
+        if not short_wechat_reply or backup.get('id') != 'sensenova-6.8-flash-lite':
+            return result
+        result = salvage_reply(result, strict_mode, is_proactive, sticker_mode)
+        if not short_backup_is_empty(result):
+            return result
+        retry = _invoke(backup, {**body, 'max_tokens': 256}, False, retry_timeout=(1.25, 3.75))
+        retry = salvage_reply(retry, strict_mode, is_proactive, sticker_mode)
+        if short_backup_is_empty(retry):
+            raise Fallbackable('empty_reply')
+        return retry
+
     if backup and cooldown_until(profile['id']) > time.time():
         prior = (cooldown_state().get(profile['id']) or {}).get('reason', 'unknown')
         try:
-            result = _invoke(backup, body)
+            result = attempt_backup()
         except Exception as error:
             raise UpstreamError(503, '主通道处于冷却（%s），备用模型也不可用：%s' % (prior, error))
         if empty_reply(result):
@@ -848,7 +881,7 @@ def complete(body):
             raise UpstreamError(503, '%s 不可用（%s），且没有配置备用模型' % (profile['name'], error.reason))
         set_cooldown(profile['id'], error.reason)
         try:
-            result = _invoke(backup, body)
+            result = attempt_backup()
         except Exception as secondary:
             raise UpstreamError(503, '%s 不可用（%s），备用模型 %s 也不可用：%s'
                                 % (profile['name'], error.reason, backup['name'], secondary))
