@@ -23,6 +23,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const { Gateway } = require('../src/adapters/gateway');
 const { Bot } = require('../src/pipeline/chat');
+const stickers = require('../src/adapters/stickers');
 const { Store } = require('../src/memory/store');
 const { chatHash } = require('../src/memory/hash');
 const personCard = require('../src/memory/personCard');
@@ -188,6 +189,36 @@ test('managed WeChat stores assistant text only after the signed, matching UI re
   assert.equal(restarted.confirmMemory({ ...receipt, receipt: abandoned.compatMemoryReceipt }), false);
   assert.deepEqual(roles(cold, scopeA), ['user', 'assistant']);
   assert.deepEqual(roles(cold, scopeB), ['user']);
+});
+
+test('a text-only request keeps the WeChat reply free of sticker jobs', async (t) => {
+  const { gateway } = gatewayFixture(t, { complete: async () => '收到这一条[[sticker:开心]]' });
+  const { bot } = gateway;
+  bot.config.features.stickers = true;
+  const directory = stickers.categoryDir(stickers.stickerDir(bot.config, bot.config.root), 'happy', { create: true });
+  fs.writeFileSync(path.join(directory, 'fixture.png'), Buffer.from([0]));
+  let planned = 0;
+  bot.stickerService = {
+    acceptsTarget: () => true,
+    plan: () => { planned += 1; return { id: 'fixture-sticker' }; },
+  };
+  for (const body of ['这条无需发表情包，请只回文字。', '不要发表情包', '请仅回复文本', '纯文字就好']) {
+    assert.equal(stickers.isStickerRequest(body), false);
+    assert.equal(bot.stickerDemandFor({ text: body, state: {}, uid: 'fixture' }), false);
+    const reply = await gateway.handleInbound(
+      { ...inbound(GROUP_A, body), msg_id: require('node:crypto').randomUUID() }, { local: true },
+    );
+    assert.equal(reply.action, 'reply');
+    assert.equal(reply.sticker, undefined);
+  }
+  assert.equal(planned, 0);
+  const normal = await gateway.handleInbound(
+    { ...inbound(GROUP_B, '给我发个开心表情包吧'), msg_id: require('node:crypto').randomUUID() },
+    { local: true },
+  );
+  assert.equal(normal.action, 'reply');
+  assert.equal(normal.sticker?.id, 'fixture-sticker');
+  assert.equal(planned, 1);
 });
 
 test('a reply derived from an owner Moments snapshot never enters cold chat memory', async (t) => {

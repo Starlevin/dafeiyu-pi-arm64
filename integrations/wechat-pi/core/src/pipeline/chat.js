@@ -1853,7 +1853,8 @@ class Bot {
       return null;
     }
     const msg = (decision && decision.msg) || {};
-    if (!this.stickerService.acceptsTarget(msg)) return null;
+    const userText = String(msg.cleanText || msg.text || '');
+    if (stickers.declinesSticker(userText) || !this.stickerService.acceptsTarget(msg)) return null;
     let category = decision && decision.stickerCategory;
     // 模型可能写中文名（开心/撒娇），统一成内部 key 再判断有没有图
     if (category) {
@@ -1867,7 +1868,6 @@ class Bot {
     // 用户明确要，或这一轮命中提醒且开了“必发”：模型没写标记也补一张。
     // 必发只在命中提醒的轮次生效；严肃/求助轮次 demand 本来就是 false。
     if (!category) {
-      const userText = String(msg.cleanText || msg.text || '');
       const rawEnsure = this.config.sticker && this.config.sticker.ensureSend;
       const ensure = rawEnsure === true || rawEnsure === 1 || /^(1|true|on|yes)$/i.test(String(rawEnsure || ''));
       const demanded = Boolean(decision && decision.stickerDemand);
@@ -1931,6 +1931,7 @@ class Bot {
     // 总闸关着就不参与；有没有图交给 persona（图库空时不会出现表情包块，也不会加尾部提示）。
     if (!stickers.isOn(this.config)) return false;
     const clean = String(text || '');
+    if (stickers.declinesSticker(clean)) return false;
     if (stickers.isStickerRequest(clean)) {
       if (state && uid) {
         const map = state.seriousByUser;

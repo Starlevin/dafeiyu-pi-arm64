@@ -735,10 +735,15 @@ const USE_RE = /(用|拿|靠)[^，。！？!?\n]{0,8}(表情包?|动图|贴纸|�
 // 「表情包来一个」这种倒装
 const REVERSE_RE = /(表情包?|动图|贴纸|梗图|meme)\s*(来|发|整|甩|扔)(一?个|一?张|点)?/i;
 const WANT_BARE_RE = /^\s*(表情包|表情)(呗|吧|啊|呀|嘛|啦)?[！!？?~～。]*\s*$/;
-const NEGATIVE_RE = /(不要|别|不用|不想|不会|不能|不许|不准|停止)[^，。！？!?]{0,12}(发|来|给|整|弄|甩|扔|上|用|拿).{0,6}(表情|动图|贴纸|梗图|meme|图)/i;
+const NEGATIVE_RE = /(不要|别|不用|无需|不必|不想|不会|不能|不许|不准|停止)[^，。！？!?]{0,12}(发|来|给|整|弄|甩|扔|上|用|拿).{0,6}(表情|动图|贴纸|梗图|meme|图)/i;
+const TEXT_ONLY_RE = /(?:(?:只|仅)(?:要|用|发|回|回复|发送|回答|给)?(?:纯)?(?:文字|文本)|用纯(?:文字|文本)(?:回复|回|回答)|纯(?:文字|文本)(?:回复|回|回答)?(?:就好|就行|即可|就可以))/;
+function declinesSticker(value) {
+  const text = String(value ?? '').trim();
+  return NEGATIVE_RE.test(text) || TEXT_ONLY_RE.test(text);
+}
 function isStickerRequest(value) {
   const text = String(value ?? '').trim();
-  if (NEGATIVE_RE.test(text)) return false;
+  if (declinesSticker(text)) return false;
   return WANT_RE.test(text) || WANT_BARE_RE.test(text) || USE_RE.test(text) || REVERSE_RE.test(text);
 }
 
@@ -1012,6 +1017,6 @@ function upload(config, root, emotion, files) {
 }
 module.exports = { EMOTIONS, EXTRA_PREFIX, cleanCategoryLabel, extraKey, hasCategory, readExtraCategories, writeExtraCategories, categoryFile, discoverCategories, syncDiscoveredCategories, readIgnored, writeIgnored, normalizeEmotion, categoryFromName, resolveCategory, SYNONYMS, promptCategories, GENERIC, EXTS, MAX_FILE_BYTES, MAX_UPLOAD_BYTES, MAX_UPLOAD_FILES,
   hasEmotion, resolveImage, safeDirectory, migrateLegacy, migrateLegacyAsync, ensureBuiltinDirs, stickerDir, regularFile, listImages, listImagesAsync, categoryImages, categoryImagesAsync, categoryItems, categoryItemsAsync, categoryDir, targetForOpen, imagesFor, isOn,
-  invalidateScan, clearScanCache, choose, pick, isStickerRequest, imageType, upload,
+  invalidateScan, clearScanCache, choose, pick, declinesSticker, isStickerRequest, imageType, upload,
   isSeriousText, isLivelyText, SERIOUS_WINDOW_MS, SERIOUS_TURNS,
   isUsableCategory, defaultCategory, resolveUsableCategory, categoryInText, setProbeLogger, moodCategory };
