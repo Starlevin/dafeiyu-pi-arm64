@@ -217,6 +217,33 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertEqual(payload["group_auto_reply_public_question_cooldown_seconds"], 240)
         self.assertEqual(payload["msg_id"], trace)
 
+    def test_media_demo_words_require_a_native_mention(self):
+        for command, kind in (("发送测试图片", "image"), ("发送测试文件", "file")):
+            with self.subTest(kind=kind):
+                limiter = Mock(take=Mock(return_value=True))
+                accepted, jobs = self.ingest_rows(
+                    [(command, (1, 1, 2, 2))], limiter=limiter,
+                    public_question_settler=bridge.PublicQuestionSettleQueue())
+                self.assertFalse(accepted)
+                self.assertTrue(jobs.empty())
+                limiter.take.assert_not_called()
+
+                target = "别野"
+                payload = bridge.inbound_payload(command, target, target)
+                with patch.object(bridge.pm, "approved_path", return_value=Path("fixture")) as lookup:
+                    self.assertIsNone(bridge.approved_media_command(
+                        target, payload | {"at_me": False, "group_auto_reply": True}, "fixture"))
+                    self.assertIsNone(bridge.approved_media_command(
+                        target, payload | {"quoted": True}, "fixture"))
+                    self.assertIsNone(bridge.approved_media_command(
+                        target, payload | {"photo_present": True}, "fixture"))
+                    self.assertIsNone(bridge.approved_media_command("其他群", payload, "fixture"))
+                    lookup.assert_not_called()
+                    demo = bridge.approved_media_command(target, payload, "fixture")
+                    self.assertEqual(demo["media"]["kind"], kind)
+                    lookup.assert_called_once()
+        self.assertTrue(bridge.eligible_auto_text("发测试图片的时候大家都笑了"))
+
     def test_ordinary_media_topic_stays_on_the_settled_swift_route(self):
         endpoint = "http://127.0.0.1:41143"
         routes = SimpleNamespace(

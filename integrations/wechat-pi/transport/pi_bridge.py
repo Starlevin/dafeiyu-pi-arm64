@@ -244,6 +244,12 @@ def latest_candidate_matches(rows, expected_trace, trace_at, is_plain_candidate)
         return False
 
 
+_MEDIA_DEMO_COMMANDS = {
+    "发送测试图片": {"kind": "image", "name": "media-upload-test-blue.png"},
+    "发送测试文件": {"kind": "file", "name": "media-upload-test-note.txt"},
+}
+
+
 def eligible_auto_text(raw):
     """Reject media placeholders, commands, other-member mentions and noise."""
     if not isinstance(raw, str):
@@ -257,7 +263,7 @@ def eligible_auto_text(raw):
         return False
     if body in ("图片", "[图片]", "Image", "[Image]", "表情", "[动画表情]"):
         return False
-    return True
+    return body not in _MEDIA_DEMO_COMMANDS
 
 
 CORE_URL = "http://127.0.0.1:19301"
@@ -2427,20 +2433,20 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
     return queued_any
 
 
-def approved_media_command(target, text, photo, media_dir):
-    """Explicit Bieye pilot commands, never inferred by model free text."""
-    if target != "别野" or not media_dir or photo:
+def approved_media_command(target, payload, media_dir):
+    """The Bieye media pilot requires a native @ and an exact text command."""
+    if (target != "别野" or not media_dir
+            or payload.get("chat_type") != "group" or payload.get("chat_id") != target
+            or payload.get("at_me") is not True or payload.get("group_auto_reply")
+            or payload.get("quoted") or payload.get("photo_present")):
         return None
-    demos = {
-        "发送测试图片": {"kind": "image", "name": "media-upload-test-blue.png"},
-        "发送测试文件": {"kind": "file", "name": "media-upload-test-note.txt"},
-    }
-    spec = demos.get(text.strip()) if isinstance(text, str) else None
+    text = payload.get("text")
+    spec = _MEDIA_DEMO_COMMANDS.get(text.strip()) if isinstance(text, str) else None
     if spec is None:
         return None
     if pm.approved_path(spec, media_dir) is None:
         return {"ok": False, "error": "media_not_approved"}
-    return {"ok": True, "action": "reply", "reply": "", "media": spec}
+    return {"ok": True, "action": "reply", "reply": "", "media": dict(spec)}
 
 
 def generate_replies(jobs, replies, token, health=None, media_dir="", ready_signal=None, wake_signal=None):
@@ -2458,7 +2464,7 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
                 response = {"ok": False, "error": "queue_expired"}
             else:
                 record(health, "generation", "started", trace)
-                demo = approved_media_command(target, payload.get("text", ""), photo, media_dir)
+                demo = approved_media_command(target, payload, media_dir)
                 if demo is not None:
                     response = demo
                 else:
