@@ -10,6 +10,7 @@ import math
 FIRST_EMPTY_REFRESH_S = 0.65
 SECOND_EMPTY_REFRESH_AT_S = 5.2
 EMPTY_REFRESH_EXPIRES_AT_S = 6.5
+OPEN_GROUP_RECHECK_S = 8.0
 
 def should_enqueue_wal_sweep(roles, watched, signatures, last_signatures,
                              urgent_target):
@@ -111,6 +112,7 @@ class VerifiedWalRescanQueue:
         self.retry_s = retry_s
         self.max_pending = max_pending
         self.pending = {}
+        self._next_accelerated_at = float("-inf")
         self.stats = {"queued": 0, "coalesced": 0, "completed": 0,
                       "failed": 0, "expired": 0, "full": 0,
                       "empty_refresh_queued": 0, "empty_refresh_cancelled": 0}
@@ -152,6 +154,22 @@ class VerifiedWalRescanQueue:
         item = self.pending.get(target)
         value = item.get("source_at") if item else None
         return value if isinstance(value, (int, float)) else None
+
+    def schedule_open_group(self, target, *, now, last_scan, source_at):
+        """Give a fresh hint for an already verified group one earlier read per throttle window."""
+        self._expire(now)
+        fresh = (isinstance(source_at, (int, float)) and not isinstance(source_at, bool)
+                 and 0 <= now - source_at <= 2.0)
+        accelerated = (fresh and last_scan is not None and now - last_scan < OPEN_GROUP_RECHECK_S
+                       and now >= self._next_accelerated_at and target not in self.pending)
+        interval = 2.0 if accelerated else OPEN_GROUP_RECHECK_S
+        due_at = max(now, (last_scan if last_scan is not None else now) + interval)
+        if not self.hint(target, now=now, earliest_at=due_at, source_at=source_at):
+            return None
+        if accelerated:
+            self.pending[target]["accelerated"] = True
+            self._next_accelerated_at = now + OPEN_GROUP_RECHECK_S
+        return due_at, accelerated
 
     def due(self, target, *, now=None):
         now = self.clock() if now is None else now
@@ -203,11 +221,12 @@ class VerifiedWalRescanQueue:
         return True
 
     def wait_timeout(self, interval, now=None):
-        """Shorten idle wake only for the bounded empty-view refresh."""
+        """Wake for bounded refreshes and upcoming accelerated first reads."""
         now = self.clock() if now is None else now
         self._expire(now)
         deadlines = [item["due_at"] for item in self.pending.values()
-                     if item.get("empty_refresh_pending", False)]
+                     if item.get("empty_refresh_pending")
+                     or (item.get("accelerated") and not item["attempts"] and item["due_at"] > now)]
         if not deadlines:
             return interval
         return min(interval, max(0.01, min(deadlines) - now))

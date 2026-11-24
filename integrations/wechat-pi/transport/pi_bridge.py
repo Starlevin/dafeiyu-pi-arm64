@@ -2915,11 +2915,14 @@ def main():
         wal_scope_ms = int((time.monotonic() - wal_scope_started) * 1000)
         if (verified_rechecks is not None and urgent_target in args.group
                 and "message" in wal_roles):
-            last = last_scanned.get(urgent_target, now)
-            earliest = last + 8.0
-            if verified_rechecks.hint(urgent_target, now=now, earliest_at=earliest,
-                                      source_at=wal_message_at):
-                log("wal_verified_recheck_queued", delay_ms=max(0, int((earliest - now) * 1000)))
+            scheduled_at = time.monotonic()
+            scheduled = verified_rechecks.schedule_open_group(
+                urgent_target, now=scheduled_at, last_scan=last_scanned.get(urgent_target),
+                source_at=wal_message_at)
+            if scheduled is not None:
+                due_at, accelerated = scheduled
+                log("wal_verified_recheck_queued", delay_ms=int((due_at - scheduled_at) * 1000),
+                    accelerated=accelerated)
         if (sweep is not None and should_enqueue_wal_sweep(
                 wal_roles, watched, current_signatures, last_sidebar, urgent_target)):
             if sweep.hint(wal_roles, watched, now=now):

@@ -6,6 +6,34 @@ from wal_sweep_queue import VerifiedWalRescanQueue
 
 
 class VerifiedWalRescanQueueTests(unittest.TestCase):
+    def test_accelerated_first_read_wakes_early_without_overdue_spin(self):
+        queue = VerifiedWalRescanQueue(lambda: 100)
+        due_at, accelerated = queue.schedule_open_group(
+            "group", now=100, last_scan=99, source_at=99.75)
+        self.assertEqual((due_at, accelerated), (101, True))
+        self.assertEqual(queue.wait_timeout(3, now=100), 1)
+        self.assertFalse(queue.due("group", now=100.9))
+        self.assertTrue(queue.due("group", now=101))
+        self.assertEqual(queue.wait_timeout(3, now=102), 3)
+        self.assertEqual(queue.source_at("group"), 99.75)
+
+    def test_acceleration_budget_is_shared_and_duplicates_keep_the_first_deadline(self):
+        queue = VerifiedWalRescanQueue(lambda: 100)
+        self.assertEqual(queue.schedule_open_group("one", now=100, last_scan=99, source_at=100), (101, True))
+        self.assertIsNone(queue.schedule_open_group("one", now=100.5, last_scan=100, source_at=100.5))
+        self.assertTrue(queue.due("one", now=101))
+        queue.completed("one")
+        self.assertEqual(queue.schedule_open_group("two", now=101, last_scan=100, source_at=101), (108, False))
+        self.assertEqual(queue.schedule_open_group("three", now=108, last_scan=107, source_at=108), (109, True))
+
+    def test_stale_untimed_or_uninitialized_hints_use_the_existing_interval(self):
+        for last_scan, source_at, due in ((99, 97, 107), (99, None, 107), (None, 100, 108), (99, 101, 107)):
+            with self.subTest(last_scan=last_scan, source_at=source_at):
+                queue = VerifiedWalRescanQueue(lambda: 100)
+                self.assertEqual(queue.schedule_open_group(
+                    "group", now=100, last_scan=last_scan, source_at=source_at), (due, False))
+                self.assertEqual(queue.wait_timeout(10, now=100), 10)
+
     def setUp(self):
         self.now = 100.0
         self.queue = VerifiedWalRescanQueue(lambda: self.now, ttl_s=45, retry_s=8)
