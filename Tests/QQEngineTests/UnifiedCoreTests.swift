@@ -472,6 +472,76 @@ private func inbound(_ text: String = "合成消息",
         #expect(prompts.dropFirst().allSatisfy { !$0.contains("应急新地标") })
     }
 
+    @Test func confirmedNoteSurvivesReplyRotationAndConsoleRecoversItsOwnScope() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let books = directory.appendingPathComponent("wechat-group-memory")
+        try FileManager.default.createDirectory(at: books, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account", "other-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成回复"), fail: false, calls: CallCounter())
+        let journal = UnifiedIdempotencyJournal(fileURL: file, capacity: 2)
+        let live = UnifiedReplyCore(config: config, generator: generator, journal: journal)
+        let note = await live.handle(inbound("记住：集合地点=合成会场", msgId: "blocked-archive"))
+        let receipt = try #require(note.reply.memoryReceipt)
+        #expect(!(await live.confirmWeChatMemory(receipt)))
+        for index in 0..<5 {
+            let unrelated = inbound("合成对话", chatId: "other-group", msgId: "rotate-\(index)")
+            #expect((await live.handle(unrelated)).reply.action == "reply")
+        }
+        #expect(await journal.count() == 3)
+
+        let reopened = UnifiedIdempotencyJournal(fileURL: file, capacity: 2)
+        #expect(await reopened.count() == 3)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: books.path)
+        let cold = UnifiedReplyCore(config: config, generator: generator, journal: reopened)
+        let groups = try cold.wechatMemoryGroups()
+        #expect(groups.count == 4)
+        let original = try #require(groups.first)
+        #expect(original.label == "fixture-group")
+        for group in groups.dropFirst() {
+            #expect(try await cold.wechatMemoryEntries(scope: group.id).isEmpty)
+        }
+        let records = try await cold.wechatMemoryEntries(scope: original.id)
+        #expect(records.map(\.value) == ["合成会场"])
+        #expect(await cold.confirmWeChatMemory(receipt))
+        #expect(try await cold.wechatMemoryEntries(scope: original.id).map(\.id) == records.map(\.id))
+        #expect((await cold.handle(inbound("合成对话", chatId: "other-group",
+                                           msgId: "after-recovery"))).reply.action == "reply")
+        #expect(await reopened.count() == 2)
+    }
+
+    @Test func fullArchiveBacklogPreservesOlderProofAndStillAllowsOrdinaryReplies() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let books = directory.appendingPathComponent("wechat-group-memory")
+        try FileManager.default.createDirectory(at: books, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o755])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 40)
+        config.allowedAccounts = ["fixture-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成回复"), fail: false, calls: CallCounter())
+        let journal = UnifiedIdempotencyJournal(fileURL: file, capacity: 1)
+        let core = UnifiedReplyCore(config: config, generator: generator, journal: journal)
+        let earlier = await core.handle(inbound("记住：集合地点=旧队列待恢复", msgId: "confirmed-note"))
+        let firstReceipt = try #require(earlier.reply.memoryReceipt)
+        #expect(!(await core.confirmWeChatMemory(firstReceipt)))
+        let later = await core.handle(inbound("记住：其他地点=超出队列", msgId: "over-capacity"))
+        let laterReceipt = try #require(later.reply.memoryReceipt)
+        #expect(!(await core.confirmWeChatMemory(laterReceipt)))
+        #expect((await core.handle(inbound("合成问题", chatId: "other-group", msgId: "ordinary"))).reply.action == "reply")
+        #expect(await journal.count() == 2)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: books.path)
+        let cold = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file, capacity: 1))
+        let scope = try #require(cold.wechatMemoryGroups().first?.id)
+        #expect(try await cold.wechatMemoryEntries(scope: scope).map(\.value) == ["旧队列待恢复"])
+    }
+
     @Test func naturalGroupMemoryExtractionAcceptsGroundedStatements() throws {
         let examples = [
             ("我们已经约好，团建集合地点在图书馆西门。", "团建集合地点", "图书馆西门", "task"),

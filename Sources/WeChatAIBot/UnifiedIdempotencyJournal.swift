@@ -14,6 +14,11 @@ public struct UnifiedJournalEntry: Codable, Sendable, Equatable {
     public var at: Double
     public var reply: UnifiedReply?
     var memory: UnifiedJournalMemory? = nil
+
+    fileprivate var awaitsGroupArchive: Bool {
+        state == "done" && reply?.memoryReceipt != nil
+            && memory?.confirmedAt != nil && memory?.groupNote != nil
+    }
 }
 
 enum WeChatMemoryAdminError: Error {
@@ -143,8 +148,10 @@ public actor UnifiedIdempotencyJournal {
     private let writer: Writer
     private var entries: [String: UnifiedJournalEntry] = [:]
     private var memoryDrafts: [String: UnifiedJournalMemory] = [:]
-    private var archivedNoteReceipts: Set<UUID> = []
     private var storageUsable = true
+    private var groupArchiveBacklogFull: Bool {
+        entries.values.lazy.filter(\.awaitsGroupArchive).count >= max(1, capacity)
+    }
 
     /// `nil` selects an in-memory journal for fixtures. A file-backed journal
     /// loads v1 data and fails closed if an existing file cannot be read or decoded.
@@ -200,9 +207,6 @@ public actor UnifiedIdempotencyJournal {
         Self.trim(&candidate, capacity: capacity)
         guard persist(candidate) else { return false }
         entries = candidate
-        if archivedNoteReceipts.count > capacity {
-            archivedNoteReceipts.formIntersection(candidate.values.compactMap { $0.reply?.memoryReceipt })
-        }
         // The inbound body stays in process memory unless the UI proves the send.
         memoryDrafts = memoryDrafts.filter { key, _ in
             guard let entry = candidate[key] else { return false }
@@ -218,9 +222,19 @@ public actor UnifiedIdempotencyJournal {
                   $0.state == "done" && $0.reply?.memoryReceipt == receipt
               }) else { return false }
         if let memory = entry.memory, memory.confirmedAt != nil {
-            return saveGroupNote(memory, receipt: receipt)
+            return archiveGroupNote(entry)
         }
         guard (0...600).contains(now - entry.at), var draft = memoryDrafts[entry.key] else { return false }
+        // Protect already confirmed notes when the archive is unavailable.
+        // A full backlog refuses additional confirmations instead of evicting
+        // an existing proof or allowing an unbounded journal.
+        if draft.groupNote != nil && groupArchiveBacklogFull {
+            recoverGroupNotes(for: draft.sessionDigest)
+            guard !groupArchiveBacklogFull else {
+                print("unified_group_memory_archive_backlog_full")
+                return false
+            }
+        }
         draft.confirmedAt = now
         entry.memory = draft
         var candidate = entries
@@ -228,19 +242,23 @@ public actor UnifiedIdempotencyJournal {
         guard persist(candidate) else { return false }
         entries = candidate
         memoryDrafts.removeValue(forKey: entry.key)
-        return saveGroupNote(draft, receipt: receipt)
+        return archiveGroupNote(entry)
     }
 
-    private func saveGroupNote(_ memory: UnifiedJournalMemory, receipt: UUID) -> Bool {
-        guard let note = memory.groupNote, let confirmedAt = memory.confirmedAt else { return true }
-        if archivedNoteReceipts.contains(receipt) { return true }
+    private func archiveGroupNote(_ entry: UnifiedJournalEntry) -> Bool {
+        guard let memory = entry.memory, let note = memory.groupNote,
+              let confirmedAt = memory.confirmedAt, let receipt = entry.reply?.memoryReceipt else {
+            return true
+        }
         do {
             guard let archive = try groupArchive(memory.sessionDigest, create: true) else { return false }
             try archive.recordConfirmedGroupNote(id: receipt.uuidString, label: note.label,
                                                   value: note.value, kind: note.kind,
                                                   inferred: note.inferred == true,
                                                   at: Date(timeIntervalSince1970: confirmedAt))
-            archivedNoteReceipts.insert(receipt)
+            // The archive committed first. A restart before the next journal
+            // write may replay this receipt, which the archive deduplicates.
+            entries[entry.key]?.memory?.groupNote = nil
             return true
         } catch {
             print("unified_group_memory_write_failed")
@@ -248,18 +266,18 @@ public actor UnifiedIdempotencyJournal {
         }
     }
 
+    private func recoverGroupNotes(for scope: String) {
+        let waiting = entries.values.filter {
+            $0.awaitsGroupArchive && $0.memory?.sessionDigest == scope
+        }.sorted { ($0.memory?.confirmedAt ?? $0.at, $0.key) < ($1.memory?.confirmedAt ?? $1.at, $1.key) }
+        for entry in waiting {
+            if !archiveGroupNote(entry) { break }
+        }
+    }
+
     func groupMemoryContext(for scope: String, query: String) -> String {
         guard storageUsable else { return "" }
-        // Finish notes whose delivery proof persisted just before a process or storage failure.
-        let waiting = entries.values.compactMap { entry -> (Double, UUID, UnifiedJournalMemory)? in
-            guard entry.state == "done", let memory = entry.memory, memory.sessionDigest == scope,
-                  let at = memory.confirmedAt, memory.groupNote != nil,
-                  let receipt = entry.reply?.memoryReceipt, !archivedNoteReceipts.contains(receipt) else { return nil }
-            return (at, receipt, memory)
-        }.sorted { $0.0 < $1.0 }
-        for (_, receipt, memory) in waiting {
-            if !saveGroupNote(memory, receipt: receipt) { break }
-        }
+        recoverGroupNotes(for: scope)
         do {
             let archive = try groupArchive(scope, create: false)
             return archive?.context(query, subject: "CONVERSATION", characters: 480,
@@ -293,6 +311,7 @@ public actor UnifiedIdempotencyJournal {
 
     func groupMemoryEntries(for scope: String) throws -> [WeChatMemoryEntry] {
         guard storageUsable, fileURL != nil else { throw WeChatMemoryAdminError.unavailable }
+        recoverGroupNotes(for: scope)
         guard let archive = try groupArchive(scope, create: false) else { return [] }
         let now = Date()
         return archive.items.filter { $0.current(now) }
@@ -396,8 +415,11 @@ public actor UnifiedIdempotencyJournal {
         _ store: inout [String: UnifiedJournalEntry], capacity: Int
     ) {
         guard store.count > capacity else { return }
-        let sorted = store.values.sorted { $0.at < $1.at }
-        for entry in sorted.prefix(store.count - capacity) {
+        // Rotation and v1 reload both retain delivery-proven notes until the
+        // independent long-term archive has acknowledged them.
+        let ordinary = store.values.filter { !$0.awaitsGroupArchive }
+            .sorted { ($0.at, $0.key) < ($1.at, $1.key) }
+        for entry in ordinary.prefix(max(0, ordinary.count - capacity)) {
             store.removeValue(forKey: entry.key)
         }
     }
