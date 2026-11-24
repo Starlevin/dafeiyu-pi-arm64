@@ -111,6 +111,21 @@ class BlockingStateScanTests(unittest.TestCase):
         self.assertEqual(hidden.role_calls, 0)
         self.assertEqual([node.role_calls for node in (root, regular, overlay)], [1, 1, 1])
 
+    def test_depth_boundary_yields_node_without_reading_excluded_children(self):
+        leaf = FakeNode("list")
+        boundary = FakeNode("filler", children=(leaf,))
+        root = FakeNode("frame", children=(boundary,))
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING))
+        with patch.object(bridge, "Atspi", atspi):
+            self.assertEqual(list(bridge._walk_showing(root, maxd=1)),
+                             [(root, 0), (boundary, 1)])
+            self.assertEqual(boundary.child_count_calls, 0)
+            self.assertEqual(boundary.child_index_calls, 0)
+            with self.assertRaisesRegex(RuntimeError, "visible_tree_incomplete"):
+                list(bridge._walk_showing(root, maxd=1, strict=True))
+        self.assertEqual(boundary.child_count_calls, 1)
+        self.assertEqual(boundary.child_index_calls, 0)
+
     def scan(self, root):
         atspi = SimpleNamespace(
             StateType=SimpleNamespace(SHOWING=SHOWING),

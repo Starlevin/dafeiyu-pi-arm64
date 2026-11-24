@@ -432,6 +432,9 @@ def _walk_showing(node, dep=0, maxd=26, skip_lists=False, include_role=False, *,
         yield (node, dep, node_role) if include_role else (node, dep)
         return
     yield (node, dep, node_role) if include_role else (node, dep)
+    # At the non-strict boundary nothing below this node can be visited.
+    if dep == maxd and not strict:
+        return
     try:
         ch = node.get_child_count()
     except Exception:
