@@ -910,6 +910,30 @@ class ReviewRegressionTests(unittest.TestCase):
         finally:
             poller.stop()
 
+    def test_poller_speeds_up_only_for_verified_recent_chat(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "fh_server_active_poll", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        poller = mod.QQEvidencePoller(lambda: None, interval=2.0)
+        now = 100.0
+        cases = [
+            ("queued", live_ws.QQ_NATIVE_CHAT_INGRESS_DETAIL, now - 1, 0.5),
+            ("generating", live_ws.QQ_ACTIVE_CHAT["generating"][0], now - 1, 0.5),
+            ("sending", live_ws.QQ_ACTIVE_CHAT["sending"][0], now - 1, 0.5),
+            ("confirmed", live_ws.QQ_CHAT_CONFIRM_PREFIX, now - 1, 2.0),
+            ("generating", live_ws.QQ_ACTIVE_CHAT["generating"][0], now - 21, 2.0),
+            ("generating", "unverified", now - 1, 2.0),
+        ]
+        for state, detail, timestamp, interval in cases:
+            with self.subTest(state=state, detail=detail, timestamp=timestamp):
+                panel = {"runtimeRecords": [{"state": state, "detail": detail,
+                                             "timestamp": timestamp}]}
+                self.assertEqual(poller._next_interval(panel, now=now), interval)
+        self.assertEqual(poller._next_interval(None, now=now), 2.0)
+
     def test_health_file_cache_reads_atomic_replacements(self):
         import importlib.util
         import json

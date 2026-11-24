@@ -384,6 +384,8 @@ QQ_RECORD_STATES = {"queued", "generating", "sending", "confirmed",
                     "skipped", "failed", "uncertain", "cancelled"}
 QQ_MAX_RECORDS = 6
 QQ_POLL_INTERVAL = 2.0     # 有观众时的后台轮询节拍
+QQ_ACTIVE_POLL_INTERVAL = 0.5
+QQ_ACTIVE_POLL_WINDOW = 20.0  # 长时间等待时恢复低频
 QQ_POLL_TIMEOUT = 1.2      # 单次读取预算，超时就保留上一轮，不阻塞任何请求
 QQ_PANEL_MAX_AGE = 5.0
 
@@ -444,7 +446,7 @@ def qq_panel_evidence(panel):
 
 
 class QQEvidencePoller:
-    """单个后台 worker 低频轮询 Controller，只在有 WS 观众时才跑。
+    """单个后台 worker 轮询 Controller，只在有实时播放器观众时才跑。
 
     绝不在 ``BotSnapshot.read()`` / ``/api/status`` 请求内做这次读取：旧接口
     的形状与耗时保持原样，QQ 证据只供 WS 使用。
@@ -496,12 +498,20 @@ class QQEvidencePoller:
                 self._read_at = time.monotonic()
         return value
 
+    def _next_interval(self, panel, *, now):
+        evidence = live_ws.qq_evidence({}, panel, now=now)
+        if (evidence.phase in ("received", "thinking", "replying")
+                and 0 <= now - evidence.at <= QQ_ACTIVE_POLL_WINDOW):
+            return min(self._interval, QQ_ACTIVE_POLL_INTERVAL)
+        return self._interval
+
     def _run(self):
         # Fill the first snapshot as soon as a viewer connects. Waiting one full
         # interval here made cold-start QQ evidence invisible for up to 2 s.
-        self.tick()
-        while not self._stop.wait(self._interval):
-            self.tick()
+        while not self._stop.is_set():
+            panel = self.tick()
+            if self._stop.wait(self._next_interval(panel, now=time.time())):
+                break
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
