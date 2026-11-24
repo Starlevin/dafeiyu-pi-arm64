@@ -27,6 +27,8 @@ PRIVATE = ROOT / 'secrets/model-hub'
 ORIGIN = 'http://127.0.0.1:18090'
 GROUP_CHAT_ROUTE_SECONDS = 22.0
 GROUP_CHAT_PRIMARY_SECONDS = 12.0
+WECHAT_SHORT_ROUTE_SECONDS = 15.0
+WECHAT_SHORT_PRIMARY_SECONDS = 7.5
 PANEL_PROXY = 'http://127.0.0.1:18091'
 CALLBACK = ORIGIN + '/auth/callback'
 PROXY = 'http://127.0.0.1:17890'
@@ -885,11 +887,17 @@ def complete(body):
              or ('本轮是群内公开且暂未得到回答的问题' in sys_text and budget <= 400
                  and all(key in sys_text.lower() for key in ('text', 'emotion', 'intensity'))))
     )
-    route_deadline = started + GROUP_CHAT_ROUTE_SECONDS if fast_group_route else None
-    primary_deadline = min(route_deadline, started + GROUP_CHAT_PRIMARY_SECONDS) if fast_group_route else None
     short_wechat_reply = (strict_mode and is_proactive and '本轮来自 wechat 客户端适配层' in sys_text
                           and type(budget) is int and 0 < budget <= 160 and not body.get('tools')
                           and _is_local_workbuddy(profile))
+    route_deadline = primary_deadline = None
+    if fast_group_route:
+        primary_seconds, route_seconds = (
+            (WECHAT_SHORT_PRIMARY_SECONDS, WECHAT_SHORT_ROUTE_SECONDS) if short_wechat_reply
+            else (GROUP_CHAT_PRIMARY_SECONDS, GROUP_CHAT_ROUTE_SECONDS)
+        )
+        route_deadline = started + route_seconds
+        primary_deadline = min(route_deadline, started + primary_seconds)
     primary = profile
     if short_wechat_reply and profile.get('reasoning') == 'high':
         # Reserve the short participation budget for visible text and JSON.

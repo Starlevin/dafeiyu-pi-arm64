@@ -126,6 +126,45 @@ def test_workbuddy_account_snapshot_routes(hub):
     print('workbuddy_account_snapshot: PASS')
 
 
+def test_short_wechat_reply_has_its_own_budget(hub):
+    primary = {'id': 'workbuddy-deepseek', 'name': 'primary', 'protocol': 'chat',
+               'base_url': hub.GATEWAY_URL, 'fallback_to': 'sensenova-6.8-flash-lite'}
+    backup = {'id': 'sensenova-6.8-flash-lite', 'name': 'backup', 'protocol': 'chat'}
+    result = {'choices': [{'message': {'content':
+        '{"participate":true,"text":"接上同一话题","emotion":"neutral","intensity":1}'}}]}
+    hub.profiles = lambda: [primary, backup]
+    hub.time = types.SimpleNamespace(monotonic=lambda: 100.0, time=lambda: 100.0,
+                                     strftime=lambda *_: 'fixture')
+    hub._workbuddy_model_state = lambda _: (None, 0)
+    hub.cooldown_until = lambda _: 0
+    hub.set_cooldown = lambda *_: None
+    hub.clear_cooldown = lambda *_: None
+    routes = []
+    hub.route_log = routes.append
+    for platform, limit, tools, expected in (
+            ('wechat', 128, None, (107.5, 115.0)),
+            ('qq', 128, None, (112.0, 122.0)),
+            ('wechat', 161, None, (None, None)),
+            ('wechat', 128, [{'type': 'function'}], (None, None))):
+        deadlines = []
+        def invoke(profile, _body, _deadline=None):
+            deadlines.append(_deadline)
+            if profile['id'] == primary['id']:
+                raise hub.Fallbackable('timeout')
+            return result
+        hub._invoke = invoke
+        req = {'model': primary['id'], 'max_tokens': limit,
+               'response_format': {'type': 'json_object'},
+               'messages': [{'role': 'system',
+                             'content': f'[QQ_PARTICIPATION] 本轮来自 {platform} 客户端适配层 text emotion intensity'}]}
+        if tools:
+            req['tools'] = tools
+        assert hub.complete(req)['choices']
+        assert tuple(deadlines) == expected, (platform, limit, deadlines)
+        assert routes[-1]['reason'] == ('group_primary_timeout' if expected[0] else 'timeout')
+    print('wechat_short_deadline_scope: PASS')
+
+
 def test_workbuddy_account_error_is_scoped(hub):
     payload = json.dumps({'error': {'type': 'no_available_account', 'message': 'fixture private detail'}})
     parsed = hub._upstream_error(types.SimpleNamespace(status_code=503, content=payload.encode()))
@@ -247,6 +286,7 @@ def main():
     test_workbuddy_account_error_is_scoped(load())
     test_workbuddy_account_snapshot_routes(load())
     test_short_wechat_reserves_budget_for_the_visible_reply(load())
+    test_short_wechat_reply_has_its_own_budget(load())
     print('ALL MODEL-HUB OFFLINE TESTS PASS')
 
 
