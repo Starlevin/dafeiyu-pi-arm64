@@ -284,6 +284,7 @@
     $('authCard').hidden = false;
     $('console').hidden = true;
     clearWeChatMemory();
+    clearMemoryStorage();
     clearWeChatGroupPersonas();
     closeWeChatAccount();
     const isSetup = (mode === 'setup');
@@ -1336,6 +1337,68 @@
     }
   }
 
+  let memoryStorageRequest = 0;
+
+  function clearMemoryStorage() {
+    ++memoryStorageRequest;
+    $('memoryStorageRows').replaceChildren();
+    $('memoryStorageStatus').textContent = '';
+    $('memoryStorageRefresh').disabled = false;
+  }
+
+  async function refreshMemoryStorage() {
+    if (!$('memoryStorage').open || !state.session || !state.session.authenticated) return;
+    const request = ++memoryStorageRequest;
+    const button = $('memoryStorageRefresh');
+    const status = $('memoryStorageStatus');
+    const mount = $('memoryStorageRows');
+    button.disabled = true;
+    status.textContent = '正在读取存储状态…';
+    mount.replaceChildren();
+    try {
+      const result = await apiGet('/api/memory/storage');
+      if (request !== memoryStorageRequest) return;
+      const labels = {
+        available: '已建立', empty: '尚未建立会话存储',
+        partial: '扫描不完整', unavailable: '无法读取',
+      };
+      const count = (value) => Number.isSafeInteger(value) && value >= 0 ? String(value) : '—';
+      const bytes = (value) => {
+        if (!Number.isSafeInteger(value) || value < 0) return '—';
+        if (value < 1024) return value + ' B';
+        return value < 1024 ** 2 ? (value / 1024).toFixed(1) + ' KiB'
+          : (value / (1024 ** 2)).toFixed(2) + ' MiB';
+      };
+      for (const [key, title] of [
+        ['qqReliable', 'QQ 可靠记忆'], ['wechatSwift', '微信群长期记忆'],
+        ['wechatCompat', '微信兼容链记忆'],
+      ]) {
+        const store = result.stores[key] || {};
+        const list = node('dl', 'meta-list');
+        const values = [
+          ['状态', labels[store.state] || labels.unavailable],
+          ['会话目录', count(store.scopes)], ['文件大小', bytes(store.bytes)],
+        ];
+        if (key !== 'wechatCompat') values.push(['状态备份', count(store.stateBackups)]);
+        for (const [label, value] of values) {
+          const row = node('div', 'meta-row');
+          row.append(node('dt', '', label), node('dd', '', value));
+          list.appendChild(row);
+        }
+        const card = node('article', 'memory-record');
+        card.append(node('h4', '', title), list);
+        mount.appendChild(card);
+      }
+      status.textContent = '';
+    } catch (error) {
+      if (request !== memoryStorageRequest) return;
+      if (error.status === 401) { handleUnauthorized(); return; }
+      status.textContent = '存储状态读取失败，请刷新重试。';
+    } finally {
+      if (request === memoryStorageRequest) button.disabled = false;
+    }
+  }
+
   let memoryRequest = 0;
   let memoryEdit = null;
   let savingMemory = false;
@@ -1667,6 +1730,11 @@
     $('refreshBtn').addEventListener('click', () => { if (!state.busy) loadOverview(); });
     $('logoutBtn').addEventListener('click', onLogout);
     $('wechatMemory').addEventListener('toggle', () => refreshWeChatMemory(true));
+    $('memoryStorage').addEventListener('toggle', () => {
+      if ($('memoryStorage').open) refreshMemoryStorage();
+      else clearMemoryStorage();
+    });
+    $('memoryStorageRefresh').addEventListener('click', refreshMemoryStorage);
     $('wechatMemoryGroup').addEventListener('change', () => refreshWeChatMemory(false));
     $('wechatMemoryRefresh').addEventListener('click', () => refreshWeChatMemory(true));
     $('wechatMemoryEdit').addEventListener('submit', saveWeChatMemory);

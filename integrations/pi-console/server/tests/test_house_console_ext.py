@@ -19,6 +19,7 @@ if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))
 
 import unified_console as uc
+import house_console_ext
 import wechat_account
 
 
@@ -451,6 +452,63 @@ class HouseConsoleExtTests(unittest.TestCase):
 
         _, pr = self._get("/api/proactive/config")
         self.assertTrue(json.loads(pr)["ok"])
+
+    def test_memory_storage_requires_auth_and_distinguishes_store_paths(self):
+        endpoint = "/api/memory/storage"
+        with self.assertRaises(urllib.error.HTTPError) as anonymous:
+            self._get(endpoint, authed=False)
+        self.assertEqual(anonymous.exception.code, 401)
+        _, raw = self._get(endpoint)
+        self.assertEqual(json.loads(raw)["stores"]["wechatSwift"]["state"], "unavailable")
+
+        data = self.qq_root / "data-qq"
+        qq = data / "QQMemoryReliable" / ("scope-" + "1" * 16)
+        (qq / "journal").mkdir(parents=True)
+        (qq / "state.json").write_bytes(b"fixture-raw")
+        (qq / "state.json.bak").write_bytes(b"bak")
+        (qq / "journal" / "seg-000001.log").write_bytes(b"log")
+        compat = self.wx_root / "data" / "memory" / "chats" / ("2" * 16)
+        compat.mkdir()
+        (compat / "messages.jsonl").write_bytes(b"fixture-message-body")
+        _, raw = self._get(endpoint)
+        self.assertNotIn(b"fixture-message-body", raw)
+        self.assertNotIn(b"scope-", raw)
+        self.assertEqual(json.loads(raw)["stores"], {
+            "qqReliable": {"state": "available", "scopes": 1, "bytes": 17, "stateBackups": 1},
+            "wechatSwift": {"state": "empty", "scopes": 0, "bytes": 0, "stateBackups": 0},
+            "wechatCompat": {"state": "available", "scopes": 1, "bytes": 20, "stateBackups": None},
+        })
+
+        swift = data / "wechat-group-memory" / ("3" * 64)
+        swift.mkdir(parents=True)
+        (swift / "state.json").write_bytes(b"fixture-note")
+        with patch.object(Path, "open", side_effect=AssertionError("metadata probe opened a file")):
+            metadata = house_console_ext._build_memory_storage({
+                "qqRoot": str(self.qq_root), "wechatCoreRoot": str(self.wx_root),
+            })
+        self.assertEqual(metadata["stores"]["wechatSwift"],
+                         {"state": "available", "scopes": 1, "bytes": 12, "stateBackups": 0})
+
+    def test_memory_storage_reports_truncation_and_skips_links(self):
+        data = self.qq_root / "data-qq"
+        scope = data / "QQMemoryReliable" / ("scope-" + "a" * 16)
+        scope.mkdir(parents=True)
+        (scope / "state.json").write_bytes(b"abcd")
+        with patch.object(house_console_ext, "MEMORY_SCAN_LIMIT", 1):
+            _, body = self._get("/api/memory/storage")
+        self.assertEqual(json.loads(body)["stores"]["qqReliable"], {
+            "state": "partial", "scopes": 1, "bytes": 0, "stateBackups": 0,
+        })
+        external = self.qq_root / "outside-memory"
+        external.write_bytes(b"outside fixture contents")
+        try:
+            (scope / "state.json.bak").symlink_to(external)
+        except OSError:
+            self.skipTest("symbolic links unavailable for this environment")
+        _, body = self._get("/api/memory/storage")
+        self.assertEqual(json.loads(body)["stores"]["qqReliable"], {
+            "state": "partial", "scopes": 1, "bytes": 4, "stateBackups": 0,
+        })
 
     def test_gemini_health_degradation_and_safe_switch_readback(self):
         _, raw = self._get("/api/gemini/health")

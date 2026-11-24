@@ -7,12 +7,12 @@
 <meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151b26" media="(prefers-color-scheme: dark)">
 <title>大肥鱼统一控制台</title>
-<link rel="stylesheet" href="app.css?v=workspace-3">
+<link rel="stylesheet" href="app.css?v=workspace-4">
 <link rel="stylesheet" href="usage.css">
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js?v=workspace-6"></script>
+<script src="app.js?v=workspace-7"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
 <script src="social.js" defer></script>
@@ -164,6 +164,12 @@
           <button class="btn btn-quiet btn-sm" type="button" id="wechatPersonaRefresh">刷新</button>
         </form>
         <p class="card-note" id="wechatPersonaStatus" role="status" aria-live="polite"></p>
+      </details>
+      <details class="card memory-panel" id="memoryStorage">
+        <summary class="card-title">记忆存储状态</summary>
+        <button class="btn btn-quiet btn-sm" type="button" id="memoryStorageRefresh">刷新状态</button>
+        <p class="card-note" id="memoryStorageStatus" role="status" aria-live="polite"></p>
+        <div class="memory-storage-grid" id="memoryStorageRows"></div>
       </details>
       <details class="card memory-panel" id="wechatMemory">
         <summary class="card-title">微信群记忆</summary>

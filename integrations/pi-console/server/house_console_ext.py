@@ -11,6 +11,7 @@ Provides:
        POST /api/diag              -> non-sensitive frontend rendering telemetry
   2. Real, honest, zero-secret backend adapters for Unified Console Modules 4, 6, 7, 9 + Gemini:
        GET  /api/memory/status     -> per-group memory isolation count & storage metadata (never reads chat text)
+       GET  /api/memory/storage    -> bounded file metadata for QQ, Swift, and compatibility stores
        GET/POST /api/memory/wechat -> scoped Swift group memory management
        GET  /api/stickers          -> live QQ & WeChat sticker packs inventory (including 6 original GIFs)
        GET  /api/proactive/config  -> live WeChat proactiveJudge & QQ ReplyDecision V2 state
@@ -216,6 +217,78 @@ def _build_memory_status(cfg: dict) -> dict:
         "dbSizeMb": round(total_bytes / (1024.0 * 1024.0), 2),
         "journalState": journal_state,
     }
+
+
+MEMORY_SCAN_LIMIT = 2048
+
+
+def _memory_store_metadata(root, parts, scope_pattern, *, state_backups):
+    """Inventory scoped files without opening them or following symbolic links."""
+    summary = {"state": "unavailable", "scopes": None, "bytes": None, "stateBackups": None}
+    if root is None:
+        return summary
+    try:
+        store = root
+        if not stat.S_ISDIR(store.lstat().st_mode):
+            return summary
+        for part in parts:
+            store /= part
+            if not stat.S_ISDIR(store.lstat().st_mode):
+                return summary
+    except FileNotFoundError:
+        if store == root:
+            return summary
+        store = None
+    except OSError:
+        return summary
+
+    summary.update(state="empty", scopes=0, bytes=0, stateBackups=0 if state_backups else None)
+    if store is None:
+        return summary
+    directories = [(store, 0)]
+    checked = 0
+    while directories:
+        folder, depth = directories.pop()
+        try:
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    checked += 1
+                    if checked > MEMORY_SCAN_LIMIT:
+                        summary["state"] = "partial"
+                        return summary
+                    if depth == 0 and scope_pattern.fullmatch(entry.name) is None:
+                        continue
+                    metadata = entry.stat(follow_symlinks=False)
+                    if stat.S_ISDIR(metadata.st_mode) and depth < 2:
+                        directories.append((Path(entry.path), depth + 1))
+                        if depth == 0:
+                            summary["scopes"] += 1
+                    elif depth and stat.S_ISREG(metadata.st_mode):
+                        summary["bytes"] += metadata.st_size
+                        if state_backups and depth == 1 and entry.name == "state.json.bak":
+                            summary["stateBackups"] += 1
+                    else:
+                        summary["state"] = "partial"
+        except OSError:
+            summary["state"] = "partial"
+    if summary["state"] == "empty" and summary["scopes"]:
+        summary["state"] = "available"
+    return summary
+
+
+def _build_memory_storage(cfg):
+    qq_root = _qq_root(cfg)
+    wx_root = _wechat_root(cfg)
+    qq_data = qq_root / "data-qq" if qq_root is not None else None
+    wx_data = wx_root / "data" if wx_root is not None else None
+    return {"ok": True, "stores": {
+        "qqReliable": _memory_store_metadata(qq_data, ("QQMemoryReliable",),
+                                            re.compile(r"scope-[0-9a-f]{16}"), state_backups=True),
+        "wechatSwift": _memory_store_metadata(qq_data, ("wechat-group-memory",),
+                                             re.compile(r"[0-9a-f]{64}"), state_backups=True),
+        "wechatCompat": _memory_store_metadata(wx_data, ("memory", "chats"),
+                                              re.compile(r"[0-9a-f]{16}"), state_backups=False),
+    }}
 
 
 def _build_stickers_status(cfg: dict) -> dict:
@@ -1130,6 +1203,12 @@ def resolve(handler, method: str, path: str) -> bool:
             if not handler.need_auth():
                 return True
             handler.json(200, _build_memory_status(cfg))
+            return True
+
+        if path == "/api/memory/storage":
+            if not handler.need_auth():
+                return True
+            handler.json(200, _build_memory_storage(cfg))
             return True
 
         if path == "/api/stickers":
