@@ -142,7 +142,7 @@ def test_short_wechat_reply_has_its_own_budget(hub):
     routes = []
     hub.route_log = routes.append
     for platform, limit, tools, expected in (
-            ('wechat', 128, None, (107.5, 115.0)),
+            ('wechat', 128, None, (109.0, 115.0)),
             ('qq', 128, None, (112.0, 122.0)),
             ('wechat', 161, None, (None, None)),
             ('wechat', 128, [{'type': 'function'}], (None, None))):
