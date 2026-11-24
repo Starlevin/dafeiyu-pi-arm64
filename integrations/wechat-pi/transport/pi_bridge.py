@@ -1784,7 +1784,7 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
     timings = {"candidate_read_ms": 0, "candidate_classify_ms": 0,
                "candidate_confirm_read_ms": 0,
                "candidate_confirm_classify_ms": 0,
-               "identity_before_ms": 0,
+               "identity_before_ms": 0, "identity_before_retried": False,
                "identity_after_ms": 0, "after_return_guard_ms": 0,
                "retry_wait_ms": 0, "final_check_ms": 0,
                "final_check_attempted": False, "candidate_reads": 0,
@@ -1803,6 +1803,7 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
             candidate_confirm_read_ms=timings["candidate_confirm_read_ms"],
             candidate_confirm_classify_ms=timings["candidate_confirm_classify_ms"],
             identity_before_ms=timings["identity_before_ms"],
+            identity_before_retried=timings["identity_before_retried"],
             identity_after_ms=timings["identity_after_ms"],
             after_return_guard_ms=timings["after_return_guard_ms"],
             retry_wait_ms=timings["retry_wait_ms"],
@@ -1862,6 +1863,21 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
         # title and unique row both before and after reading it, using this app.
         started = time.monotonic()
         before_reason = _receipt_identity_reason(receipt_app, target)
+        # The new row may be visible before the header geometry is readable.
+        # Retry the missing observation once on the same live client. A
+        # mismatch stays terminal; fresh receipt evidence still needs both
+        # identity checks to pass.
+        if before_reason == "header_unreadable" and receipt_app == app:
+            timings["identity_before_retried"] = True
+            time.sleep(0.075)
+            try:
+                refreshed_app = get_app()
+                if refreshed_app != receipt_app or not _receipt_proxy_live(refreshed_app):
+                    before_reason = "client_unavailable"
+                else:
+                    before_reason = _receipt_identity_reason(refreshed_app, target)
+            except Exception:
+                before_reason = "observation_error"
         timings["identity_before_ms"] += int((time.monotonic() - started) * 1000)
         if before_reason:
             return False, before_reason, True

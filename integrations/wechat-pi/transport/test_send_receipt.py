@@ -145,6 +145,7 @@ class SendReplyHarness:
             "_wait_for_state": self._wait,
             "_safe_receipt_reason": lambda reason: reason if reason in {
                 "reader_unavailable", "composer_not_empty", "no_new_rows",
+                "header_unreadable",
                 "selected_row_mismatch", "ambiguous_same_name",
                 "identity_light_verified", "target_title_mismatch",
                 "client_unavailable", "title_mismatch", "target_changed",
@@ -213,6 +214,8 @@ class SendReplyHarness:
         self.state["identity_app_ids"].append(id(app))
         sequence = self.state["identity_title_sequence"]
         title = sequence[self.state["identity_checks"] - 1] if self.state["identity_checks"] <= len(sequence) else target
+        if title is None:
+            return None
         return {"raw_title": title, "showing_target": 1 if title == target else 0}
 
     def _get_app(self):
@@ -224,6 +227,8 @@ class SendReplyHarness:
         sequence = self.state["post_get_app_sequence"]
         if index < len(sequence):
             item = sequence[index]
+            if item == "same":
+                return self.app
             return self.other_app if item == "other" else item
         return self.app
 
@@ -608,6 +613,30 @@ class SendReceiptTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", result)
         self.assertEqual(harness.state["return_key_count"], 1)
         self.assertFalse(harness.state["timing_logs"][-1][1]["final_check_attempted"])
+
+    def test_receipt_retries_missing_header_on_same_client_without_resending(self):
+        rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
+        harness = SendReplyHarness(post_rows=rows, identity_title_sequence=[None])
+        self.assertEqual(harness.send(), "visible_outgoing")
+        timing = harness.state["timing_logs"][-1][1]
+        self.assertTrue(timing["identity_before_retried"])
+        self.assertEqual(timing["candidate_reads"], 2)
+        self.assertEqual(harness.state["identity_checks"], 3)
+        self.assertEqual(harness.state["return_key_count"], 1)
+
+    def test_missing_header_retry_fails_closed_on_rebuild_or_wrong_title(self):
+        rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
+        cases = (([None, None], [], "header_unreadable"),
+                 ([None, "其他群"], [], "title_mismatch"),
+                 ([None], ["same", "other"], "client_unavailable"),
+                 ([None], [None, "other"], "header_unreadable"))
+        for titles, apps, reason in cases:
+            with self.subTest(titles=titles, apps=apps):
+                harness = SendReplyHarness(post_rows=rows, identity_title_sequence=titles,
+                                           post_get_app_sequence=apps)
+                self.assertEqual(harness.send(), "unconfirmed:" + reason)
+                self.assertEqual(harness.state["return_key_count"], 1)
+                self.assertFalse(harness.state["timing_logs"][-1][1]["final_check_attempted"])
 
     def test_unconfirmed_status_is_single_record_compatible_reason(self):
         harness = SendReplyHarness(post_rows=[("此前可见消息", (0, 0, 600, 50))])
