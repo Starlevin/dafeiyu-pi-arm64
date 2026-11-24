@@ -57,8 +57,12 @@ function settingsKeys(config) {
 /** 真正生效的看图 Key（本地/内网看图服务可以没有 Key） */
 function resolveKey(config) {
   const v = (config && config.vision) || {};
-  const st = settingsKeys(config);
   const vc = resolveVisionConfig(config);
+  if (vc.managed) {
+    const rt = resolveRuntime(config);
+    return String(v.apiKey || (rt.managed ? rt.apiKey : '') || '').trim();
+  }
+  const st = settingsKeys(config);
   // 自动模式（跟随聊天模型 / 用本服务商默认看图模型）时，用聊天那把 Key：
   // 用户的 provider 可能只写在 config.json 里、settings.json 没有 provider 字段，
   // 只看 keys[provider] 会误报「没有填 API Key」——这正是「自动后测试还失败」的根因。

@@ -29,7 +29,7 @@ const socialTool = require('../services/social_tool');
 const { LlmError } = require('../llm/client');
 const { describeError } = require('../infra/errors');
 const proactiveJudge = require('../core/proactiveJudge');
-const { saveSettings } = require('../infra/config');
+const { saveSettings, MANAGED_MODEL_MESSAGE } = require('../infra/config');
 const personaStore = require('../persona/store');
 const { sanitizeForModel, nameMatches, clampInt } = require('../core/text');
 const { sendDenial } = require('../core/wechatSendPolicy');
@@ -1585,6 +1585,7 @@ class Bot {
       return say('管理员命令：状态 / 上下文 20 / 人味 高|中|低 / 情绪 开|关 / 主动 开|关 / 观点 开|关 / 语态 <描述> / 语气 温柔|活泼|高冷|毒舌|正经 / 长度 私聊 120 / 回复 短一点 / 颜文字 少|多|关 / 能力 链接 开|关 / 能力 主动接话 开|关 / 群聊设置 / 群聊自动回复 开|关 / 群聊@回复 开|关 / 改模型 <模型名> / 演示模式 开|关 / 重置记忆 / 清空所有记忆 / 恢复默认 / 退出管理');
     }
     if (/^演示模式\s*(开|打开|关|关闭|关掉)$/.test(text)) {
+      if (this.llm.runtime?.managed) return say(MANAGED_MODEL_MESSAGE);
       const on = /开/.test(text);
       try { saveSettings(this.config, { mock: on }); } catch { /* 测试环境无路径 */ }
       this.llm.reload();
@@ -1593,6 +1594,7 @@ class Bot {
     }
     const m = text.match(/^(?:改模型|换模型|模型)\s+([A-Za-z0-9._\-\/:]{2,60})$/);
     if (m) {
+      if (this.llm.runtime?.managed) return say(MANAGED_MODEL_MESSAGE);
       const model = m[1];
       // deepseek-* 自动切到 DeepSeek 官方接口，qwen-* 切回百炼，省得还要单独改服务商
       const lower = model.toLowerCase();
@@ -1622,6 +1624,7 @@ class Bot {
     if (pm) {
       const target = providerAlias[pm[1].toLowerCase()] || providerAlias[pm[1]];
       if (target) {
+        if (this.llm.runtime?.managed) return say(MANAGED_MODEL_MESSAGE);
         const preset = { deepseek: ['https://api.deepseek.com', 'deepseek-flash'], qwen: ['https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3.8-flash'], zhipu: ['https://open.bigmodel.cn/api/paas/v4', 'glm-4.7-flash'], siliconflow: ['https://api.siliconflow.cn/v1', 'deepseek-ai/DeepSeek-V4.1-Flash'], ollama: ['http://127.0.0.1:11434/v1', 'qwen3:8b'] }[target];
         try { saveSettings(this.config, { provider: target, baseUrl: preset[0], model: preset[1], mock: false }); } catch { /* ignore */ }
         this.llm.reload();

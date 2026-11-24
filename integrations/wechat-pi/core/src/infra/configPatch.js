@@ -2,7 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { loadConfig, DEFAULT_CONFIG } = require('./config');
+const { loadConfig, DEFAULT_CONFIG, isModelHubEndpoint, MANAGED_MODEL_MESSAGE } = require('./config');
 const configSchema = require('./configSchema');
 const { getByPath } = require('./objpath');
 
@@ -24,6 +24,7 @@ const SETTINGS_SHADOW = {
 
 // 密钥类：接口只报「已设置 / 没配」，留空提交表示「不改」
 const SECRET_PATHS = new Set([
+  'llm.apiKey',
   'deepseek.apiKey',
   'vision.apiKey',
   'voice.apiKey',
@@ -190,11 +191,19 @@ function applyConfigPatch(runtime, patch) {
   const pending = [];
   const errors = [];
   for (const [dotted, value] of Object.entries(patch)) {
-    const p = String(dotted || '').trim();
+    const p = String(dotted || '').trim().split('.').filter(Boolean).join('.');
     if (!p) continue;
     // 密钥留空 = 不改（界面上看不到已存的 Key，不能一保存就把它清了）
     if (SECRET_PATHS.has(p) && p !== 'admin.spell' && (value === '' || value === null || value === undefined)) continue;
     const next = coerceValue(runtime.config, p, value);
+    const chatRoute = p === 'provider' || p.startsWith('llm.') || p === 'llm'
+      || /^deepseek\.(?:provider|apiKey|baseUrl|model|mock)$/.test(p);
+    const visionRoute = p === 'vision' || /^vision\.(?:baseUrl|model|apiKey|provider)$/.test(p);
+    if ((chatRoute && isModelHubEndpoint(runtime.config.llm?.baseUrl))
+        || (visionRoute && isModelHubEndpoint(runtime.config.vision?.baseUrl))) {
+      if (!Object.is(next, getByPath(runtime.config, p))) errors.push(MANAGED_MODEL_MESSAGE);
+      continue;
+    }
     const spec = configSchema.FIELDS[p];
     if (spec) {
       const message = configSchema.checkValue(next, spec);

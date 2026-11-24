@@ -1,6 +1,7 @@
 'use strict';
 
-const { loadSettings, saveSettings, resolveRuntime, resolveVisionConfig, maskKey, PROVIDERS, isLocalUrl, normalizeBaseUrl } = require('../infra/config');
+const { loadSettings, saveSettings, resolveRuntime, resolveVisionConfig, maskKey, PROVIDERS, isLocalUrl,
+  normalizeBaseUrl, MANAGED_MODEL_MESSAGE } = require('../infra/config');
 const { applyConfigPatch } = require('../infra/configPatch');
 const vision = require('../adapters/vision');
 const { statusPayload } = require('./status');
@@ -26,6 +27,7 @@ function getSettings(runtime) {
     ok: true,
     mock: llm.isMock,
     provider: llm.provider,
+    modelManaged: rt.managed,
     providerLabel: llm.providerLabel,
     needsKey: llm.needsKey,
     model: llm.model,
@@ -182,9 +184,19 @@ async function applySettings(runtime, body) {
   const { config, llm } = runtime;
   const patch = {};
   const current = resolveRuntime(config);
+  const currentVision = resolveVisionConfig(config);
+  const differs = (value, expected) => typeof value === 'string' && value.trim() && value.trim() !== expected;
+  if (current.managed && (differs(body.provider, current.provider) || differs(body.model, current.model)
+      || differs(body.baseUrl, current.baseUrl) || typeof body.apiKey === 'string' && body.apiKey.trim()
+      || body.mock === true)) throw new Error(MANAGED_MODEL_MESSAGE);
+  if (currentVision.managed && (differs(body.visionProvider, currentVision.provider)
+      || differs(body.visionModel, currentVision.model) || differs(body.visionBaseUrl, currentVision.baseUrl)
+      || typeof body.visionApiKey === 'string' && body.visionApiKey.trim() || body.visionCopyFromChat === true)) {
+    throw new Error(MANAGED_MODEL_MESSAGE);
+  }
 
   // 切换模型服务：没显式给地址/模型时，用该服务的预设值
-  if (typeof body.provider === 'string' && body.provider.trim()) {
+  if (!current.managed && typeof body.provider === 'string' && body.provider.trim()) {
     const provider = body.provider.trim();
     if (!PROVIDERS[provider]) throw new Error('不认识的模型服务：' + provider);
     if (provider !== current.provider) {
@@ -195,7 +207,7 @@ async function applySettings(runtime, body) {
     }
   }
 
-  if (typeof body.baseUrl === 'string') {
+  if (!current.managed && typeof body.baseUrl === 'string') {
     // 少写协议（`127.0.0.1:11434/v1`）很常见：本机 / 内网地址自动补 http://
     const baseUrl = normalizeBaseUrl(body.baseUrl).slice(0, 300);
     if (baseUrl && !/^https?:\/\/[^\s]+$/.test(baseUrl)) {
@@ -203,7 +215,7 @@ async function applySettings(runtime, body) {
     }
     patch.baseUrl = baseUrl;
   }
-  if (typeof body.apiKey === 'string') {
+  if (!current.managed && typeof body.apiKey === 'string') {
     const key = body.apiKey.trim();
     if (key && (/\s/.test(key) || key.length < 8 || key.length > 300)) {
       throw new Error('API Key 看起来不太对：不能有空格，长度 8~300');
@@ -211,14 +223,14 @@ async function applySettings(runtime, body) {
     patch.apiKey = key;
     if (key) patch.mock = false;
   }
-  if (typeof body.model === 'string' && body.model.trim()) {
+  if (!current.managed && typeof body.model === 'string' && body.model.trim()) {
     const model = body.model.trim().slice(0, 80);
     if (!/^[a-zA-Z0-9._\-\/:]{1,80}$/.test(model)) throw new Error('模型名只能包含字母、数字和 . _ - / :');
     patch.model = model;
   }
   // 看图（视觉模型）的 Key：单独一把，存在 data/settings.json 的 visionApiKey，
   // 留空表示「不改」；以前设置里没有这个字段，填了也没地方存，于是永远提示未配置
-  if (typeof body.visionApiKey === 'string') {
+  if (!currentVision.managed && typeof body.visionApiKey === 'string') {
     const vk = body.visionApiKey.trim();
     if (vk && (/\s/.test(vk) || vk.length < 8 || vk.length > 300)) {
       throw new Error('看图 API Key 看起来不太对：不能有空格，长度 8~300');
@@ -228,7 +240,7 @@ async function applySettings(runtime, body) {
   // 看图模型：聊天模型本身能看图时自动跟随它（用户手动选过就以手动为准）。
   // 以前只有 config.json 的 vision.model，切到能看图的聊天模型后还要再去「看图」里改一遍，
   // 忘了改就会出现「聊天模型是 GLM-4.6V、看图还在用别的模型」。
-  {
+  if (!currentVision.managed) {
     const nextProvider = patch.provider || current.provider;
     const nextModel = patch.model || current.model;
     const nextPreset = PROVIDERS[nextProvider] || PROVIDERS.custom;

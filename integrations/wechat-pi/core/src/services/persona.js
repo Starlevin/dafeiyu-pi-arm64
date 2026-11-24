@@ -1,6 +1,6 @@
 'use strict';
 
-const { saveSettings } = require('../infra/config');
+const { saveSettings, MANAGED_MODEL_MESSAGE } = require('../infra/config');
 const personaStore = require('../persona/store');
 const { checkPersonaTokens } = require('../persona/tokenCheck');
 const { LIMITS } = require('../memory/constants');
@@ -8,6 +8,10 @@ const { LIMITS } = require('../memory/constants');
 /* ---------------- 人设调教（/api/persona 用） ---------------- */
 
 async function applyPersonaPatch(runtime, body) {
+  const managed = runtime.llm.runtime?.managed === true;
+  if (managed && body?.model && String(body.model).trim() !== runtime.llm.model) {
+    return { ok: false, error: MANAGED_MODEL_MESSAGE };
+  }
   if (body && body.reset) {
     personaStore.clear(runtime.config);
     runtime.logger.info('人设调教：恢复默认');
@@ -49,7 +53,7 @@ async function applyPersonaPatch(runtime, body) {
     };
   }
   personaStore.save(runtime.config, patch);
-  if (body.model) {
+  if (body.model && !managed) {
     try {
       saveSettings(runtime.config, { model: String(body.model).slice(0, 80), mock: false });
       runtime.llm.reload();

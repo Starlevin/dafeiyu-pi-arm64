@@ -475,6 +475,7 @@ class DeepSeekClient {
    * 免得主人正在聊天时，她只会重复「钥匙不对」。
    */
   switchFallback() {
+    if (this.runtime.managed) return null;
     try {
       const { loadSettings, saveSettings, PROVIDERS } = require('../infra/config');
       const saved = loadSettings(this.config).keys || {};

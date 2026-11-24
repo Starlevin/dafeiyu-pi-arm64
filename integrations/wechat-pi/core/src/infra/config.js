@@ -534,12 +534,22 @@ function saveSettings(cfg, patch) {
  * 面板里存 visionModel 是为了「聊天模型能看图时自动跟随」——以前只有 config.json 的
  * vision.model 一个来源，自动跟随就没地方落盘。
  */
+const MANAGED_MODEL_MESSAGE = '模型由大肥鱼统一控制台管理，请在「模型与实时日志」选择已启用的通道。';
+
+function isModelHubEndpoint(value) {
+  return /^http:\/\/127\.0\.0\.1:18090\/v1(?:\/chat\/completions)?\/?$/.test(String(value || '').trim());
+}
+
 function resolveVisionConfig(cfg) {
   const c = cfg || {};
+  const v = c.vision || {};
+  if (isModelHubEndpoint(v.baseUrl)) {
+    const baseUrl = String(v.baseUrl).trim().replace(/(?:\/chat\/completions)?\/?$/, '');
+    return { ...v, baseUrl, managed: true, manual: true, auto: false, provider: 'custom' };
+  }
   // 单元测试会直接传一个只有 vision 段的假 config（没有 paths），别因为读不到
   // settings.json 就抛错——看图应该退回 config 里的值继续工作。
   const settings = c.paths && c.paths.settingsFile ? loadSettings(c) : {};
-  const v = c.vision || {};
   const hasModel = Boolean(String(settings.visionModel || '').trim());
   // manual=true 表示用户自己选过看图模型；false 表示「自动跟随聊天模型」。
   // 自动跟随时 visionModel 也有值，所以要看 visionManual 这个显式标记；
@@ -577,12 +587,13 @@ function resolveRuntime(cfg) {
   const settings = loadSettings(cfg);
   const legacy = cfg.deepseek || {};
   const llmCfg = cfg.llm || {};
-  const provider = String(settings.provider || cfg.provider || legacy.provider || 'deepseek');
+  const managed = isModelHubEndpoint(llmCfg.baseUrl);
+  const provider = managed ? 'custom' : String(settings.provider || cfg.provider || legacy.provider || 'deepseek');
   const preset = PROVIDERS[provider] || PROVIDERS.custom;
   const envKey = (cfg.env && cfg.env.DEEPSEEK_API_KEY) || '';
   // 显式清空不能回退到另一服务的配置密钥。
   const configuredProvider = String(cfg.provider || legacy.provider || 'deepseek');
-  const apiKey = String(Object.prototype.hasOwnProperty.call(settings, 'apiKey')
+  const apiKey = String(managed ? llmCfg.apiKey || '' : Object.prototype.hasOwnProperty.call(settings, 'apiKey')
     ? settings.apiKey
     : (settings.keys && settings.keys[provider]) ||
       (provider === configuredProvider ? llmCfg.apiKey : '') ||
@@ -590,10 +601,10 @@ function resolveRuntime(cfg) {
   // 只有 provider 确实是 deepseek 时，才沿用 deepseek 段里的地址/模型
   const legacyRelevant = provider === 'deepseek';
   const baseUrl = String(
-    settings.baseUrl || llmCfg.baseUrl || (legacyRelevant ? legacy.baseUrl : '') || preset.baseUrl || ''
+    managed ? llmCfg.baseUrl : settings.baseUrl || llmCfg.baseUrl || (legacyRelevant ? legacy.baseUrl : '') || preset.baseUrl || ''
   ).trim();
   const model = String(
-    settings.model || llmCfg.model || (legacyRelevant ? legacy.model : '') || preset.model || ''
+    managed ? llmCfg.model || 'workbuddy-deepseek' : settings.model || llmCfg.model || (legacyRelevant ? legacy.model : '') || preset.model || ''
   ).trim();
   const rawTemperature =
     typeof settings.temperature === 'number'
@@ -627,9 +638,10 @@ function resolveRuntime(cfg) {
   const mock = keyFree ? false : explicitMock === null ? !apiKey && needsKey : explicitMock;
   return {
     settings,
+    managed,
     provider,
     preset,
-    providerLabel: preset.label,
+    providerLabel: managed ? '大肥鱼模型网关' : preset.label,
     apiKey,
     baseUrl,
     model,
@@ -650,6 +662,8 @@ function maskKey(key) {
 module.exports = {
   DEFAULT_CONFIG,
   PROVIDERS,
+  MANAGED_MODEL_MESSAGE,
+  isModelHubEndpoint,
   LEGACY_SAMPLING,
   migrateSampling,
   isLocalUrl,
