@@ -1335,7 +1335,8 @@ struct QQEngineSharedState: Sendable {
     private func enqueueReply(_ work: Work, groupKey: String?) {
         guard queue.count < Self.queueCapacity else { return }
         queue.append(work)
-        if case let .reply(message, target, _, _, _) = work, message.group, message.mentionsSelf {
+        if case let .reply(message, target, proactive, _, _) = work,
+           message.group, message.mentionsSelf || (proactive && groupKey == message.key) {
             latestNativeChatIngress = LogEntry(
                 chatID: target.id, state: .queued, detail: "QQ原生聊天已入队")
         }
