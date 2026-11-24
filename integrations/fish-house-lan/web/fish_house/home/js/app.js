@@ -909,6 +909,11 @@
       appendReasonSummary("评分拒绝原因", funnel.scoreRejectedReasons);
       appendReasonSummary("评分跳过原因", funnel.scoreSkippedReasons);
       appendReasonSummary("评分后拦截原因", funnel.scoreAfterRejectReasons);
+      appendReasonSummary("入队后未发送原因", funnel.afterEnqueueSkipReasons, {
+        model_declined: "模型选择静默", invalid_model_decision: "模型输出格式无效",
+        expired_before_model: "等候期间过期", expired_after_model: "生成后过期",
+        model_failed: "模型调用失败", send_rejected: "平台拒绝发送", send_unconfirmed: "平台发送结果未知"
+      });
     }
     var groups = data.qqGroups || {};
     var keys = Object.keys(groups);

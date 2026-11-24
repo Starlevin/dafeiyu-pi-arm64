@@ -113,6 +113,11 @@ struct ModelResult: Sendable {
     var toolContext = ""
     var stickerID: String? = nil
     var imageStatus: String? = nil
+    var proactiveSkipReason: ProactiveSkipReason? = nil
+}
+enum ProactiveSkipReason: String, Sendable {
+    case modelDeclined = "model_declined"
+    case invalidModelDecision = "invalid_model_decision"
 }
 /// 兼容任意 OpenAI Chat Completions 服务。
 ///
@@ -478,12 +483,18 @@ struct DeepSeekClient {
         let data = Data(result.text.utf8)
         guard let decision = try? JSONDecoder().decode(Decision.self, from: data),
               var fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            result.shouldSend = false; result.stickerID = nil; return result
+            result.shouldSend = false
+            result.proactiveSkipReason = .invalidModelDecision
+            result.stickerID = nil
+            return result
         }
         fields.removeValue(forKey: "participate")
         result.text = String(decoding: (try? JSONSerialization.data(withJSONObject: fields)) ?? Data(), as: UTF8.self)
         result.shouldSend = decision.participate && !QQPersona().decode(result.text, input: "").isFallback
-        if !result.shouldSend { result.stickerID = nil }
+        if !result.shouldSend {
+            result.proactiveSkipReason = decision.participate ? .invalidModelDecision : .modelDeclined
+            result.stickerID = nil
+        }
         return result
     }
 

@@ -62,7 +62,7 @@ HOUSE_THEME_VIDEO = re.compile(
     r"/fish_house/themes/[A-Za-z0-9._-]{1,64}/videos/[A-Za-z0-9._-]{1,128}\.mp4")
 PROACTIVE_EVENTS = (
     "ordinary", "candidate", "gate_passed", "score_passed", "score_rejected", "score_skipped", "score_after_reject",
-    "enqueued", "confirmed",
+    "enqueued", "after_enqueue_skip", "confirmed",
 )
 PROACTIVE_LINE = re.compile(
     r"\[qq_proactive_funnel\] at=([0-9]{1,12}(?:\.[0-9]{1,9})?) scope=([0-9a-f]{16}) "
@@ -512,6 +512,7 @@ def _proactive_funnel(root: Path | None) -> dict:
     reasons = {}
     rejection_reasons = {}
     skipped_reasons = {}
+    after_enqueue_skips = {}
     groups = {}
     readable = 0
     truncated = False
@@ -555,10 +556,13 @@ def _proactive_funnel(root: Path | None) -> dict:
                     rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 elif event == "score_skipped":
                     skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                elif event == "after_enqueue_skip":
+                    after_enqueue_skips[reason] = after_enqueue_skips.get(reason, 0) + 1
     return {"windowSeconds": 86400, "firstEventAt": first_event_at, "lastEventAt": last_event_at,
             "counts": counts, "scoreAfterRejectReasons": reasons,
             "scoreRejectedReasons": rejection_reasons,
             "scoreSkippedReasons": skipped_reasons,
+            "afterEnqueueSkipReasons": after_enqueue_skips,
             "groups": groups, "readableLogs": readable, "truncated": truncated}
 
 

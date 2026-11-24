@@ -63,6 +63,28 @@ struct QQFastReplyPathTests {
         return client
     }
 
+    @Test @MainActor func proactiveSilenceDistinguishesDeclineFromMissingDecision() async throws {
+        FastPathFixtureProtocol.reset()
+        let session = makeSession(); defer { session.invalidateAndCancel() }
+        let client = makeClient(session)
+        let invalid = try await client.reviewedQQReply(
+            key: "synthetic", config: QQConfig().ai, rule: ChatRule(name: "fixture"),
+            history: [], text: "有人可以解释一下吗？", proactive: true, reserve: {})
+        #expect(!invalid.shouldSend)
+        #expect(invalid.proactiveSkipReason == .invalidModelDecision)
+        #expect(FastPathFixtureProtocol.count == 1)
+
+        FastPathFixtureProtocol.reset()
+        FastPathFixtureProtocol.setPayload(
+            #"{"choices":[{"message":{"content":"{\"participate\":false,\"text\":\"\",\"emotion\":\"neutral\",\"intensity\":0}"},"finish_reason":"stop"}]}"#)
+        let declined = try await client.reviewedQQReply(
+            key: "synthetic", config: QQConfig().ai, rule: ChatRule(name: "fixture"),
+            history: [], text: "有人可以解释一下吗？", proactive: true, reserve: {})
+        #expect(!declined.shouldSend)
+        #expect(declined.proactiveSkipReason == .modelDeclined)
+        #expect(FastPathFixtureProtocol.count == 1)
+    }
+
     /// 普通简短私聊：只应调用模型一次。
     @Test @MainActor func plainShortMessageUsesSingleModelCall() async throws {
         FastPathFixtureProtocol.reset()

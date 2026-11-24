@@ -637,6 +637,8 @@ class HouseConsoleExtTests(unittest.TestCase):
             f"[qq_proactive_funnel] at={fractional_stamp} scope={scope} event=candidate reason=-\n"
             f"[qq_proactive_funnel] at={fractional_stamp} scope={scope} event=candidate reason=bad.reason\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=score_after_reject reason=new_mention\n"
+            f"[qq_proactive_funnel] at={stamp} scope={scope} event=after_enqueue_skip reason=model_declined\n"
+            f"[qq_proactive_funnel] at={stamp} scope={scope} event=after_enqueue_skip reason=expired_after_model\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=score_rejected reason=score_below_threshold\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=score_rejected reason=provider-credential-unavailable\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=score_skipped reason=mode_not_enforce\n"
@@ -663,6 +665,10 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(result["qqFunnel"]["groups"][scope]["ordinary"], 2)
         self.assertEqual(result["qqFunnel"]["counts"]["confirmed"], 0)
         self.assertEqual(result["qqFunnel"]["scoreAfterRejectReasons"], {"new_mention": 1})
+        self.assertEqual(result["qqFunnel"]["counts"]["after_enqueue_skip"], 2)
+        self.assertEqual(result["qqFunnel"]["afterEnqueueSkipReasons"], {
+            "model_declined": 1, "expired_after_model": 1,
+        })
         self.assertEqual(result["qqFunnel"]["counts"]["score_rejected"], 2)
         self.assertEqual(result["qqFunnel"]["scoreRejectedReasons"], {
             "score_below_threshold": 1, "provider-credential-unavailable": 1,

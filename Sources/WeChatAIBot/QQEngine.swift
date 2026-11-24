@@ -1310,6 +1310,8 @@ struct QQEngineSharedState: Sendable {
             defer { if let timing { print(timing.logLine) } }
             var preparedArtwork: QQArtworkPrepared?
             var ticket: UUID?
+            var waitingForModel = false
+            var waitingForReceipt = false
             let submissionID = UUID()
             defer { activeGroupSubmissions.removeValue(forKey: submissionID) }
             do {
@@ -1317,6 +1319,13 @@ struct QQEngineSharedState: Sendable {
                     try await Task.sleep(nanoseconds: 500_000_000); try check(epoch, scope: message.key, target: target)
                 }
                 try check(epoch, scope: message.key, target: target)
+                if proactive && Date().timeIntervalSince1970 - message.time > 120 {
+                    if scopedProactiveProfiles[message.key] != nil {
+                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "expired_before_model")
+                    }
+                    record(target.id, .skipped, "主动接话候选在等待中已过期，未调用模型")
+                    continue
+                }
                 guard sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits, chatCooldown: config.ai.cooldownSeconds) == .allowed else {
                     record(target.id, .skipped, "发送限额已用完"); continue
                 }
@@ -1606,6 +1615,7 @@ struct QQEngineSharedState: Sendable {
                 } else {
                     defer { clearChatStage(submissionID) }
                     timing?.modelStart = ContinuousClock.now
+                    waitingForModel = true
                     result = try await modelClient.reviewedQQReply(key: key, config: config.ai, rule: rule,
                     history: message.group ? [] : Array((history[contextKey] ?? []).suffix(2)), text: modelInput, images: incomingImages, toolHandler: toolHandler, onlineToolsEnabled: !proactive && config.effectiveOnlineEnabled, socialToolsEnabled: socialRequested, imageGenerationEnabled: !proactive && config.effectiveImageGeneration.enabled, artworkEnabled: !proactive && config.effectiveArtwork.enabled && config.effectiveArtwork.agentEnabled, stickerOptions: stickerOptions, proactive: proactive && preparedImage == nil,
                     // 2026-11-01：单轮快速路径的可达性修正。
@@ -1619,6 +1629,7 @@ struct QQEngineSharedState: Sendable {
                         guard let self else { throw CancellationError() }
                         try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
                     })
+                    waitingForModel = false
                 }
                 if timing?.modelStart != nil { timing?.modelEnd = ContinuousClock.now }
                 if socialRequested && !socialSucceeded {
@@ -1641,9 +1652,17 @@ struct QQEngineSharedState: Sendable {
                 }
                 try check(epoch, scope: message.key, target: target)
                 usage.tokens += result.tokens
-                if proactive && (!result.shouldSend || Date().timeIntervalSince1970 - message.time > 120) {
-                    if scopedProactiveProfiles[message.key] != nil { countProactive(.modelSilent, groupKey: message.key) }
-                    record(target.id, .skipped, "主动接话评估后保持安静：不适合加入、依据不足或话题已过时")
+                let replyExpired = proactive && Date().timeIntervalSince1970 - message.time > 120
+                if proactive && (!result.shouldSend || replyExpired) {
+                    let reason = result.proactiveSkipReason ?? .invalidModelDecision
+                    if scopedProactiveProfiles[message.key] != nil {
+                        countProactive(.modelSilent, groupKey: message.key)
+                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key,
+                                            reason: replyExpired ? "expired_after_model" : reason.rawValue)
+                    }
+                    let detail = replyExpired ? "主动接话回复生成后已过期" :
+                        (reason == .modelDeclined ? "主动接话评估明确选择保持安静" : "主动接话模型输出格式无效")
+                    record(target.id, .skipped, detail)
                     try persist(); continue
                 }
                 let reply = persona.decode(result.text, input: !proactive ? message.text : "主动加入群话题")
@@ -1716,11 +1735,13 @@ struct QQEngineSharedState: Sendable {
                     activeChatStage = (submissionID, LogEntry(
                         chatID: target.id, state: .sending, detail: "QQ聊天提交 OneBot"))
                     defer { clearChatStage(submissionID) }
+                    waitingForReceipt = true
                     response = try await connection.action(action, params: params)
                 }
                 guard let data = response["data"] as? [String: Any], let sentID = QQPolicy.identifier(data["message_id"]), Int64(sentID) != nil else {
                     throw AppFailure.message("发送返回缺少消息 ID，结果未知")
                 }
+                waitingForReceipt = false
                 timing?.accepted = ContinuousClock.now
                 botMessageIDs[config.expectedSelfID + ":" + message.key + ":" + sentID] = Date().timeIntervalSince1970
                 if let ticket { sends.finish(ticket, confirmed: true); artworkLedger.finish(ticket, confirmed: true) }; ticket = nil
@@ -1760,6 +1781,14 @@ struct QQEngineSharedState: Sendable {
                 }
             } catch {
                 heldOwnerEvents = heldOwnerEvents.filter { !$0.key.hasPrefix(message.key + ":") }
+                if proactive, scopedProactiveProfiles[message.key] != nil {
+                    if waitingForReceipt {
+                        let reason = error is OneBotExplicitRejection ? "send_rejected" : "send_unconfirmed"
+                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: reason)
+                    } else if waitingForModel, fence.permits(epoch), !(error is CancellationError) {
+                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "model_failed")
+                    }
+                }
                 if let ticket {
                     sends.finish(ticket, confirmed: false); artworkLedger.finish(ticket, confirmed: false)
                     record(target.id, .uncertain, "发送结果未知，不重发；已暂停 QQ")
