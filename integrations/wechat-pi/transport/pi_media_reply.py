@@ -7,8 +7,8 @@ An unknown UI submission is never retried by the bridge.
 
 v2: buttons are located semantically via AT-SPI and mapped through the
 AT-SPI-frame -> X-window affine transform (the Pi client resizes its window,
-so raw AT-SPI extents are stale). The Qt file dialog receives no WM focus,
-so it is raised and focused via Xlib before keyboard-driven file selection.
+so raw AT-SPI extents are stale). The file picker prefers its native filename
+and Open controls. Older clients can use the verified X11 keyboard path.
 """
 from __future__ import annotations
 
@@ -112,15 +112,17 @@ def _mapper(bridge, pf):
 def _toolbar_buttons(bridge, app, composer):
     x, y, w, h = composer
     sendfile, send = [], []
-    for n, _ in bridge.walk(app, maxd=26):
-        if bridge.role(n) != "button":
+    for n, _, role in bridge._walk_showing(app, maxd=26, skip_lists=True, include_role=True):
+        if role != "button":
+            continue
+        nm = bridge.nm(n)
+        if nm not in {"Send File", "Send", "发送"}:
             continue
         r = bridge.ext(n)
         if not r or r[2] <= 0 or r[3] <= 0:
             continue
         if not (y + h - 10 <= r[1] <= y + h + 90):
             continue
-        nm = bridge.nm(n)
         if nm == "Send File" and x - 50 <= r[0] <= x + w:
             sendfile.append(r)
         elif nm in ("Send", "发送") and r[0] >= x + w * 0.5:
@@ -132,10 +134,10 @@ def _dialog_visible(bridge):
     app = bridge.get_app()
     if app is None:
         return False
-    for n, _ in bridge.walk(app, maxd=28):
-        if bridge.role(n) == "button" and bridge.nm(n) in ("Open", "Cancel", "打开", "取消"):
+    for n, _, role in bridge._walk_showing(app, maxd=28, skip_lists=True, include_role=True):
+        if role == "button" and bridge.nm(n) in ("Open", "Cancel", "打开", "取消"):
             r = bridge.ext(n)
-            if r and r[2] > 0 and r[3] > 0 and bridge.showing(n):
+            if r and r[2] > 0 and r[3] > 0:
                 return True
     return False
 
@@ -241,50 +243,96 @@ def _wait_for_file_picker(bridge, app, pf, main, before, to_x11):
         time.sleep(min(.25, remaining))
 
 
+def _picker_controls(bridge, dialog, button_labels):
+    fields, buttons = [], []
+    for node, _, role in bridge._walk_showing(dialog, maxd=9, skip_lists=True, include_role=True):
+        if role not in {"text", "button"}:
+            continue
+        label = bridge.nm(node).strip().casefold()
+        if role == "text" and label in PICKER_NAME_FIELDS:
+            fields.append(node)
+        elif role == "button" and label in button_labels:
+            buttons.append(node)
+    if len(fields) != 1 or len(buttons) != 1:
+        return None, None
+    return fields[0], buttons[0]
+
+
+def _picker_action(bridge, button):
+    if not button.get_state_set().contains(bridge.Atspi.StateType.ENABLED):
+        return None
+    action = button.get_action_iface()
+    if action is None:
+        return None
+    actions = [index for index in range(action.get_n_actions())
+               if action.get_action_name(index).strip().casefold() in
+               {"press", "click", "activate", "按下", "点击", "激活"}]
+    return (action, actions[0]) if len(actions) == 1 else None
+
+
+def _picker_owned_filename(path, filename):
+    if filename in ("", str(path)):
+        return True
+    return bool(path.stem == "weixin-sticker"
+                and re.fullmatch(r"sticker-[A-Za-z0-9_-]{8}", path.parent.name)
+                and isinstance(filename, str)
+                and re.fullmatch(r"sticker-[A-Za-z0-9_-]{8}", filename))
+
+
+def _picker_context_intact(bridge, app, target, original, dialog, account):
+    if (bridge.get_app() != app or (account and bridge.app_memory_account(app) != account)
+            or _composer_pre_return_state(bridge, target, original) != "ok"):
+        return False
+    current = _visible_file_picker(bridge, app)
+    return current is not None and current[0] == dialog
+
+
+def _open_native_picker_file(bridge, app, target, original, dialog, path, account):
+    """Return None for unsupported controls before touching the picker."""
+    field, button = _picker_controls(bridge, dialog, {"open", "打开"})
+    if field is None:
+        return None
+    reader = field.get_text_iface()
+    editor = field.get_editable_text_iface()
+    if reader is None or editor is None or button.get_action_iface() is None:
+        return None
+    if not _picker_context_intact(bridge, app, target, original, dialog, account):
+        return "media_draft_target_changed"
+    if not _picker_owned_filename(path, bridge.Atspi.Text.get_text(reader, 0, -1)):
+        return "media_picker_filename_in_use"
+    filename = str(path)
+    if not editor.set_text_contents(filename):
+        return "media_filename_failed"
+    if not _picker_context_intact(bridge, app, target, original, dialog, account):
+        return "media_draft_target_changed"
+    if bridge.Atspi.Text.get_text(reader, 0, -1) != filename:
+        return "media_filename_failed"
+    press = _picker_action(bridge, button)
+    if press is None:
+        return "media_picker_open_unavailable"
+    action, index = press
+    return "opened" if action.do_action(index) else "media_picker_open_unknown"
+
+
 def _cancel_owned_picker(bridge, app, target, original, observed, path, account):
     """Cancel the chooser opened by this attempt, leaving any changed draft alone."""
     if observed is None:
         return False
     try:
-        if (bridge.get_app() != app or (account and bridge.app_memory_account(app) != account)
-                or _composer_pre_return_state(bridge, target, original) != "ok"):
+        if not _picker_context_intact(bridge, app, target, original, observed, account):
             return False
-        current = _visible_file_picker(bridge, app)
-        if current is None or current[0] != observed:
-            return False
-        fields, buttons = [], []
-        for node, _, role in bridge._walk_showing(observed, maxd=9, skip_lists=True, include_role=True):
-            if role == "text" and bridge.nm(node).strip().casefold() in PICKER_NAME_FIELDS:
-                fields.append(node)
-            elif role == "button" and bridge.nm(node).strip().casefold() in {"cancel", "取消"}:
-                buttons.append(node)
-        if len(fields) != 1 or len(buttons) != 1:
-            return False
-        reader = fields[0].get_text_iface()
+        field, button = _picker_controls(bridge, observed, {"cancel", "取消"})
+        reader = field.get_text_iface() if field is not None else None
         if reader is None:
             return False
         filename = bridge.Atspi.Text.get_text(reader, 0, -1)
-        sticker_directory = (path.stem == "weixin-sticker"
-                             and re.fullmatch(r"sticker-[A-Za-z0-9_-]{8}", path.parent.name)
-                             and isinstance(filename, str)
-                             and re.fullmatch(r"sticker-[A-Za-z0-9_-]{8}", filename))
-        if filename not in ("", str(path)) and not sticker_directory:
+        press = _picker_action(bridge, button)
+        if (press is None or not _picker_owned_filename(path, filename) or bridge.get_app() != app
+                or (account and bridge.app_memory_account(app) != account)
+                or bridge.Atspi.Text.get_text(reader, 0, -1) != filename):
             return False
-        states = buttons[0].get_state_set()
-        if not states.contains(bridge.Atspi.StateType.ENABLED):
-            return False
-        action = buttons[0].get_action_iface()
-        if action is None:
-            return False
-        indices = [i for i in range(action.get_n_actions())
-                   if action.get_action_name(i).strip().casefold() in
-                   {"press", "click", "activate", "按下", "点击", "激活"}]
-        if (len(indices) != 1 or bridge.get_app() != app
-                or (account and bridge.app_memory_account(app) != account)):
-            return False
-        if bridge.Atspi.Text.get_text(reader, 0, -1) != filename:
-            return False
-        return bool(action.do_action(indices[0]))
+        action, index = press
+        return bool(action.do_action(index))
     except Exception:
         return False
 
@@ -537,11 +585,19 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
         if _cancel_owned_picker(bridge, app, target, original, accessible, path, account):
             return "media_picker_cancelled"
         return "media_picker_unverified"
-    drive_err = _drive_picker_input(
-        bridge, pf, dlg, target, original, path, xi, "n", settle_s=.35)
-    if drive_err is not None:
+    try:
+        opened = _open_native_picker_file(bridge, app, target, original, accessible, path, account)
+    except Exception:
+        opened = "media_native_picker_unreadable"
+    keyboard = opened is None
+    if keyboard:
+        drive_err = _drive_picker_input(bridge, pf, dlg, target, original, path, xi, "n", settle_s=.35)
+        if drive_err is not None:
+            _cancel_owned_picker(bridge, app, target, original, accessible, path, account)
+            return drive_err
+    elif opened != "opened":
         _cancel_owned_picker(bridge, app, target, original, accessible, path, account)
-        return drive_err
+        return opened
 
     def gone():
         if _picker_window_present(pf, dlg):
@@ -549,12 +605,13 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
         return not _dialog_visible(bridge)
 
     closed = False
-    for _ in range(10):
-        time.sleep(.5)
+    for attempt in range(11):
+        if attempt:
+            time.sleep(.5)
         if gone():
             closed = True
             break
-    if not closed:
+    if not closed and keyboard:
         retry_err = _drive_picker_input(
             bridge, pf, dlg, target, original, path, xi, "l", settle_s=.25)
         if retry_err is not None:

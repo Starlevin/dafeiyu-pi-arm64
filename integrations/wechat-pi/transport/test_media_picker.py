@@ -86,3 +86,33 @@ class MediaPickerTests(unittest.TestCase):
                     self.assertEqual(media._cancel_owned_picker(
                         bridge, app, "fixture", (), chooser, path, "same-account"), expected)
                 self.assertEqual(action.do_action.call_count, int(expected))
+
+    def test_native_open_acts_once_only_on_the_exact_owned_filename(self):
+        app, chooser, reader = object(), object(), object()
+        path = Path("sticker-f6789abc/weixin-sticker.gif")
+        for case, existing, written, proof, pressed, expected in (
+                ("success", "", str(path), [True, True], True, "opened"),
+                ("unsupported", "", str(path), [], False, None),
+                ("foreign name", "manual-file.pdf", str(path), [True], False, "media_picker_filename_in_use"),
+                ("changed group", "", str(path), [True, False], False, "media_draft_target_changed"),
+                ("changed filename", "", "different-path", [True, True], False, "media_filename_failed"),
+                ("uncertain Open", "", str(path), [True, True], False, "media_picker_open_unknown")):
+            with self.subTest(case=case):
+                edit = SimpleNamespace(set_text_contents=Mock(return_value=True))
+                field = SimpleNamespace(get_text_iface=lambda: reader,
+                                        get_editable_text_iface=lambda: edit)
+                action = SimpleNamespace(do_action=Mock(return_value=pressed))
+                button = SimpleNamespace(get_action_iface=lambda: action)
+                bridge = SimpleNamespace(
+                    Atspi=SimpleNamespace(Text=SimpleNamespace(get_text=Mock(side_effect=[existing, written]))),
+                )
+                controls = (None, None) if case == "unsupported" else (field, button)
+                with patch.object(media, "_picker_controls", return_value=controls), \
+                     patch.object(media, "_picker_action", return_value=(action, 0)), \
+                     patch.object(media, "_picker_context_intact", side_effect=proof):
+                    result = media._open_native_picker_file(
+                        bridge, app, "fixture", (), chooser, path, "same-account")
+                self.assertEqual(result, expected)
+                self.assertEqual(action.do_action.call_count, int(case in {"success", "uncertain Open"}))
+                if case in {"unsupported", "foreign name"}:
+                    edit.set_text_contents.assert_not_called()
