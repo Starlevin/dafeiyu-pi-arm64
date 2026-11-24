@@ -186,6 +186,18 @@ def read_poll_hints(watched, wal_wake, *, settling):
     return app, signatures, wal_wake.take_pending(), {}
 
 
+def prioritize_sidebar_hint(groups, signatures, previous, roles, event_times, *, carry, refresh_held):
+    """Let a known group preview change go first, then consume the carried WAL hint once."""
+    if carry is not None:
+        prior_roles, prior_times = carry
+        return roles | prior_roles, {**event_times, **prior_times}, None
+    if ("message" in roles and not refresh_held
+            and any(group in previous and group in signatures and signatures[group] != previous[group]
+                    for group in groups)):
+        return set(), {}, (roles, event_times)
+    return roles, event_times, None
+
+
 def keep_pending_settle_group_open(app, target, settler):
     """Cancel a pending settle only when the exact authorized group is no longer open."""
     if not group_is_open(app, target):
@@ -2803,6 +2815,7 @@ def main():
         start_heartbeat(token)
     blocked = None
     last_wal_hint_log = 0.0
+    deferred_wal_hint = None
     print("bridge_ready apex_auto=%s candidate_groups=%d" % (
         AUTO_REPLY_GROUP in args.auto_reply_group,
         sum(1 for g in args.auto_reply_group if g != AUTO_REPLY_GROUP)), flush=True)
@@ -2843,6 +2856,7 @@ def main():
                     log("moments_read", status="completed")
             except Exception as error:
                 log("moments_read", status=type(error).__name__)
+        sidebar_started = time.monotonic()
         app_now, current_signatures, wal_roles, wal_event_times = read_poll_hints(
             watched, wal_wake, settling=settle_priority)
         now = time.monotonic()
@@ -2850,11 +2864,18 @@ def main():
         # preview remains unchanged, only the already-open and independently
         # verified conversation can get an extra read. All other sessions
         # retain normal sidebar changes and periodic full checks.
+        observed_wal_at = wal_event_times.get("message")
+        if not settle_priority:
+            wal_roles, wal_event_times, deferred_wal_hint = prioritize_sidebar_hint(
+                args.group, current_signatures, last_sidebar, wal_roles, wal_event_times,
+                carry=deferred_wal_hint, refresh_held=short_refresh_target is not None)
         wal_message_at = wal_event_times.get("message")
-        if wal_message_at is not None:
+        if observed_wal_at is not None:
             log("wal_ingress_stage", stage="loop", role="message",
-                event_to_loop_ms=max(0, int((time.monotonic() - wal_message_at) * 1000)))
+                event_to_loop_ms=max(0, int((now - observed_wal_at) * 1000)))
+        wal_scope_started = time.monotonic()
         urgent_target = verified_wal_target(app_now, args, wal_roles, now)
+        wal_scope_ms = int((time.monotonic() - wal_scope_started) * 1000)
         if (verified_rechecks is not None and urgent_target in args.group
                 and "message" in wal_roles):
             last = last_scanned.get(urgent_target, now)
@@ -2913,6 +2934,8 @@ def main():
         if (urgent_target in scheduled_privates and urgent_target not in changed_targets
                 and changed_targets):
             log("wal_sidebar_priority", changed=len(changed_targets), bypassed="private_hint")
+        if deferred_wal_hint is not None and not settle_priority:
+            log("wal_sidebar_priority", changed=len(changed_targets), bypassed="unscoped_hint")
         supplemental_group = None
         for target in targets:
             if target in scheduled_privates:
@@ -2981,6 +3004,7 @@ def main():
                     if settle_due:
                         public_question_settler.cancel(target)
                     continue
+                scope_started = time.monotonic()
                 if _is_admin_chat(args, target):
                     if not (private_session_is_verified(args, app, target)
                             or open_account(app, target, args.admin_account)):
@@ -3024,6 +3048,7 @@ def main():
                         verified_scope_open = group_is_open(app, target)
                         if not verified_scope_open and not open_chat(app, target):
                             continue
+                read_started = time.monotonic()
                 bounds, rows = read_messages(app)
                 rows_observed_at = time.monotonic()
                 if bounds is None or chat_title(app) != target:
@@ -3097,6 +3122,14 @@ def main():
                         args, jobs, health,
                         public_question_settler=public_question_settler,
                         rows_observed_at=rows_observed_at)
+                if not is_priv and target in changed_targets and appended:
+                    log("sidebar_ingress_timing", deferred_wal=deferred_wal_hint is not None,
+                        sidebar_read_ms=int((now - sidebar_started) * 1000), wal_scope_ms=wal_scope_ms,
+                        ui_prepare_ms=int((scope_started - poll_started) * 1000),
+                        group_scope_ms=int((read_started - scope_started) * 1000),
+                        viewport_read_ms=int((rows_observed_at - read_started) * 1000),
+                        handle_ms=int((time.monotonic() - rows_observed_at) * 1000),
+                        appended_rows=len(appended))
                 if wal_source_at is not None:
                     log("wal_ingress_stage", stage="scan", role="message",
                         kind="private" if is_priv else "group",
@@ -3179,8 +3212,9 @@ def main():
             jobs.join()
             deliver_ready(replies, args, health)
             return 0
-        if settle_priority and not public_question_settler.has_pending:
-            continue  # Resume deferred hints immediately once the due candidate is resolved.
+        if ((settle_priority or deferred_wal_hint is not None)
+                and (public_question_settler is None or not public_question_settler.has_pending)):
+            continue  # Resume the deferred hints as soon as the candidate permits it.
         # Database-write hints only shorten idle wait; the sidebar and visible
         # message verification remain the sole authority for replying.
         idle_timeout = max(1, args.interval)

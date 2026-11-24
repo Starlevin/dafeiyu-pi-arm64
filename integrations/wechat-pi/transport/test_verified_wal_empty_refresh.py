@@ -7,6 +7,36 @@ from wal_sweep_queue import VerifiedWalRescanQueue, WalSweepQueue
 
 
 class VerifiedWalEmptyRefreshTests(unittest.TestCase):
+    def test_known_group_change_defers_broad_hint_without_resolving_private_scope(self):
+        roles, times, carry = bridge.prioritize_sidebar_hint(
+            ["group"], {"group": "after", "private": "same"}, {"group": "before", "private": "same"},
+            {"message"}, {"message": 20.0}, carry=None, refresh_held=False)
+        self.assertEqual((roles, times), (set(), {}))
+        with patch.object(bridge, "chat_title") as title:
+            self.assertIsNone(bridge.verified_wal_target(object(), object(), roles))
+            title.assert_not_called()
+
+        # Carry remains available even if the targeted read did not update its baseline.
+        roles, times, remaining = bridge.prioritize_sidebar_hint(
+            ["group"], {"group": "after"}, {"group": "before"},
+            {"message", "session"}, {"message": 20.7, "session": 20.6},
+            carry=carry, refresh_held=False)
+        self.assertEqual(roles, {"message", "session"})
+        self.assertEqual(times, {"message": 20.0, "session": 20.6})
+        self.assertIsNone(remaining)
+
+    def test_initial_or_private_preview_change_and_pending_refresh_keep_wal_path(self):
+        for previous, signatures, refresh_held in (
+            ({}, {"group": "first"}, False),
+            ({"group": "same", "private": "before"}, {"group": "same", "private": "after"}, False),
+            ({"group": "before"}, {"group": "after"}, True),
+        ):
+            with self.subTest(previous=previous, refresh_held=refresh_held):
+                roles, times, carry = bridge.prioritize_sidebar_hint(
+                    ["group"], signatures, previous, {"message"}, {"message": 20.0},
+                    carry=None, refresh_held=refresh_held)
+                self.assertEqual((roles, times, carry), ({"message"}, {"message": 20.0}, None))
+
     def setUp(self):
         self.now = 100.0
         self.queue = VerifiedWalRescanQueue(lambda: self.now)
