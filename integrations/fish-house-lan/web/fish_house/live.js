@@ -5,10 +5,11 @@
   var active = 0, theme, currentNode = "", pendingNode = "", queue = [], socket = null, reconnect = 0;
   var lastSeq = -1, firstStateOnSocket = true, lastTransition = "", lastTransitionAt = 0, lastOrders = "", lastOrdersAt = 0;
   var lastOrderEvent = "";
-  var expiry = 0, bubbleExpiry = 0, transitionTimer = 0, startedAt = 0;
+  var expiry = 0, bubbleExpiry = 0, transitionTimer = 0, phoneExitTimer = 0, startedAt = 0, presentedAt = 0;
   var idleDelay = 0, showBubble = true, bubbleOverride = null, themeBase = "", idleNode = "", phoneNode = "";
   var pickupPreload = null, themeEpoch = 0, pendingTheme = null;
-  var fadeMs = 450;
+  var fadeMs = 450, maxPhoneLoopSeconds = 9, phoneEndWindowMs = 1000, mediaEndGraceMs = 200;
+  var phoneMinVisibleMs = 650, phoneCrossfadeMs = 650;
   var embedded = new URLSearchParams(location.search).get("mode") === "home";
   var allowedSources = { qq: true, wechat: true };
   var allowedPhases = { idle: true, received: true, thinking: true, replying: true, sent: true, error: true };
@@ -135,16 +136,62 @@
     video.load();
     pickupPreload = { video: video, nodeId: firstPickup, file: file, themeEpoch: themeEpoch };
   }
-  function queueAfterLoop(id) {
-    var n = node(id), seconds = Number(n && n.duration || theme && theme.config && theme.config.durations && theme.config.durations[id]) || 8;
-    clearTimeout(transitionTimer);
-    transitionTimer = setTimeout(advance, Math.max(250, seconds * 1000));
+  function clearPhoneExitTimer() {
+    clearTimeout(phoneExitTimer);
+    phoneExitTimer = 0;
   }
-  function playNode(id, hasPreviousFrame) {
+  function driveQueue() {
+    if (!currentNode || pendingNode) return;
+    var clip = node(currentNode), video = videos[active];
+    if (!clip) return;
+    if (!queue.length) {
+      clearPhoneExitTimer();
+      if (clip.loop && !video.loop) {
+        video.loop = true;
+        if (video.ended) video.play().catch(function () {});
+      }
+      return;
+    }
+    var role = String(clip.role || "").toLowerCase();
+    var finishPhoneLoop = currentNode !== idleNode && currentNode === phoneNode
+      && (role === "phone" || role === "phone_only")
+      && video.duration > 0 && video.duration <= maxPhoneLoopSeconds;
+    if (video.ended || (clip.loop && !finishPhoneLoop)) {
+      advance();
+      return;
+    }
+    if (!clip.loop || phoneExitTimer) return;
+    var remainingMs = Math.max(0, video.duration - video.currentTime) * 1000 / Math.max(0.1, video.playbackRate);
+    if (remainingMs <= phoneEndWindowMs) {
+      // Use the natural last frame when it is close. The watchdog bounds a
+      // stalled decoder or missing ended event to 1.2 seconds.
+      video.loop = false;
+      phoneExitTimer = setTimeout(function () {
+        phoneExitTimer = 0;
+        advance();
+      }, remainingMs + mediaEndGraceMs);
+      return;
+    }
+    // A reply already queued at pickup still shows the phone pose briefly.
+    // A phone clip that has been visible for longer can crossfade at once.
+    var visibleDelay = Math.max(0, phoneMinVisibleMs - (performance.now() - presentedAt));
+    var connection = navigator.connection;
+    var crossfade = connection && connection.saveData ? 0 : phoneCrossfadeMs;
+    if (!visibleDelay) {
+      advance(crossfade);
+      return;
+    }
+    phoneExitTimer = setTimeout(function () {
+      phoneExitTimer = 0;
+      advance(crossfade);
+    }, visibleDelay);
+  }
+  function playNode(id, hasPreviousFrame, crossfadeMs) {
     var n = node(id), file = srcFor(n);
     if (!n || !file) return Promise.resolve(false);
     if (id === currentNode && !videos[active].paused && videos[active].readyState >= 2) return Promise.resolve(true);
     if (pendingNode === id) return Promise.resolve(true);
+    clearPhoneExitTimer();
     pendingNode = id;
     var nextIndex = 1 - active, next = videos[nextIndex], prev = videos[active];
     var reusePreload = Boolean(pickupPreload && pickupPreload.video === next && pickupPreload.nodeId === id
@@ -197,13 +244,16 @@
         if (generation !== startedAt) { fail(); return; }
         settled = true;
         cleanup();
-        next.onerror = null;
+        next.onerror = function () {
+          if (generation === startedAt && videos[active] === next) advance();
+        };
         var firstFrame = !currentNode;
         prev.style.zIndex = "1";
         next.style.zIndex = "2";
-        next.style.transition = "";
+        next.style.transition = crossfadeMs ? "opacity " + crossfadeMs + "ms ease-in-out" : "";
         next.style.opacity = "1";
         active = nextIndex; currentNode = id; pendingNode = "";
+        presentedAt = performance.now();
         // Keep the cover or previous image beneath the incoming video for the full fade.
         setTimeout(function () {
           if (generation !== startedAt) return;
@@ -211,8 +261,8 @@
           pause(prev); prev.removeAttribute("src"); prev.load();
           if (cover) cover.classList.add("cover-hidden");
           if (id === idleNode) preloadPickup();
-        }, fadeMs);
-        next.onended = advance;
+        }, crossfadeMs ? crossfadeMs + 50 : fadeMs);
+        next.onended = driveQueue;
         if (firstFrame && embedded && window.parent !== window) {
           window.parent.postMessage({ type: "dafeiyu-live-ready" }, location.origin);
         }
@@ -245,15 +295,15 @@
       else if (!reusePreload) next.load();
     });
   }
-  function advance() {
-    if (!queue.length) return;
+  function advance(crossfadeMs) {
+    if (!queue.length || pendingNode) return;
     var next = queue.shift(), graph = edges();
-    if (!graph[currentNode] || !graph[currentNode][next]) { queue = []; return; }
+    if (!graph[currentNode] || !graph[currentNode][next]) { queue = []; driveQueue(); return; }
     var epoch = themeEpoch;
-    playNode(next).then(function (ok) {
+    playNode(next, false, crossfadeMs).then(function (ok) {
       if (epoch !== themeEpoch) return;
-      if (!ok) { queue = []; return; }
-      if (queue.length && node(next).loop) queueAfterLoop(next);
+      if (!ok) queue = [];
+      driveQueue();
     });
   }
   function enqueuePath(waypoints) {
@@ -277,15 +327,7 @@
       playNode(queue.length ? queue[0] : waypoints[0]).then(function (ok) { if (!ok && epoch === themeEpoch) queue = []; });
       return true;
     }
-    if (currentNode && node(currentNode) && node(currentNode).loop && currentNode !== idleNode) {
-      advance();
-      return true;
-    }
-    if (currentNode && node(currentNode) && !node(currentNode).loop) {
-      if (videos[active].ended) advance();
-      return true;
-    }
-    advance();
+    driveQueue();
     return true;
   }
   function enqueueOrders(orders, eventKey) {
@@ -312,8 +354,7 @@
       var epoch = themeEpoch;
       var initial = queue.shift();
       playNode(initial).then(function (ok) { if (!ok && epoch === themeEpoch) queue = []; });
-    } else if (node(currentNode) && node(currentNode).loop) advance();
-    else if (node(currentNode) && videos[active].ended) advance();
+    } else driveQueue();
     return true;
   }
   function apply(message, isSnapshot) {
@@ -340,6 +381,11 @@
     }
     applyPlayback(message);
   }
+  function expireActivity() {
+    queue = [];
+    enqueuePath([idleNode]);
+    driveQueue();
+  }
   function applyPlayback(message) {
     var phase = message.phase;
     var requested = message.node_id && validNode(message.node_id) ? message.node_id : "";
@@ -349,7 +395,7 @@
         ? [message.source, phase, message.event_at].join(":") : "";
       if (enqueueOrders(message.orders, eventKey)) {
         clearTimeout(expiry);
-        if (phase !== "idle" && Number(message.ttl_ms) > 0) expiry = setTimeout(function () { queue = []; enqueuePath([idleNode]); }, Number(message.ttl_ms));
+        if (phase !== "idle" && Number(message.ttl_ms) > 0) expiry = setTimeout(expireActivity, Number(message.ttl_ms));
         return;
       }
     }
@@ -360,7 +406,7 @@
     if (signature === lastTransition && now - lastTransitionAt < 900) return;
     lastTransition = signature; lastTransitionAt = now;
     clearTimeout(expiry);
-    if (phase !== "idle" && Number(message.ttl_ms) > 0) expiry = setTimeout(function () { queue = []; enqueuePath([idleNode]); }, Number(message.ttl_ms));
+    if (phase !== "idle" && Number(message.ttl_ms) > 0) expiry = setTimeout(expireActivity, Number(message.ttl_ms));
     enqueuePath(targetPath);
   }
   function resetStream() {
@@ -414,6 +460,7 @@
       clearTimeout(expiry);
       clearTimeout(transitionTimer);
       themeEpoch++;
+      clearPhoneExitTimer();
       clearPickupPreload(false);
       theme = data; themeBase = new URL("./", absolute.href); chooseThemeNodes();
       var previous = videos[active];
@@ -449,9 +496,8 @@
           return;
         }
         if (!queue.length) return;
-        if (keepFrame && resume) transitionTimer = setTimeout(advance, fadeMs);
-        else if (resume || !node(idleNode).loop) advance();
-        else queueAfterLoop(idleNode);
+        if (keepFrame && resume) transitionTimer = setTimeout(driveQueue, fadeMs);
+        else driveQueue();
       });
       if (resume) applyPlayback(Object.assign({}, frame, { ttl_ms: Math.max(0, remaining) }));
       return true;

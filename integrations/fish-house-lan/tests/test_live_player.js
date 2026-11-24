@@ -111,6 +111,8 @@ async function main() {
     const defaultIdle = defaultTheme.config.flow.nodes.find(n=>n.role==="wait"&&n.loop) || defaultTheme.config.flow.nodes.find(n=>n.role==="wait");
     const defaultPhone = defaultTheme.config.flow.nodes.find(n=>["phone","phone_only","both"].includes(n.role)&&n.loop) || defaultTheme.config.flow.nodes.find(n=>["phone","phone_only","both"].includes(n.role));
     const defaultPickup = defaultTheme.config.flow.nodes.find(n=>n.id===route(defaultIdle.id,defaultPhone.id)[1]);
+    const defaultPutdown = route(defaultPhone.id, defaultIdle.id)[1];
+    const putdownVideo = defaultTheme.config.flow.nodes.find(n => n.id === defaultPutdown).video;
     const defaultPickupUrl = `http://127.0.0.1:${PORT}/fish_house/themes/default/${defaultPickup.video}`;
     await until(() => cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(defaultPickupUrl)});return v&&v.readyState>=2&&v.paused&&v.style.opacity==='0'?true:null})()`), "default theme's first pickup video preloads while idle");
     await sleep(500);
@@ -123,10 +125,27 @@ async function main() {
     check("same-origin theme cover is loaded and replaced after video frame", await until(() =>
       cdp.js("document.getElementById('cover').naturalWidth > 0 && getComputedStyle(document.getElementById('cover')).opacity === '0'"),
       "cover fades once the video is visible"), "cover fallback is removed after first decoded frame");
-    const send = async (seq, phase, source = "qq", type = "state", node = "") => { const msg = { type, seq, ts: Math.floor(Date.now()/1000), source, phase, node_id: node, bubble_text: phase === "received" ? "正在处理" : "", ttl_ms: 0 }; await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(msg) }); };
+    const send = async (seq, phase, source = "qq", type = "state", node = "", ttl = 0, bubbleText = "") => {
+      const msg = { type, seq, ts: Math.floor(Date.now()/1000), source, phase, node_id: node, bubble_text: bubbleText, ttl_ms: ttl };
+      await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(msg) });
+    };
     let seq = 2;
     await cdp.js("window.__fhLiveNodes=[];window.__fhLivePrevious='';window.__fhLiveTraceTimer=setInterval(function(){var n=window.__fishHouseLive.getState().currentNode;if(n&&n!==window.__fhLivePrevious){window.__fhLiveNodes.push(n);window.__fhLivePrevious=n;}},40)");
     const preloadResourceCount = await cdp.js(`performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length`);
+    await cdp.js(`(function () {
+      const play = HTMLMediaElement.prototype.play;
+      window.fhOriginalPlay = play;
+      HTMLMediaElement.prototype.play = function () {
+        if (this.src.endsWith('/' + ${JSON.stringify(defaultPhone.video)})) {
+          this.playbackRate = 2;
+          window.fhQueuedLoop = { start: performance.now(), duration: this.duration };
+        }
+        if (window.fhQueuedLoop && this.src.endsWith('/' + ${JSON.stringify(putdownVideo)})) {
+          window.fhQueuedLoop.visibleMs = performance.now() - window.fhQueuedLoop.start;
+        }
+        return play.call(this);
+      };
+    })()`);
     await cdp.js("window.fhHoldFrame=true");
     const fastReceived = seq++; await send(fastReceived, "received");
     await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === fastReceived, "fast received accepted");
@@ -144,7 +163,11 @@ async function main() {
     await until(async () => (await cdp.js("window.__fishHouseLive.getState().currentNode")) === defaultPickup.id, "preloaded pickup becomes active");
     const pickupActivation = await cdp.js(`(function(){var v=[...document.querySelectorAll('video')].find(x=>x.currentSrc===${JSON.stringify(defaultPickupUrl)});return {found:!!v,paused:v&&v.paused,opacity:v&&v.style.opacity,requests:performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length}})()`);
     check("first pickup activation reuses the preloaded video request", pickupActivation.found && !pickupActivation.paused && pickupActivation.opacity === "1" && pickupActivation.requests === preloadResourceCount, JSON.stringify({active:pickupActivation.found&&!pickupActivation.paused, opacity:pickupActivation.opacity, requestsBefore:preloadResourceCount, requestsAfter:pickupActivation.requests}));
-    await send(seq++, "sent");
+    const sentSeq = seq++;
+    await send(sentSeq, "sent", "qq", "state", "", 20000, "夹具已发送");
+    await until(() => cdp.js(`window.__fishHouseLive.getState().lastSeq === ${sentSeq}
+        && document.getElementById('bubble').textContent === '夹具已发送'
+        && !document.getElementById('bubble').classList.contains('hidden')`), "fast sent feedback while the animation finishes");
     const samples = [], sampleDir = fs.mkdtempSync(path.join(os.tmpdir(), "fh-live-transition-")), sampleEnd = Date.now() + 25000;
     let completed = false;
     while (Date.now() < sampleEnd) {
@@ -160,8 +183,12 @@ async function main() {
     const pixelScan = JSON.parse(scan.stdout.trim()); report.blackFrameSamples = pixelScan.samples; report.sampledBlackFrames = pixelScan.black_frames;
     fs.rmSync(sampleDir, {recursive:true,force:true});
     check("no black transition frames sampled in Chromium", pixelScan.black_frames === 0, `sampled=${pixelScan.samples}; black=${pixelScan.black_frames}`);
-    check("fast received-to-sent finishes phone loop and returns idle", completed, JSON.stringify(await cdp.js("window.__fhLiveNodes")));
-    check("fast received then sent completes pickup, reply loop, putdown, and idle", true, JSON.stringify(await cdp.js("window.__fhLiveNodes")));
+    check("fast received then sent shows pickup, phone pose, putdown, and idle", completed, JSON.stringify(await cdp.js("window.__fhLiveNodes")));
+    const queuedLoop = await cdp.js("window.fhQueuedLoop");
+    check("a fast queued reply shows the phone pose without waiting for a full cycle",
+      queuedLoop && queuedLoop.visibleMs >= 600 && queuedLoop.visibleMs < 2000,
+      JSON.stringify(queuedLoop));
+    await cdp.js("HTMLMediaElement.prototype.play = window.fhOriginalPlay");
     const sequences = [["received","phone_pickup"],["thinking","phone_pickup"],["replying","phone_putdown"],["sent","phone_putdown"],["error","rest"],["idle","rest"]];
     for (const [phase, expected] of sequences) { await send(seq++, phase, phase === "thinking" ? "wechat" : "qq"); if (phase === "thinking") await sleep(1000); else await until(() => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(expected)}`), phase + " mapped node"); }
     check("all phase mappings accepted in order (received/thinking to phone, reply/sent to putdown, idle/error)", true, sequences.map(s=>s.join("→")).join(", "));
@@ -390,6 +417,97 @@ async function main() {
     check("expired state cannot trigger an animation after a slow theme load",
       await cdp.js("(function(){var s=window.__fishHouseLive.getState(); return s.currentNode==='rest' && !s.pendingNode && !s.queued.length;})()"),
       "expired thinking event did not enter the queue");
+    await cdp.js("window.__fishHouseLive.playNode(" + JSON.stringify(defaultPhone.id) + ")");
+    await cdp.js(`new Promise(resolve => {
+      const video = [...document.querySelectorAll('video')].find(v => v.style.zIndex === '2' && v.style.opacity === '1');
+      window.fhActiveLoop = { ended: false, duration: video.duration };
+      video.addEventListener('ended', () => { window.fhActiveLoop.ended = true; window.fhActiveLoop.mediaEnd = video.currentTime; }, { once: true });
+      video.addEventListener('seeked', () => { window.fhActiveLoop.start = video.currentTime; resolve(); }, { once: true });
+      video.playbackRate = 1;
+      video.currentTime = video.duration - 0.8;
+    })`);
+    const nearStartedAt = Date.now();
+    await injectFrame({type:"state", seq:19, ts:Math.floor(Date.now()/1000), source:"qq", phase:"sent",
+      node_id:defaultPutdown, orders:[defaultPutdown,defaultIdle.id], bubble_text:"", ttl_ms:0});
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultPutdown)),
+      "putdown begins after the active loop ends");
+    const activeLoop = await cdp.js("window.fhActiveLoop");
+    check("a phone loop near its tail uses the real media end pose",
+      activeLoop.ended && activeLoop.duration - activeLoop.start < 1 && Math.abs(activeLoop.mediaEnd - activeLoop.duration) < 0.05,
+      JSON.stringify({...activeLoop, putdownMs:Date.now()-nearStartedAt}));
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultIdle.id)),
+      "ordered reply returns from putdown to idle");
+
+    await cdp.js("window.__fishHouseLive.playNode(" + JSON.stringify(defaultPhone.id) + ")");
+    await cdp.js(`new Promise(resolve => {
+      const video = [...document.querySelectorAll('video')].find(v => v.style.zIndex === '2' && v.style.opacity === '1');
+      window.fhFarPhone = video;
+      video.addEventListener('seeked', resolve, { once: true });
+      video.playbackRate = 1;
+      video.currentTime = 0.75;
+    })`);
+    const farStartedAt = Date.now();
+    await injectFrame({type:"state", seq:20, ts:Math.floor(Date.now()/1000), source:"qq", phase:"sent",
+      node_id:defaultPutdown, orders:[defaultPutdown,defaultIdle.id], bubble_text:"", ttl_ms:0});
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultPutdown)),
+      "a phone loop far from its tail starts putdown promptly", 2000);
+    const farCut = await cdp.js(`(function () {
+      const outgoing = window.fhFarPhone;
+      const incoming = [...document.querySelectorAll('video')].find(v => v !== outgoing);
+      return {outgoingTime:outgoing.currentTime, outgoingOpacity:Number(getComputedStyle(outgoing).opacity),
+        duration:outgoing.duration, ended:outgoing.ended, fade:getComputedStyle(incoming).transitionDuration};
+    })()`);
+    check("fast mid-cycle exit overlaps two decoded videos before the end of the loop",
+      farCut.outgoingOpacity === 1 && farCut.fade === "0.65s"
+        && !farCut.ended && farCut.duration - farCut.outgoingTime > 3,
+      JSON.stringify({...farCut, putdownMs:Date.now()-farStartedAt}));
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultIdle.id)),
+      "mid-cycle crossfade returns to idle");
+
+    await cdp.js("window.__fishHouseLive.playNode(" + JSON.stringify(defaultPhone.id) + ")");
+    await cdp.js(`new Promise(resolve => {
+      const video = [...document.querySelectorAll('video')].find(v => v.style.zIndex === '2' && v.style.opacity === '1');
+      video.onended = null;
+      window.fhSuppressedEnd = false;
+      video.addEventListener('ended', () => { window.fhSuppressedEnd = true; }, { once: true });
+      video.addEventListener('seeked', resolve, { once: true });
+      video.playbackRate = 2;
+      video.currentTime = video.duration - 0.6;
+    })`);
+    const recoveryStartedAt = Date.now();
+    await injectFrame({type:"state", seq:21, ts:Math.floor(Date.now()/1000), source:"qq", phase:"sent",
+      node_id:defaultPutdown, orders:[defaultPutdown,defaultIdle.id], bubble_text:"", ttl_ms:0});
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultPutdown)),
+      "putdown recovers even when the native ended handler is unavailable", 2800);
+    check("bounded recovery works when the ended callback is missing", await cdp.js("window.fhSuppressedEnd"),
+      `putdown presented after ${Date.now()-recoveryStartedAt}ms`);
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultIdle.id)),
+      "watchdog recovery returns to idle");
+
+    await cdp.js("window.__fishHouseLive.playNode(" + JSON.stringify(defaultPhone.id) + ")");
+    const errorFrame = {type:"state", seq:22, ts:Math.floor(Date.now()/1000), source:"qq", phase:"sent",
+      node_id:defaultPutdown, orders:[defaultPutdown,defaultIdle.id], bubble_text:"", ttl_ms:0};
+    await cdp.js(`(function () {
+      window.__fishHouseLive.apply(${JSON.stringify(errorFrame)}, false);
+      const video = [...document.querySelectorAll('video')].find(v => v.style.zIndex === '2' && v.style.opacity === '1');
+      video.dispatchEvent(new Event('error'));
+    })()`);
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultPutdown)),
+      "media loss advances immediately to the next queued clip", 2200);
+    check("a media error in the active phone cycle skips the wait and keeps the route", true, "the putdown video presented");
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultIdle.id)),
+      "media error recovery returns to idle");
+
+    const computerLoop = defaultTheme.config.flow.nodes.find(n => n.loop && n.role === "both");
+    const fromComputer = route(computerLoop.id, defaultIdle.id).slice(1);
+    await cdp.js("window.__fishHouseLive.playNode(" + JSON.stringify(computerLoop.id) + ")");
+    const computerStartedAt = Date.now();
+    await injectFrame({type:"state", seq:23, ts:Math.floor(Date.now()/1000), source:"qq", phase:"idle",
+      node_id:fromComputer[0], orders:fromComputer, bubble_text:"", ttl_ms:0});
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(fromComputer[0])),
+      "computer transition does not wait for the long loop", 2200);
+    check("the longer both-role loop keeps immediate transitions", true,
+      `next video presented after ${Date.now()-computerStartedAt}ms`);
     const s = await cdp.send("Page.captureScreenshot", { format:"png" }); fs.writeFileSync(path.join(os.tmpdir(), "fish-house-live-frame.png"), Buffer.from(s.data,"base64"));
     const expectedRetryErrors = cdp.errors.filter(e => e.method === "Log.entryAdded" && e.params.entry.url === retryUrl && /503/.test(e.params.entry.text));
     const unexpectedBrowserErrors = cdp.errors.filter(e => !expectedRetryErrors.includes(e));
