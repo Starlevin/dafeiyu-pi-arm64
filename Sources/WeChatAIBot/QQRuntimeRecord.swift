@@ -4,6 +4,7 @@ import BotCore
 /// A bounded display projection shared by the native panel and authenticated Web API.
 /// It is not another log store and must never include message bodies or credential fields.
 struct QQRuntimeRecord: Encodable, Identifiable {
+    static let toolExecutionDetail = "QQ聊天工具执行中"
     let id: UUID
     let timestamp: Double
     let state: JobState
@@ -15,7 +16,7 @@ struct QQRuntimeRecord: Encodable, Identifiable {
         id = entry.id; timestamp = entry.date.timeIntervalSince1970; state = entry.state
         switch entry.state {
         case .queued: title = "等待处理"
-        case .generating: title = "正在生成"
+        case .generating: title = entry.detail == Self.toolExecutionDetail ? "工具执行中" : "正在生成"
         case .sending: title = "正在发送"
         case .confirmed: title = "已获发送确认"
         case .skipped: title = "已跳过"

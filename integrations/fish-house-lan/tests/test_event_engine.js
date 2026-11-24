@@ -97,6 +97,19 @@ test("5. Interrupt & Recovery Stack restores fresh interrupted real state after 
   assert.strictEqual(eng.getState().stats.interruptedRestored, 1);
 });
 
+test("An active verified tool uses its own state and ends on a fresh model event", function () {
+  var eng = EE.createEngine({ nowFn: clock });
+  eng.pushEvent({ type: "thinking", source: "qq", verified: true, seq: 1, at: fakeNow });
+  advance(100);
+  eng.pushEvent({ type: "tool", source: "qq", verified: true, seq: 2, at: fakeNow });
+  assert.strictEqual(eng.getState().state, "tool");
+  advance(16000);
+  eng.tick();
+  assert.strictEqual(eng.getState().state, "tool");
+  eng.pushEvent({ type: "thinking", source: "qq", verified: true, seq: 3, at: fakeNow });
+  assert.strictEqual(eng.getState().state, "thinking");
+});
+
 test("A terminal send failure cannot revive a finished model animation", function () {
   var eng = EE.createEngine({ nowFn: clock });
   eng.pushEvent({ type: "thinking", source: "qq", verified: true, seq: 1, at: fakeNow });

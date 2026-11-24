@@ -205,6 +205,30 @@ class BubbleTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- evidence
 class EvidenceTests(unittest.TestCase):
+    def test_qq_tool_requires_current_execution_and_takes_the_computer_path(self):
+        row = {"state": "generating", "timestamp": NOW - 1,
+               "detail": live_ws.QQ_TOOL_DETAIL}
+        for change in ({"state": "sending"}, {"timestamp": NOW - 301},
+                       {"detail": live_ws.QQ_TOOL_DETAIL + " (not a marker)"}):
+            evidence = live_ws.qq_evidence({}, {"runtimeRecords": [row | change]}, now=NOW)
+            self.assertNotEqual(evidence.phase, "tool")
+        router = build_router(ROOT / "web/fish_house", selection={
+            "theme_url": DEFAULT_THEME_URL, "slug": "default",
+            "theme_path": ROOT / "web/fish_house/themes/default/theme.json",
+        })
+        bridge = live_ws.LiveBridge(router_factory=lambda: router,
+                                    snapshot_getter=dict,
+                                    panel_reader=lambda: {"runtimeRecords": [row]})
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            state = bridge.state_snapshot()
+        self.assertEqual(state["phase"], "tool")
+        self.assertEqual(state["event_at"], NOW - 1)
+        self.assertEqual(state["ttl_ms"], 299000)
+        self.assertEqual([item["node_id"] for item in state["orders"]],
+                         ["computer_go", "computer_loop"])
+        self.assertEqual([item["loop"] for item in state["orders"]], [False, True])
+        self.assertNotIn("detail", state)
+
     def live(self, wx=None, qq=None):
         return {"wechat": wx or {}, "qq": qq or {}}
 

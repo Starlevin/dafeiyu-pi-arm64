@@ -25,6 +25,33 @@ import BotCore
         #expect(QQRuntimeRecord(LogEntry(state: .confirmed, detail: "OneBot 已接受发送；不代表对方已读"), target: nil, secrets: []).title == "已获发送确认")
     }
 
+    @Test func toolStageExistsOnlyWhileItsOperationIsRunning() async throws {
+        struct FixtureFailure: Error {}
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
+        let submission = UUID()
+        let target = UUID()
+        let marker = QQRuntimeRecord.toolExecutionDetail
+        let result = await engine.withHouseToolStage(submission, target: target) {
+            await Task.yield()
+            #expect(engine.runtimeRecords.first?.detail == marker)
+            #expect(engine.runtimeRecords.first?.title == "工具执行中")
+            #expect(!engine.logs.contains { $0.detail == marker })
+            return 9
+        }
+        #expect(result == 9)
+        #expect(!engine.runtimeRecords.contains { $0.detail == marker })
+        do {
+            try await engine.withHouseToolStage(submission, target: target) {
+                #expect(engine.runtimeRecords.first?.detail == marker)
+                throw FixtureFailure()
+            }
+            Issue.record("Fixture tool should fail")
+        } catch is FixtureFailure {}
+        #expect(!engine.runtimeRecords.contains { $0.detail == marker })
+    }
+
     @Test func restoredLogsAreBoundedNewestFirstAndDoNotChangeCounters() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

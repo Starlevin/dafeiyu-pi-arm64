@@ -536,7 +536,7 @@
 
     function startVideoForState(st) {
       var myToken = ++videoToken;
-      var mapped = (st === "sent") ? "happy" : st;
+      var mapped = st === "sent" ? "happy" : (st === "tool" ? "thinking" : st);
       if (videoPack) {
         var seq = videoPack.manifest.stateToSequence[mapped] || ["rest"];
         playVideoSeq(seq, 0, myToken);
@@ -600,7 +600,8 @@
 
     function getStateSpec(pack, st) {
       if (!pack || !pack.manifest || !pack.manifest.states) return null;
-      return pack.manifest.states[st] || pack.manifest.states.happy || pack.manifest.states.idle || null;
+      var pose = st === "tool" ? "replying" : st;
+      return pack.manifest.states[pose] || pack.manifest.states.happy || pack.manifest.states.idle || null;
     }
 
     function getFrameForPack(pack, st, fIdx) {
@@ -803,15 +804,15 @@
         ctx.fillRect(lampX - lampR, lampY - lampR, lampR * 2, lampR * 2);
       }
 
-      // 4. Reactive laptop glow during thinking/replying/error
-      if (currentState === "thinking" || currentState === "replying" || currentState === "error") {
+      // 4. Reactive laptop glow during chat and tool execution.
+      if (currentState === "thinking" || currentState === "tool" || currentState === "replying" || currentState === "error") {
         var lapX = isPortrait ? cw * 0.64 : cw * 0.81;
         var lapY = isPortrait ? ch * 0.39 : ch * 0.42;
         var lapR = Math.min(cw, ch) * 0.16;
         var pulse = 0.55 + 0.45 * Math.sin(tNow * 0.005);
         var lapColor = currentState === "error"
           ? "rgba(255, 132, 108, "
-          : "rgba(116, 198, 255, ";
+          : (currentState === "tool" ? "rgba(85, 222, 181, " : "rgba(116, 198, 255, ");
         var g2 = ctx.createRadialGradient(lapX, lapY, 2, lapX, lapY, lapR);
         g2.addColorStop(0, lapColor + (0.28 * pulse).toFixed(3) + ")");
         g2.addColorStop(1, lapColor + "0)");

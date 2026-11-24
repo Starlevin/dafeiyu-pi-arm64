@@ -12,7 +12,7 @@
   var phoneMinVisibleMs = 650, phoneCrossfadeMs = 650;
   var embedded = new URLSearchParams(location.search).get("mode") === "home";
   var allowedSources = { qq: true, wechat: true };
-  var allowedPhases = { idle: true, received: true, thinking: true, replying: true, sent: true, error: true };
+  var allowedPhases = { idle: true, received: true, thinking: true, tool: true, replying: true, sent: true, error: true };
 
   function edges() {
     var list = theme && theme.config && theme.config.flow && theme.config.flow.edges || [];

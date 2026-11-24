@@ -500,7 +500,7 @@ class QQEvidencePoller:
 
     def _next_interval(self, panel, *, now):
         evidence = live_ws.qq_evidence({}, panel, now=now)
-        if (evidence.phase in ("received", "thinking", "replying")
+        if (evidence.phase in ("received", "thinking", "tool", "replying")
                 and 0 <= now - evidence.at <= QQ_ACTIVE_POLL_WINDOW):
             return min(self._interval, QQ_ACTIVE_POLL_INTERVAL)
         return self._interval
@@ -783,6 +783,7 @@ LEGACY_NODES = {
     "idle": ("rest", True),
     "received": ("phone_pickup", False),
     "thinking": ("phone_loop", True),
+    "tool": ("computer_loop", True),
     "replying": ("phone_loop", True),
     "sent": ("phone_putdown", False),
     "error": ("rest", True),

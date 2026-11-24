@@ -77,12 +77,14 @@ struct QQEngineSharedState: Sendable {
     // House evidence only: memory-resident and fixed-text, never added to persisted logs.
     private var latestNativeChatIngress: LogEntry?
     private var activeChatStage: (submission: UUID, entry: LogEntry)?
+    private var activeToolStage: (submission: UUID, entry: LogEntry)?
     var runtimeRecords: [QQRuntimeRecord] {
         let secrets = [runtimeCredentials?.oneBotToken ?? "", runtimeCredentials?.deepSeekKey ?? "",
                        imageCredentials.zhipuKey, imageCredentials.cloudflareToken, googleVisionKey]
         var entries = Array(logs.suffix(30).reversed())
         if let latestNativeChatIngress { entries.append(latestNativeChatIngress) }
         if let activeChatStage { entries.append(activeChatStage.entry) }
+        if let activeToolStage { entries.append(activeToolStage.entry) }
         return entries.sorted { $0.date > $1.date }.prefix(30).map { entry in
             QQRuntimeRecord(entry, target: config.targets.first { $0.id == entry.chatID }, secrets: secrets)
         }
@@ -1002,6 +1004,7 @@ struct QQEngineSharedState: Sendable {
         deadlineTask?.cancel(); deadlineTask = nil; runDeadline = nil
         fence.stop(); running = false; queue.removeAll(); worker?.cancel(); worker = nil
         activeChatStage = nil
+        activeToolStage = nil
         latestNativeChatIngress = nil
         memoryWorker?.cancel(); memoryWorker = nil
         history.removeAll(); privateContextSeen.removeAll(); status = connected ? "QQ 已连接，自动回复已暂停" : "QQ 已暂停"
@@ -1445,7 +1448,7 @@ struct QQEngineSharedState: Sendable {
                 let key = (try? resolveModelKey()) ?? ""
                 var preparedImage: ModelToolResult?
                 if !QQVisualTools.wantsWebSearch(message.text) && config.effectiveImageGeneration.enabled && QQImagePromptPlan.needsPlanning(message.text) && persona.rebuff(for: message.text) == nil {
-                    preparedImage = try await prepareImage(request: message.text, proactive: proactive, epoch: epoch, message: message, target: target, key: key)
+                    preparedImage = try await prepareImage(request: message.text, proactive: proactive, epoch: epoch, message: message, target: target, key: key, submission: submissionID)
                 }
                 let memoryScope = config.expectedSelfID + ":" + message.key
                 let memorySubject = QQMemoryBook.subject(account: config.expectedSelfID, target: message.key, sender: message.sender)
@@ -1527,7 +1530,15 @@ struct QQEngineSharedState: Sendable {
                     var web: ModelToolResult
                     if config.effectiveOnlineEnabled && config.effectiveVisualTools.googleWebEnabled {
                         if !googleVisionKey.isEmpty { try await reserveModel(epoch, scope: message.key, target: target) }
-                        do { web = try await QQVisualTools(session: modelClient.session).search(image: searchFrame ?? incomingImages[0], key: googleVisionKey) }
+                        do {
+                            if googleVisionKey.isEmpty {
+                                web = try await QQVisualTools(session: modelClient.session).search(image: searchFrame ?? incomingImages[0], key: googleVisionKey)
+                            } else {
+                                web = try await withHouseToolStage(submissionID, target: target.id) {
+                                    try await QQVisualTools(session: modelClient.session).search(image: searchFrame ?? incomingImages[0], key: googleVisionKey)
+                                }
+                            }
+                        }
                         catch is CancellationError { throw CancellationError() }
                         catch { try check(epoch, scope: message.key, target: target); web = ModelToolResult(content: "Google 以图搜图本次失败，未获得来源信息，不能声称已查到。") }
                     } else { web = ModelToolResult(content: "Google 以图搜图未启用，未执行搜索，不能声称查到来源。") }
@@ -1646,7 +1657,11 @@ struct QQEngineSharedState: Sendable {
                         if name == "find_artwork", self.config.effectiveArtwork.enabled, self.config.effectiveArtwork.agentEnabled {
                             guard let request = QQArtworkLibrary.toolRequest(arguments) else { return ModelToolResult(content: "插画参数无效，未请求来源。") }
                             let prepared: QQArtworkPrepared
-                            do { prepared = try await self.prepareArtwork(request, target: target, epoch: epoch) }
+                            do {
+                                prepared = try await self.withHouseToolStage(submissionID, target: target.id) {
+                                    try await self.prepareArtwork(request, target: target, epoch: epoch)
+                                }
+                            }
                             catch {
                                 try Task.checkCancellation(); try self.check(epoch, scope: message.key, target: target)
                                 prepared = QQArtworkPrepared(request: request, caption: "本次插画来源不可用，未取得可发送图片；可稍后再试。")
@@ -1656,13 +1671,17 @@ struct QQEngineSharedState: Sendable {
                         } else if name == "generate_image", self.config.effectiveImageGeneration.enabled {
                             let object = arguments.utf8.count <= 8192 ? (try? JSONSerialization.jsonObject(with: Data(arguments.utf8))) as? [String: Any] : nil
                             guard let proposed = object?["prompt"] as? String, proposed.count <= 1000 else { return ModelToolResult(content: "生图参数无效，未生成。") }
-                            output = try await self.prepareImage(request: message.text, proposed: proposed, proactive: false, epoch: epoch, message: message, target: target, key: key) ?? ModelToolResult(content: "未识别到明确的本轮生图请求，未生成。")
+                            output = try await self.prepareImage(request: message.text, proposed: proposed, proactive: false, epoch: epoch, message: message, target: target, key: key, submission: submissionID) ?? ModelToolResult(content: "未识别到明确的本轮生图请求，未生成。")
                         } else if name == "read_social", socialRequested, !socialCalled {
                             socialCalled = true
-                            output = try await QQSocialTools().execute(arguments: arguments, userText: message.text)
+                            output = try await self.withHouseToolStage(submissionID, target: target.id) {
+                                try await QQSocialTools().execute(arguments: arguments, userText: message.text)
+                            }
                             socialSucceeded = !output.sources.isEmpty
                         } else if self.config.effectiveOnlineEnabled && ["search_images", "search_web"].contains(name) {
-                            output = try await QQOnlineTools().execute(name: name, arguments: arguments)
+                            output = try await self.withHouseToolStage(submissionID, target: target.id) {
+                                try await QQOnlineTools().execute(name: name, arguments: arguments)
+                            }
                         } else { output = ModelToolResult(content: "该工具未启用，未执行请求。") }
                         try self.check(epoch, scope: message.key, target: target)
                         if let status = output.imageStatus { self.imageGenerationStatus = status }
@@ -2065,7 +2084,8 @@ struct QQEngineSharedState: Sendable {
         }
     }
     private func prepareImage(request: String, proposed: String? = nil, proactive: Bool, epoch: UInt64,
-                              message: QQIncoming, target: QQTarget, key: String) async throws -> ModelToolResult? {
+                              message: QQIncoming, target: QQTarget, key: String,
+                              submission: UUID) async throws -> ModelToolResult? {
         let (plan, tokens) = try await modelClient.prepareQQImage(key: key, config: config.ai, text: request, proposed: proposed, proactive: proactive, reserve: { [weak self] in
             guard let self else { throw CancellationError() }
             try await self.reserveModel(epoch, scope: message.key, target: target)
@@ -2077,9 +2097,11 @@ struct QQEngineSharedState: Sendable {
             result = ModelToolResult(content: "本次未生成图片。请求需调整：" + plan.note + "。仅提出合规方向，等待用户选择，不冒称已生成。", imageStatus: "生图请求需调整，未调用图片接口")
         } else {
             let args = String(decoding: try JSONSerialization.data(withJSONObject: ["prompt": plan.prompt]), as: UTF8.self)
-            result = try await imageGenerator.execute(arguments: args, settings: config.effectiveImageGeneration, credentials: imageCredentials, beforeAttempt: { [weak self] in
-                guard let self else { throw CancellationError() }; try self.reserveModel(epoch, scope: message.key, target: target)
-            })
+            result = try await withHouseToolStage(submission, target: target.id) {
+                try await imageGenerator.execute(arguments: args, settings: config.effectiveImageGeneration, credentials: imageCredentials, beforeAttempt: { [weak self] in
+                    guard let self else { throw CancellationError() }; try self.reserveModel(epoch, scope: message.key, target: target)
+                })
+            }
         }
         try check(epoch, scope: message.key, target: target)
         imageGenerationStatus = result.imageStatus ?? "本次未生成图片"
@@ -2195,6 +2217,17 @@ struct QQEngineSharedState: Sendable {
             activeChatStage = (submission, LogEntry(
                 chatID: target.id, state: .generating, detail: "QQ聊天模型请求中"))
         }
+    }
+
+    func withHouseToolStage<Value>(_ submission: UUID, target: UUID,
+                                   operation: @MainActor () async throws -> Value) async rethrows -> Value {
+        clearChatStage(submission)
+        activeToolStage = (submission, LogEntry(chatID: target, state: .generating,
+                                               detail: QQRuntimeRecord.toolExecutionDetail))
+        defer {
+            if activeToolStage?.submission == submission { activeToolStage = nil }
+        }
+        return try await operation()
     }
 
     private func clearChatStage(_ submission: UUID) {

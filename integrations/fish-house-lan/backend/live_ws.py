@@ -25,7 +25,7 @@ Public contract of a pushed frame::
 
     {"type": "state" | "flow_goto" | "bubble" | "config",
      "seq": <int, strictly increasing>, "ts": <epoch seconds>,
-     "source": "qq" | "wechat", "phase": <idle|received|thinking|replying|sent|error>,
+     "source": "qq" | "wechat", "phase": <idle|received|thinking|tool|replying|sent|error>,
      "node_id": <real theme node id or "">, "bubble_text": <short text or "">,
      "ttl_ms": <non-negative int>}
 """
@@ -348,6 +348,10 @@ QQ_RECORD_STATES = {"queued", "generating", "sending", "confirmed",
 # Only this exact OneBot acceptance line counts as a chat receipt.
 QQ_CHAT_CONFIRM_PREFIX = "OneBot 已接受发送"
 QQ_NATIVE_CHAT_INGRESS_DETAIL = "QQ原生聊天已入队"
+QQ_TOOL_DETAIL = "QQ聊天工具执行中"
+# Image generation may take 150 s before trying its fallback. The Core removes
+# this in-memory marker immediately when the operation returns or is cancelled.
+QQ_TOOL_WINDOW = 300.0
 QQ_ACTIVE_CHAT = {
     "generating": ("QQ聊天模型请求中", "thinking", 120.0),
     "sending": ("QQ聊天提交 OneBot", "replying", 30.0),
@@ -398,6 +402,11 @@ def qq_active_chat(item: dict[str, Any]) -> bool:
         item.get("_active") is True or _record_detail(item).strip() == expected[0])
 
 
+def qq_tool_running(item: dict[str, Any]) -> bool:
+    return (item.get("state") == "generating"
+            and _record_detail(item).strip() == QQ_TOOL_DETAIL)
+
+
 def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                 now: float) -> EvidenceSnapshot:
     """Project QQ stages from recent, specific controller evidence.
@@ -426,6 +435,9 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                 and age <= QQ_RECEIVED_WINDOW_SEC):
             return EvidenceSnapshot("qq", "received", EVIDENCE_VERIFIED,
                                     reason="native_chat_queued", at=float(latest["timestamp"]))
+        if age is not None and age <= QQ_TOOL_WINDOW and qq_tool_running(latest):
+            return EvidenceSnapshot("qq", "tool", EVIDENCE_VERIFIED,
+                                    reason="active_tool", at=float(latest["timestamp"]))
         if age is not None and qq_active_chat(latest):
             _, phase, window = QQ_ACTIVE_CHAT[state]
             if age <= window:
@@ -647,7 +659,7 @@ class LiveBridge:
                 panel = None
 
         evidence = pick_evidence(live, panel, now=now)
-        if preserve_qq_ingress and evidence.source == "qq" and evidence.reason == "active_chat":
+        if preserve_qq_ingress and evidence.source == "qq" and evidence.reason in ("active_chat", "active_tool"):
             ingress_at = pending_qq_ingress(panel, after=self._last_qq_ingress_at, now=now)
             if ingress_at:
                 evidence = EvidenceSnapshot("qq", "received", EVIDENCE_VERIFIED,
@@ -670,10 +682,13 @@ class LiveBridge:
                 and bubble_expired(self._bubble, self._bubble_at, now, BUBBLE_TTL_MS)):
             text = ""
 
+        ttl_ms = LIVE_TTL_MS if phase != "idle" else 0
+        if phase == "tool":
+            ttl_ms = max(1, round((QQ_TOOL_WINDOW - (now - evidence.at)) * 1000))
         payload = {
             "node_id": node_id,
             "bubble_text": text,
-            "ttl_ms": LIVE_TTL_MS if phase != "idle" else 0,
+            "ttl_ms": ttl_ms,
             "orders": orders,
             "evidence": evidence.evidence,
             "verified": evidence.evidence == EVIDENCE_VERIFIED and phase != "idle",

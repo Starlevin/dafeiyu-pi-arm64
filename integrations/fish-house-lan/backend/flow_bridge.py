@@ -42,7 +42,7 @@ from typing import Any
 
 # ------------------------------------------------------------------ contracts
 
-PHASES = ("idle", "received", "thinking", "replying", "sent", "error")
+PHASES = ("idle", "received", "thinking", "tool", "replying", "sent", "error")
 SOURCES = ("qq", "wechat")
 
 DEFAULT_THEME_URL = "/fish_house/themes/default/theme.json"
@@ -52,6 +52,7 @@ PHASE_INTENTS = {
     "idle": "wait",
     "received": "pickup",
     "thinking": "phone",
+    "tool": "work",
     "replying": "phone",
     "sent": "putdown",
     "error": "wait",
@@ -61,6 +62,7 @@ PHASE_LOOP = {
     "idle": True,
     "received": False,
     "thinking": True,
+    "tool": True,
     "replying": True,
     "sent": False,
     "error": True,
@@ -69,6 +71,7 @@ PHASE_LABELS = {
     "idle": "待机",
     "received": "收到消息，拿起手机",
     "thinking": "正在想怎么回",
+    "tool": "正在使用工具",
     "replying": "正在回复",
     "sent": "回复发出，放下手机",
     "error": "这次没发出去",
@@ -78,6 +81,7 @@ PHASE_BUBBLES = {
     "idle": "",
     "received": "来消息啦",
     "thinking": "让我想想怎么回",
+    "tool": "正在使用工具",
     "replying": "正在打字…",
     "sent": "回好啦",
     "error": "这条没发出去",
@@ -594,6 +598,13 @@ class FlowRouter:
             if start["id"] == wait["id"]:
                 return [self.flow.clip(wait, phase)]
             return self._walk(start, wait, phase) or [self.flow.clip(wait, phase)]
+
+        if intent == "work":
+            work = self.flow.work_node()
+            if (work is None or not self.flow.path(wait["id"], work["id"])
+                    or not self.flow.path(work["id"], wait["id"])):
+                work = key or wait
+            return self._walk(start, work, intent)
 
         if key is None:
             # 没有任何可往返的忙碌节点：保守回到等待循环，绝不硬编码别的节点。
