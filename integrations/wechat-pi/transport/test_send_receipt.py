@@ -638,6 +638,16 @@ class SendReceiptTests(unittest.TestCase):
                 self.assertEqual(harness.state["return_key_count"], 1)
                 self.assertFalse(harness.state["timing_logs"][-1][1]["final_check_attempted"])
 
+    def test_receipt_keeps_live_proxy_when_header_retry_cannot_enumerate_app(self):
+        rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
+        harness = SendReplyHarness(post_rows=rows, identity_title_sequence=[None],
+                                   post_get_app_sequence=["same", None])
+        self.assertEqual(harness.send(), "visible_outgoing")
+        self.assertTrue(harness.state["timing_logs"][-1][1]["identity_before_retried"])
+        self.assertEqual(harness.state["identity_checks"], 3)
+        self.assertEqual(len(set(harness.state["identity_app_ids"])), 1)
+        self.assertEqual(harness.state["return_key_count"], 1)
+
     def test_unconfirmed_status_is_single_record_compatible_reason(self):
         harness = SendReplyHarness(post_rows=[("此前可见消息", (0, 0, 600, 50))])
         result = harness.send()

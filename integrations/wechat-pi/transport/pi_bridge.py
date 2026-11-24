@@ -1872,6 +1872,11 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
             time.sleep(0.075)
             try:
                 refreshed_app = get_app()
+                if refreshed_app is None:
+                    # Enumeration may briefly lose the same app between two
+                    # reads. Recheck the existing live proxy and still require
+                    # the normal fresh outgoing row and both target proofs.
+                    refreshed_app = receipt_app
                 if refreshed_app != receipt_app or not _receipt_proxy_live(refreshed_app):
                     before_reason = "client_unavailable"
                 else:
