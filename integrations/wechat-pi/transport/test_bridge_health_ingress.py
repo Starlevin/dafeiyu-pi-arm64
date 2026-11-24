@@ -88,6 +88,26 @@ class BridgeHealthIngressTests(unittest.TestCase):
             health.update("queue", "accepted", "not-a-trace")
             self.assertNotIn("last_ingress", json.loads(path.read_text(encoding="utf-8")))
 
+    def test_current_worker_clears_generation_without_overwriting_another_event(self):
+        with tempfile.TemporaryDirectory(prefix="wechat-generation-health-") as directory:
+            path = Path(directory) / "health.json"
+            health = self.make_health(path)
+            trace = "a" * 64
+            owner = {"pid": bridge_health.os.getpid(), "thread": bridge_health.get_native_id(),
+                     "start_ticks": "57"}
+            with patch.object(bridge_health, "generation_worker", return_value=owner):
+                health.update("generation", "started", trace)
+            current = json.loads(path.read_bytes())
+            self.assertTrue(current["generation_tracking"])
+            self.assertEqual(current["active_generation"]["thread"], owner["thread"])
+            health.update("queue", "accepted", "b" * 64)
+            health.finish_generation("b" * 64)
+            self.assertEqual(json.loads(path.read_bytes())["active_generation"]["trace"], trace)
+            health.finish_generation(trace)
+            finished = json.loads(path.read_bytes())
+            self.assertNotIn("active_generation", finished)
+            self.assertEqual(finished["last_event"]["phase"], "queue")
+
 
 if __name__ == "__main__":
     unittest.main()

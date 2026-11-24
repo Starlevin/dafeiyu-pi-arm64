@@ -152,6 +152,7 @@
         verified: payload.verified === true,
         terminal: payload.terminal === true,
         at: payload.at || payload.timestamp || nowSec,
+        expiresAt: payload.expires_at,
         text: payload.text || payload.bubble || ""
       };
     }

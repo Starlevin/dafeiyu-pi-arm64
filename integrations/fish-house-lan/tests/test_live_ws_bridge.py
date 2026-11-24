@@ -205,6 +205,21 @@ class BubbleTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- evidence
 class EvidenceTests(unittest.TestCase):
+    def test_qq_client_ttl_tracks_remaining_verified_generation(self):
+        panel = {"runtimeRecords": [{
+            "state": "generating", "timestamp": NOW, "detail": "QQ聊天模型请求中",
+        }]}
+        bridge = live_ws.LiveBridge(router_factory=lambda: None, snapshot_getter=dict,
+                                    panel_reader=lambda: panel)
+        with patch.object(live_ws.time, "time", return_value=NOW + 21):
+            snapshot = bridge.state_snapshot()
+            self.assertEqual(snapshot["phase"], "thinking")
+            self.assertEqual(snapshot["ttl_ms"], 99000)
+            self.assertEqual(bridge.produce()[-1]["phase"], "thinking")
+            self.assertEqual(bridge.produce(), [])
+            panel["runtimeRecords"].clear()
+            self.assertEqual(bridge.produce()[-1]["phase"], "idle")
+
     def test_qq_tool_requires_current_execution_and_takes_the_computer_path(self):
         row = {"state": "generating", "timestamp": NOW - 1,
                "detail": live_ws.QQ_TOOL_DETAIL}
@@ -1325,6 +1340,42 @@ class ReviewRegressionTests(unittest.TestCase):
                 mod.core_status = lambda: self.fail("HTTP fallback should not run")
                 self.assertEqual(mod.live_snapshot()["wechat"]["activity_state"], expected)
 
+    def test_wechat_long_generation_requires_current_worker_and_ends_with_it(self):
+        spec = importlib.util.spec_from_file_location(
+            "fh_server_live_generation", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        now = float(NOW)
+        event = {"time": now, "phase": "generation", "reason": "started", "trace": "a" * 64}
+        diagnostics = {"last_event": event, "generation_tracking": True, "active_generation": {
+            "time": now, "pid": 123, "thread": 234, "start_ticks": "678", "trace": event["trace"],
+        }}
+        bridge = mod.live_ws.LiveBridge(router_factory=lambda: None, snapshot_getter=mod.live_snapshot)
+        with patch.object(mod.bridge_health_file, "read", return_value=diagnostics), \
+             patch.object(mod, "wechat_generation_owner_live", return_value=True, create=True) as owner, \
+             patch.object(mod.time, "time", return_value=now + 38) as clock:
+            state = bridge.produce()[-1]
+            self.assertEqual((state["source"], state["phase"], state.get("event_at")),
+                             ("wechat", "thinking", now))
+            self.assertEqual(state["ttl_ms"], 202000)
+            self.assertEqual(mod.house_event(state)["expires_at"], now + 240)
+            self.assertNotIn("trace", state)
+            self.assertEqual(bridge.produce(), [])
+            owner.return_value = False
+            self.assertEqual(bridge.produce()[-1]["phase"], "idle")
+            clock.return_value = now + 3
+            self.assertEqual(bridge.state_snapshot()["phase"], "idle")
+            owner.return_value = True
+            clock.return_value = now + 241
+            self.assertEqual(bridge.state_snapshot()["phase"], "idle")
+            clock.return_value = now + 39
+            diagnostics["last_event"] = {"time": now + 39, "phase": "confirmation",
+                                         "reason": "visible_outgoing", "trace": event["trace"],
+                                         "success": True}
+            self.assertEqual(bridge.produce()[-1]["phase"], "sent")
+            clock.return_value = now + 60
+            self.assertEqual(bridge.produce()[-1]["phase"], "idle")
+
     def test_extended_submit_phase_is_not_rebroadcast_and_reconnect_is_fresh(self):
         import importlib.util
         import json
@@ -1359,6 +1410,8 @@ class ReviewRegressionTests(unittest.TestCase):
                 router_factory=lambda: None, snapshot_getter=mod.live_snapshot,
                 panel_reader=lambda: None, tick=0.25).snapshot_frames()
             self.assertEqual(reconnect[-1]["phase"], "replying")
+            self.assertGreater(reconnect[-1]["ttl_ms"], 10000)
+            self.assertLessEqual(reconnect[-1]["ttl_ms"], 12000)
 
             # A visible receipt advances the same bridge lifecycle directly to
             # sent. It must not fall through an idle gap and replay received.

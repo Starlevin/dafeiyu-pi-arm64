@@ -178,6 +178,7 @@
     var lastRealSeq = 0;
     var lastRealEventAt = 0;
     var enteredStateAt = opts.nowFn();
+    var stateExpiresAt = 0;
     var transitionSeq = 0;
     var dedupIds = [];
     var dedupMap = {};
@@ -258,12 +259,14 @@
         ? meta.bubble
         : (STATE_DEFAULT_BUBBLES[nextState] || "");
       enteredStateAt = meta.now || opts.nowFn();
+      stateExpiresAt = meta.expiresAt || 0;
       transitionSeq += 1;
       return emitChange(reason || "event", prev);
     }
 
     function canRestoreInterrupted(now) {
       if (!interruptedState) return false;
+      if (interruptedState.expiresAt) return now < interruptedState.expiresAt;
       var ttl = interruptedState.ttlMs || opts.ttlMs[interruptedState.state] || 0;
       if (!ttl) return false;
       return (now - interruptedState.enteredStateAt) < ttl;
@@ -295,6 +298,13 @@
       var eventAtMs = normalizeTimestampMs(ev.at, now);
       var hasSeq = (typeof ev.seq === "number" && !isNaN(ev.seq) && ev.seq > 0);
       var evId = ev.id ? String(ev.id) : "";
+      var expiresAt = 0;
+      if (isReal && hasSeq && (rawSource === "qq" || rawSource === "wechat") &&
+          (normEvent === "thinking" || normEvent === "replying" || normEvent === "tool") &&
+          typeof ev.at === "number" && typeof ev.expiresAt === "number" && isFinite(ev.expiresAt)) {
+        var deadline = normalizeTimestampMs(ev.expiresAt, 0);
+        if (deadline > eventAtMs && deadline - eventAtMs <= 300000) expiresAt = deadline;
+      }
 
       // 1. Explicit ID deduplication
       if (evId && dedupMap["id:" + evId]) {
@@ -320,7 +330,7 @@
             stats.staleDropped += 1;
             return { accepted: false, reason: "future_timestamp", snapshot: snapshot() };
           }
-          var maxAllowed = opts.ttlMs[normEvent] || opts.maxEventAgeMs;
+          var maxAllowed = expiresAt ? expiresAt - eventAtMs : (opts.ttlMs[normEvent] || opts.maxEventAgeMs);
           if (ageMs > maxAllowed) {
             stats.expired += 1;
             if (state !== "idle" && state !== "rest" && source === "real") {
@@ -395,6 +405,7 @@
           verified: verified,
           bubble: bubble,
           enteredStateAt: enteredStateAt,
+          expiresAt: stateExpiresAt,
           ttlMs: opts.ttlMs[state] || opts.maxEventAgeMs
         };
         stats.interruptedSaved += 1;
@@ -420,6 +431,7 @@
         platform: normPlatform,
         verified: isReal,
         bubble: customBubble,
+        expiresAt: expiresAt,
         now: now
       }, "event:" + normEvent);
 
@@ -451,7 +463,7 @@
       if (state === "rest") return null;
 
       var ttl = opts.ttlMs[state];
-      if (!ttl || elapsed < ttl) return null;
+      if (stateExpiresAt ? now < stateExpiresAt : (!ttl || elapsed < ttl)) return null;
 
       // If an interrupted active real state is still fresh, restore it cleanly!
       if (canRestoreInterrupted(now)) {
@@ -464,6 +476,7 @@
           platform: restore.platform,
           verified: restore.verified,
           bubble: restore.bubble,
+          expiresAt: restore.expiresAt,
           now: restore.enteredStateAt
         }, "interrupt_restored");
       }

@@ -8,7 +8,7 @@ const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const py = String.raw`import asyncio,json,os
 from aiohttp import web
-root=os.environ['LIVE_WEB_ROOT']; clients=set()
+root=os.environ['LIVE_WEB_ROOT']; clients=set(); quiet_reconnect=[False]
 with open(os.path.join(root,'fish_house/themes/default/theme.json'),encoding='utf-8') as f: clone=json.load(f)
 clone['meta']['id']='live-test-clone'
 retry_theme=json.loads(json.dumps(clone)); retry_theme['meta']['id']='live-test-retry'
@@ -26,7 +26,8 @@ for key in ('videos','audio','durations'): rekeyed['config'][key]={idmap.get(k,k
 async def live(req): raise web.HTTPFound('/fish_house/live.html'+(('?'+req.query_string) if req.query_string else ''))
 async def ws_route(req):
  w=web.WebSocketResponse(); await w.prepare(req); clients.add(w)
- await w.send_json({'type':'state','seq':1,'ts':int(__import__('time').time()),'source':'qq','phase':'idle','node_id':'rest','bubble_text':'','ttl_ms':0})
+ if not quiet_reconnect[0]:
+  await w.send_json({'type':'state','seq':1,'ts':int(__import__('time').time()),'source':'qq','phase':'idle','node_id':'rest','bubble_text':'','ttl_ms':0})
  try:
   while not w.closed:
    msg=await w.receive()
@@ -39,6 +40,7 @@ async def inject(req):
   if not client.closed: await client.send_json(item)
  return web.json_response({'queued':True})
 async def disconnect(req):
+ quiet_reconnect[0]=req.query.get('quiet')=='1'
  for w in list(clients): await w.close()
  return web.json_response({'closed':True})
 async def ws_stats(req): return web.json_response({'clients':len(clients)})
@@ -508,6 +510,16 @@ async function main() {
       "computer transition does not wait for the long loop", 2200);
     check("the longer both-role loop keeps immediate transitions", true,
       `next video presented after ${Date.now()-computerStartedAt}ms`);
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultIdle.id)),
+      "idle before stream outage");
+    await send(24, "thinking", "wechat", "state", defaultPhone.id, 100000);
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultPhone.id)),
+      "long generation reaches the phone loop");
+    await fetch(`http://127.0.0.1:${PORT}/disconnect?quiet=1`, {method:"POST"});
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === " + JSON.stringify(defaultPutdown)),
+      "missing activity stream releases long generation", 7200);
+    check("a silent reconnect ends a long activity using its exit clip", true,
+      "the putdown clip presented before the 100-second activity timeout");
     const s = await cdp.send("Page.captureScreenshot", { format:"png" }); fs.writeFileSync(path.join(os.tmpdir(), "fish-house-live-frame.png"), Buffer.from(s.data,"base64"));
     const expectedRetryErrors = cdp.errors.filter(e => e.method === "Log.entryAdded" && e.params.entry.url === retryUrl && /503/.test(e.params.entry.text));
     const unexpectedBrowserErrors = cdp.errors.filter(e => !expectedRetryErrors.includes(e));

@@ -11,8 +11,19 @@ import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
-from threading import Lock
+from threading import Lock, get_native_id
 import time
+
+
+def generation_worker():
+    """Identify the current Linux worker across process and thread ID reuse."""
+    pid, thread = os.getpid(), get_native_id()
+    try:
+        stat = Path(f"/proc/{pid}/task/{thread}/stat").read_text(encoding="utf-8")
+        start_ticks = stat.rsplit(")", 1)[1].split()[19]
+    except (OSError, UnicodeError, IndexError):
+        return None
+    return {"pid": pid, "thread": thread, "start_ticks": start_ticks}
 
 
 class Health:
@@ -25,7 +36,7 @@ class Health:
         self.path = Path(path)
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self.lock = Lock()
-        self.state = {}
+        self.state = {"generation_tracking": True}
         self.outbound = {}
         self._reload_unlocked()
 
@@ -43,6 +54,9 @@ class Health:
                       "last_success", "last_unknown"):
             if isinstance(prior.get(field), dict):
                 self.state[field] = prior[field]
+        self.state.pop("active_generation", None)
+        if isinstance(prior.get("active_generation"), dict):
+            self.state["active_generation"] = prior["active_generation"]
         self.state.pop("last_ingress", None)
         ingress = prior.get("last_ingress")
         if (isinstance(ingress, dict)
@@ -180,6 +194,22 @@ class Health:
             except OSError:
                 return False
 
+    def finish_generation(self, trace):
+        """Clear only the generation owned by this worker."""
+        with self.lock:
+            try:
+                with self._disk_lock():
+                    if not self._reload_unlocked():
+                        return
+                    marker = self.state.get("active_generation")
+                    if (marker and marker.get("trace") == trace
+                            and marker.get("pid") == os.getpid()
+                            and marker.get("thread") == get_native_id()):
+                        self.state.pop("active_generation")
+                        self._save_unlocked()
+            except OSError:
+                print("bridge_health_write_failed", flush=True)
+
     def update(self, phase, reason, trace=None, *,
                failed=False, success=False, unknown=False):
         event = {"time": int(time.time()), "phase": phase, "reason": reason}
@@ -196,6 +226,13 @@ class Health:
                         self.state["last_event"] = event
                     else:
                         self.state["client"] = event
+                    if phase == "generation" and reason == "started" and trace:
+                        self.state.pop("active_generation", None)
+                        owner = generation_worker()
+                        if owner is not None:
+                            self.state["active_generation"] = {
+                                **owner, "trace": trace, "time": float(event["time"]),
+                            }
                     if failed:
                         self.state["last_failure"] = event
                     if success:

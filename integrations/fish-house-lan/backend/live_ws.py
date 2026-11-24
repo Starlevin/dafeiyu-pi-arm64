@@ -298,13 +298,15 @@ class EvidenceSnapshot:
     """Normalized, privacy-free view of both sources at one instant."""
 
     def __init__(self, source: str, phase: str, evidence: str,
-                 node_hint: str = "", reason: str = "", at: float = 0.0):
+                 node_hint: str = "", reason: str = "", at: float = 0.0,
+                 expires_at: float = 0.0):
         self.source = source
         self.phase = phase
         self.evidence = evidence
         self.node_hint = node_hint
         self.reason = reason
         self.at = at
+        self.expires_at = expires_at
 
     def as_dict(self) -> dict[str, Any]:
         return {"source": self.source, "phase": self.phase,
@@ -335,9 +337,12 @@ def wechat_evidence(live: dict[str, Any], *, now: float) -> EvidenceSnapshot:
     if phase != "idle":
         # Only stages already normalized by the adapter are trusted.
         at = wx.get("activity_at")
+        expires = wx.get("activity_until")
         return EvidenceSnapshot("wechat", phase, EVIDENCE_VERIFIED,
                                 reason=str(diag.get("reason") or ""),
-                                at=at if isinstance(at, (int, float)) and 0 < at <= now else 0.0)
+                                at=at if isinstance(at, (int, float)) and 0 < at <= now else 0.0,
+                                expires_at=expires if type(expires) in (int, float)
+                                and now < expires <= now + 300 else 0.0)
     return EvidenceSnapshot("wechat", "idle", EVIDENCE_VERIFIED,
                             reason="no_recent_event" if not diag else
                             str(diag.get("reason") or "idle"), at=now)
@@ -437,12 +442,14 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                                     reason="native_chat_queued", at=float(latest["timestamp"]))
         if age is not None and age <= QQ_TOOL_WINDOW and qq_tool_running(latest):
             return EvidenceSnapshot("qq", "tool", EVIDENCE_VERIFIED,
-                                    reason="active_tool", at=float(latest["timestamp"]))
+                                    reason="active_tool", at=float(latest["timestamp"]),
+                                    expires_at=float(latest["timestamp"]) + QQ_TOOL_WINDOW)
         if age is not None and qq_active_chat(latest):
             _, phase, window = QQ_ACTIVE_CHAT[state]
             if age <= window:
                 return EvidenceSnapshot("qq", phase, EVIDENCE_VERIFIED,
-                                        reason="active_chat", at=float(latest["timestamp"]))
+                                        reason="active_chat", at=float(latest["timestamp"]),
+                                        expires_at=float(latest["timestamp"]) + window)
         if age is not None and age <= SENT_WINDOW_SEC:
             if state == "confirmed":
                 # confirmed splits in two: only a chat receipt counts as sent.
@@ -616,6 +623,8 @@ class LiveBridge:
         if (evidence is not None and evidence.evidence == EVIDENCE_VERIFIED
                 and phase != "idle" and 0 < evidence.at <= time.time()):
             frame["event_at"] = evidence.at
+            if evidence.expires_at > evidence.at:
+                frame["expires_at"] = evidence.expires_at
         for key in ("orders", "theme_url", "theme_ok", "nodes", "videos",
                     "durations", "crossfade_ms", "show_bubble", "bubble_ms",
                     "evidence", "verified", "video", "loop", "label"):
@@ -683,8 +692,8 @@ class LiveBridge:
             text = ""
 
         ttl_ms = LIVE_TTL_MS if phase != "idle" else 0
-        if phase == "tool":
-            ttl_ms = max(1, round((QQ_TOOL_WINDOW - (now - evidence.at)) * 1000))
+        if phase != "idle" and evidence.expires_at:
+            ttl_ms = max(1, round((evidence.expires_at - now) * 1000))
         payload = {
             "node_id": node_id,
             "bubble_text": text,

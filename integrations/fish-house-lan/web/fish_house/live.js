@@ -6,6 +6,7 @@
   var lastSeq = -1, firstStateOnSocket = true, lastTransition = "", lastTransitionAt = 0, lastOrders = "", lastOrdersAt = 0;
   var lastOrderEvent = "";
   var expiry = 0, bubbleExpiry = 0, transitionTimer = 0, phoneExitTimer = 0, startedAt = 0, presentedAt = 0;
+  var streamExpiry = 0;
   var idleDelay = 0, showBubble = true, bubbleOverride = null, themeBase = "", idleNode = "", phoneNode = "";
   var pickupPreload = null, themeEpoch = 0, pendingTheme = null;
   var fadeMs = 450, maxPhoneLoopSeconds = 9, phoneEndWindowMs = 1000, mediaEndGraceMs = 200;
@@ -372,6 +373,8 @@
     }
     showText(message);
     if (message.type === "bubble") return;
+    clearTimeout(streamExpiry);
+    streamExpiry = 0;
     if (pendingTheme) {
       // The next server frame may already refer to the requested theme.
       // Keep only the latest playback state and preserve its original lifetime.
@@ -414,13 +417,21 @@
     lastSeq = -1;
     if (pendingTheme) pendingTheme.frame = null;
   }
+  function streamUnavailable() {
+    if (pendingTheme) pendingTheme.frame = null;
+    if (!streamExpiry) streamExpiry = setTimeout(function () {
+      streamExpiry = 0;
+      clearTimeout(expiry);
+      expireActivity();
+    }, 4500);
+  }
   function connect() {
     if (embedded) {
       if (socket || !window.EventSource) return;
       var events = new EventSource("/api/house/live-events");
       socket = events;
       events.onopen = resetStream;
-      events.onerror = function () { if (pendingTheme) pendingTheme.frame = null; };
+      events.onerror = streamUnavailable;
       events.onmessage = receive;
       return;
     }
@@ -433,7 +444,7 @@
     ws.onclose = function () {
       if (socket !== ws) return;
       socket = null;
-      if (pendingTheme) pendingTheme.frame = null;
+      streamUnavailable();
       scheduleReconnect();
     };
     ws.onerror = function () {};

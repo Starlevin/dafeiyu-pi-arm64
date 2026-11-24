@@ -197,6 +197,7 @@ CORE_LIVE_CACHE_SECONDS = 1.0
 LIVE_STARTED_AT = time.time()
 LIVE_INGRESS_PIN_SECONDS = 0.9
 PENDING_SUBMIT_GRACE_SECONDS = 35.0
+WECHAT_GENERATION_MAX_SECONDS = 240.0
 
 
 def live_core_fallback():
@@ -249,6 +250,40 @@ def pending_submit_phase(diagnostics, *, now):
     extended = normalize_bridge_health(
         diagnostics, now=now, max_age_seconds=PENDING_SUBMIT_GRACE_SECONDS)
     return "replying" if extended == "replying" else "idle"
+
+
+def wechat_generation_owner_live(pid, thread, start_ticks):
+    try:
+        stat = Path(f"/proc/{pid}/task/{thread}/stat").read_text(encoding="utf-8")
+        fields = stat.rsplit(")", 1)[1].split()
+        return fields[0] not in {"Z", "X", "x"} and fields[19] == start_ticks
+    except (OSError, UnicodeError, IndexError):
+        return False
+
+
+def active_wechat_generation(diagnostics, *, now):
+    """A persisted start alone cannot prove that a model request is running."""
+    marker = diagnostics.get("active_generation")
+    if diagnostics.get("generation_tracking") is not True or not isinstance(marker, dict):
+        return None
+    at, pid, thread = marker.get("time"), marker.get("pid"), marker.get("thread")
+    ticks = marker.get("start_ticks")
+    trace = marker.get("trace")
+    if (type(at) not in (int, float) or not 0 <= now - at < WECHAT_GENERATION_MAX_SECONDS
+            or type(pid) is not int or pid <= 0 or type(thread) is not int or thread <= 0
+            or not isinstance(ticks, str) or not re.fullmatch(r"[0-9]{1,20}", ticks)
+            or not isinstance(trace, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", trace)):
+        return None
+    for key in ("last_event", "last_success", "last_failure", "last_unknown"):
+        event = diagnostics.get(key)
+        if not isinstance(event, dict) or event.get("trace") != trace:
+            continue
+        stamp = event.get("time")
+        if (type(stamp) in (int, float) and at <= stamp <= now
+                and (event.get("phase") in {"submit", "confirmation"}
+                     or (event.get("phase") == "generation" and event.get("reason") != "started"))):
+            return None
+    return at if wechat_generation_owner_live(pid, thread, ticks) else None
 
 
 def _bool(value):
@@ -798,12 +833,15 @@ def house_event(frame):
     stamp = frame.get("event_at") if frame.get("verified") is True else None
     phase = frame["phase"] if stamp is not None else "idle"
     source = frame["source"]
-    return {
+    event = {
         "id": f"{source}:{phase}:{stamp}" if stamp is not None else "",
         "seq": frame["seq"], "phase": phase, "source": source,
         "verified": True, "at": stamp if stamp is not None else frame["ts"],
         "terminal": phase == "error",
     }
+    if stamp is not None and "expires_at" in frame:
+        event["expires_at"] = frame["expires_at"]
+    return event
 
 
 def live_event_key(frame):
@@ -870,8 +908,11 @@ def live_snapshot():
         diagnostics = {}
     now = time.time()
     phase = normalize_bridge_health(diagnostics, now=now, max_age_seconds=15)
-    if phase == "idle":
-        phase = pending_submit_phase(diagnostics, now=now)
+    if phase == "thinking" and diagnostics.get("generation_tracking") is True:
+        phase = "idle"
+    pending = phase in {"idle", "replying"} and pending_submit_phase(diagnostics, now=now) == "replying"
+    if pending:
+        phase = "replying"
     timestamp = 0.0
     ingress = diagnostics.get("last_ingress")
     event = diagnostics.get("last_event")
@@ -923,7 +964,16 @@ def live_snapshot():
                 value = marker.get("time") if isinstance(marker, dict) else None
                 if isinstance(value, (int, float)) and not isinstance(value, bool) and timestamp < value <= now:
                     timestamp = value
-    return {"wechat": {"activity_state": phase, "activity_at": timestamp}}
+    activity_until = 0.0
+    if phase == "replying" and pending:
+        activity_until = timestamp + PENDING_SUBMIT_GRACE_SECONDS
+    if not valid_ingress:
+        generation_at = active_wechat_generation(diagnostics, now=now)
+        if generation_at is not None and (phase == "idle" or generation_at > timestamp):
+            phase, timestamp = "thinking", generation_at
+            activity_until = timestamp + WECHAT_GENERATION_MAX_SECONDS
+    return {"wechat": {"activity_state": phase, "activity_at": timestamp,
+                        "activity_until": activity_until}}
 
 
 _THEME_CHOICE_LOCK = threading.Lock()

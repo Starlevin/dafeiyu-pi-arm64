@@ -66,9 +66,11 @@ test("4. Bridge-health snapshot requires matching success marker and honors late
 });
 
 test("5. parseIncomingPayload handles canonical, raw Codex activity, and bridge-health envelopes", function () {
-  var p1 = EA.parseIncomingPayload({ seq: 8, phase: "thinking", source: "qq", verified: true, at: NOW }, NOW * 1000);
+  var p1 = EA.parseIncomingPayload({ seq: 8, phase: "thinking", source: "qq", verified: true,
+                                    at: NOW, expires_at: NOW + 120 }, NOW * 1000);
   assert.strictEqual(p1.type, "thinking");
   assert.strictEqual(p1.verified, true);
+  assert.strictEqual(p1.expiresAt, NOW + 120);
 
   var p2 = EA.parseIncomingPayload({
     last_event: { time: NOW, phase: "generation", reason: "started", trace: "abc" },

@@ -110,6 +110,22 @@ test("An active verified tool uses its own state and ends on a fresh model event
   assert.strictEqual(eng.getState().state, "thinking");
 });
 
+test("A late verified generation snapshot keeps only the remaining server lifetime", function () {
+  var started = fakeNow;
+  advance(130000);
+  var eng = EE.createEngine({ nowFn: clock });
+  var event = { type: "thinking", source: "wechat", verified: true, seq: 1,
+                at: started / 1000, expiresAt: (started + 240000) / 1000 };
+  assert.strictEqual(eng.pushEvent(event).accepted, true);
+  advance(109999);
+  assert.strictEqual(eng.tick(), null);
+  assert.strictEqual(eng.getState().state, "thinking");
+  advance(2);
+  assert.strictEqual(eng.tick().state, "confused");
+  event.seq = 2;
+  assert.strictEqual(eng.pushEvent(event).reason, "expired_ttl");
+});
+
 test("A terminal send failure cannot revive a finished model animation", function () {
   var eng = EE.createEngine({ nowFn: clock });
   eng.pushEvent({ type: "thinking", source: "qq", verified: true, seq: 1, at: fakeNow });

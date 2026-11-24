@@ -2483,15 +2483,17 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
             auto_ctx = None
         trace = payload["msg_id"]
         generation_started_at = time.monotonic()
+        generation_recorded = False
         try:
             if generation_started_at - queued_at > 180:
                 response = {"ok": False, "error": "queue_expired"}
             else:
-                record(health, "generation", "started", trace)
                 demo = approved_media_command(target, payload, media_dir)
                 if demo is not None:
                     response = demo
                 else:
+                    generation_recorded = health is not None
+                    record(health, "generation", "started", trace)
                     if photo:
                         dynamic = bool(payload.pop("_sticker_animated", False))
                         prompt = (psv.DYNAMIC_VISION_PROMPT if dynamic and psv is not None
@@ -2505,6 +2507,9 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
                     response = ask_core_routed(payload, token) if payload["text"] else {"ok": False, "error": "vision_failed"}
         except Exception as error:
             response = {"ok": False, "error": type(error).__name__}
+        finally:
+            if generation_recorded:
+                health.finish_generation(trace)
         generation_done_at = time.monotonic()
         # Trace-only timings: no message text, account or credentials.
         log("generation_timing", trace=trace,
