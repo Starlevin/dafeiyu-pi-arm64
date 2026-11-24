@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from test_runtime_proactive_bridge import bridge
-from wal_sweep_queue import VerifiedWalRescanQueue
+from wal_sweep_queue import VerifiedWalRescanQueue, WalSweepQueue
 
 
 class VerifiedWalEmptyRefreshTests(unittest.TestCase):
@@ -161,6 +161,46 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
                 self.queue, "授权群", object(), ["授权群"], competing_activity=True))
             opened.assert_called_once()
         self.assertEqual(self.queue.pending_count(), 0)
+
+
+class WalPollPriorityTests(unittest.TestCase):
+    def test_preview_change_precedes_an_unrelated_private_wal_hint(self):
+        ordered = bridge.poll_order(
+            ["private", "group-a", "group-b"], {"group-b"}, "private",
+            set(), None, 100, {"group-a"})
+        self.assertEqual(ordered, ["group-b", "private", "group-a"])
+
+    def test_private_with_actual_preview_change_retains_priority(self):
+        ordered = bridge.poll_order(
+            ["group", "private"], {"group", "private"}, "private",
+            set(), None, 100, {"group"})
+        self.assertEqual(ordered, ["private", "group"])
+
+    def test_empty_private_probe_queues_one_visible_group_and_obeys_cooldown(self):
+        sweep = WalSweepQueue(lambda: 100)
+        groups = ["recent", "cold", "oldest", "older", "hidden", "no_scan"]
+        signatures = dict.fromkeys(["recent", "cold", "oldest", "older", "no_scan", "private"], "hash")
+        snapshots = {name: ["hash"] for name in ("oldest", "older", "recent", "hidden", "private", "no_scan")}
+        scanned = {"recent": 94, "cold": 10, "oldest": 20, "older": 35, "hidden": 3, "private": 1}
+        selected = bridge.queue_group_after_empty_private_wal(
+            sweep, groups, signatures, snapshots, scanned, now=100)
+        self.assertEqual(selected, "oldest")
+        self.assertEqual(set(sweep.pending), {"oldest"})
+        self.assertTrue(sweep.due("oldest", now=100))
+        sweep.completed("oldest")
+        scanned["oldest"] = 100
+        self.assertIsNone(bridge.queue_group_after_empty_private_wal(
+            sweep, groups, signatures, snapshots, scanned, now=129.99))
+        self.assertEqual(bridge.queue_group_after_empty_private_wal(
+            sweep, groups, signatures, snapshots, scanned, now=130), "older")
+
+    def test_no_usable_group_leaves_existing_periodic_scan_in_charge(self):
+        sweep = WalSweepQueue(lambda: 100)
+        self.assertIsNone(bridge.queue_group_after_empty_private_wal(
+            sweep, ["hidden", "recent"], {"recent": "hash"},
+            {"hidden": ["hash"], "recent": ["hash"]},
+            {"hidden": 80, "recent": 99}, now=100))
+        self.assertEqual(sweep.pending_count(), 0)
 
 
 if __name__ == "__main__":

@@ -588,6 +588,28 @@ def should_scan_chat(name, signature, last_signature, has_snapshot,
             now - last_scan >= full_scan_interval)
 
 
+def poll_order(targets, changed, urgent_target, verified_rechecks, sweep, now, auto_groups):
+    """Prefer a specific session preview change over a chat-agnostic WAL hint."""
+    return sorted(targets, key=lambda target: (
+        0 if target in changed else
+        1 if target == urgent_target else
+        2 if target in verified_rechecks else
+        3 if sweep is not None and sweep.due(target, now=now) else 4,
+        target != urgent_target,
+        target not in auto_groups))
+
+
+def queue_group_after_empty_private_wal(sweep, groups, signatures, snapshots,
+                                        last_scanned, *, now):
+    """Bound a residual message hint to one visible, initialized group."""
+    eligible = [target for target in groups if target in signatures
+                and snapshots.get(target) and now - last_scanned.get(target, now) >= 8.0]
+    if not eligible:
+        return None
+    target = min(eligible, key=last_scanned.__getitem__)
+    return target if sweep.hint({"message"}, [target], now=now) else None
+
+
 def private_session_is_verified(args, app, target, now=None):
     """Keep a recent verified active private room without repeating contact search.
 
@@ -2866,14 +2888,15 @@ def main():
             # every 10 ms after it expires.
             cancel_filtered_empty_refreshes(
                 verified_rechecks, verified_recheck_targets, targets)
-        # Verified open/changed preview first, then persistent WAL supplement.
-        targets.sort(key=lambda t: (
-            0 if t == urgent_target else
-            1 if t in current_signatures and current_signatures[t] != last_sidebar.get(t)
-            else 2 if t in verified_recheck_targets
-            else 3 if sweep is not None and sweep.due(t, now=now)
-            else 4,
-            0 if t in args.auto_reply_group else 1))
+        changed_targets = {target for target in targets
+                           if target in current_signatures
+                           and current_signatures[target] != last_sidebar.get(target)}
+        targets = poll_order(targets, changed_targets, urgent_target,
+                             verified_recheck_targets, sweep, now, args.auto_reply_group)
+        if (urgent_target in scheduled_privates and urgent_target not in changed_targets
+                and changed_targets):
+            log("wal_sidebar_priority", changed=len(changed_targets), bypassed="private_hint")
+        supplemental_group = None
         for target in targets:
             if target in scheduled_privates:
                 next_private_polls[target] = now + 20
@@ -2914,7 +2937,7 @@ def main():
             wal_source_at = None
             if verified_pending and verified_rechecks is not None:
                 wal_source_at = verified_rechecks.source_at(target)
-            elif target == urgent_target:
+            elif target == urgent_target or target == supplemental_group:
                 wal_source_at = wal_message_at
             try:
                 deliver_ready(replies, args, health)
@@ -3048,9 +3071,20 @@ def main():
                         rows_observed_at=rows_observed_at)
                 if wal_source_at is not None:
                     log("wal_ingress_stage", stage="scan", role="message",
+                        kind="private" if is_priv else "group",
+                        private_empty_fallback=target == supplemental_group,
                         event_to_queue_ms=max(0, int((time.monotonic() - wal_source_at) * 1000)),
                         scan_ms=max(0, int((time.monotonic() - poll_started) * 1000)),
                         appended_rows=len(appended), queued=bool(accepted))
+                if (sweep is not None and is_priv and target == urgent_target
+                        and not changed_targets and previous_snapshot and not appended
+                        and not gap_detected[0]):
+                    supplemental_group = queue_group_after_empty_private_wal(
+                        sweep, args.group, current_signatures, snapshots, last_scanned,
+                        now=time.monotonic())
+                    if supplemental_group is not None:
+                        log("wal_empty_private_group_recheck", stage="queued")
+                        wake_signal.set()
                 if accepted and not args.dry_run:
                     # Core runs in a worker thread. Stay on the already-verified
                     # conversation until its reply is ready instead of spending
