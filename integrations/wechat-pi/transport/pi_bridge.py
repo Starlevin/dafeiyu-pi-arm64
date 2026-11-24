@@ -186,6 +186,31 @@ def read_poll_hints(watched, wal_wake, *, settling):
     return app, signatures, wal_wake.take_pending(), {}
 
 
+def wait_for_group_reply(replies, wake_signal, wal_wake, preview_changed, *, timeout=12.0, clock=None):
+    """Hold the current chat while generating, yielding to a real sidebar change."""
+    clock = time.monotonic if clock is None else clock
+    started = clock()
+    deadline = started + timeout
+    next_probe = started
+    while True:
+        # Clear first, then check durable queue/hint state to avoid a lost wake.
+        wake_signal.clear()
+        if not replies.empty():
+            return "reply_ready"
+        now = clock()
+        if now >= deadline:
+            return "timeout"
+        pending_at = wal_wake.latest_pending_message_at()
+        if pending_at is not None and pending_at >= started:
+            if now >= next_probe:
+                if preview_changed():
+                    return "sidebar_changed"
+                next_probe = clock() + .65
+            wake_signal.wait(max(0, min(deadline, next_probe) - clock()))
+        else:
+            wake_signal.wait(max(0, deadline - clock()))
+
+
 def prioritize_sidebar_hint(groups, signatures, previous, roles, event_times, *, carry, refresh_held):
     """Let a known group preview change go first, then consume the carried WAL hint once."""
     if carry is not None:
@@ -2885,6 +2910,7 @@ def main():
                             if public_question_settler is not None else set())
         settle_priority = bool(settling_targets)
         if (moments is not None and not settling_targets and short_refresh_target is None and jobs.empty()
+                and (wal_wake is None or wal_wake.latest_pending_message_at() is None)
                 and replies.empty() and time.monotonic() >= moments_next):
             moments_next = time.monotonic() + 3
             try:
@@ -2977,6 +3003,7 @@ def main():
         if deferred_wal_hint is not None and not settle_priority:
             log("wal_sidebar_priority", changed=len(changed_targets), bypassed="unscoped_hint")
         supplemental_group = None
+        resume_for_sidebar = False
         for target in targets:
             if target in scheduled_privates:
                 next_private_polls[target] = now + 20
@@ -3188,11 +3215,19 @@ def main():
                         log("wal_empty_private_group_recheck", stage="queued")
                         wake_signal.set()
                 if accepted and not args.dry_run:
-                    # Core runs in a worker thread. Stay on the already-verified
-                    # conversation until its reply is ready instead of spending
-                    # 10-15 seconds switching through unrelated Qt chat windows.
-                    # A bounded wait maintains fairness if model generation stalls.
-                    ready_signal.wait(timeout=12.0)
+                    if not is_priv and wal_wake is not None and not args.once:
+                        def preview_changed():
+                            latest = sidebar_signatures(get_app(), watched)
+                            return any(name in last_sidebar and latest[name] != last_sidebar[name]
+                                       for name in latest)
+
+                        hold_started = time.monotonic()
+                        hold_result = wait_for_group_reply(replies, wake_signal, wal_wake, preview_changed)
+                        resume_for_sidebar = hold_result == "sidebar_changed"
+                        log("generation_hold", result=hold_result,
+                            hold_ms=int((time.monotonic() - hold_started) * 1000))
+                    else:
+                        ready_signal.wait(timeout=12.0)
                     ready_signal.clear()
                     deliver_ready(replies, args, health)
                 if (verified_wal_scan_may_ack(
@@ -3250,6 +3285,8 @@ def main():
                         elapsed_ms=int(elapsed * 1000))
             if public_question_settler is not None and public_question_settler.has_pending:
                 break
+            if resume_for_sidebar:
+                break
             if target == short_refresh_target and verified_rechecks.empty_refresh_pending(target):
                 break
         try:
@@ -3260,7 +3297,7 @@ def main():
             jobs.join()
             deliver_ready(replies, args, health)
             return 0
-        if ((settle_priority or deferred_wal_hint is not None)
+        if ((resume_for_sidebar or settle_priority or deferred_wal_hint is not None)
                 and (public_question_settler is None or not public_question_settler.has_pending)):
             continue  # Resume the deferred hints as soon as the candidate permits it.
         # Database-write hints only shorten idle wait; the sidebar and visible

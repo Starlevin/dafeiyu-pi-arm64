@@ -16,6 +16,7 @@ class WalWake:
         self._pending_lock=threading.Lock()
         self._pending_roles=set()
         self._pending_since={}
+        self._latest_message_at=None
         self.min_gap_s=max(0.2,float(min_gap_s))
         self.startup_log=startup_log or (lambda *_args:None)
         self.paths=list(paths) if paths is not None else find_active_wal_files()
@@ -52,6 +53,8 @@ class WalWake:
                                 if role in ('message', 'session'):
                                     self._pending_roles.add(role)
                                     self._pending_since.setdefault(role, now)
+                                    if role == 'message':
+                                        self._latest_message_at=now
                     # The consumer clears its Event after wait(). If another
                     # file event races with that clear, pending roles remain
                     # here; re-pulse them until the main loop drains the roles.
@@ -73,6 +76,11 @@ class WalWake:
         roles, _ = self.take_pending_with_timing()
         return roles
 
+    def latest_pending_message_at(self):
+        """Inspect the newest pending message-role timestamp without draining hints."""
+        with self._pending_lock:
+            return self._latest_message_at
+
     def take_pending_with_timing(self):
         """Drain roles and their first monotonic event times; no identifiers."""
         with self._pending_lock:
@@ -80,6 +88,7 @@ class WalWake:
             first_seen=dict(self._pending_since)
             self._pending_roles.clear()
             self._pending_since.clear()
+            self._latest_message_at=None
         return result, first_seen
 
     def close(self):
