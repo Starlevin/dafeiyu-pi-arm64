@@ -505,6 +505,19 @@ def _walk_showing(node, dep=0, maxd=26, skip_lists=False, include_role=False, *,
                 raise RuntimeError("visible_tree_child_missing")
 
 
+def _find_visible_chat_list(app, name):
+    # Search the visible controls before traversing the chat rows. Some Qt
+    # builds expose a showing list below a non-showing ancestor, so keep the
+    # original full-tree lookup as a fallback.
+    for node, _, node_role in _walk_showing(app, skip_lists=True, include_role=True):
+        if node_role == "list" and nm(node) == name:
+            return node
+    for node, _ in walk(app):
+        if role(node) == "list" and nm(node) == name and showing(node):
+            return node
+    return None
+
+
 def messages_list(a):
     global _messages_cache
     if a is None:
@@ -512,18 +525,10 @@ def messages_list(a):
     cached_app, cached_node = _messages_cache
     if a == cached_app and cached_node is not None and showing(cached_node):
         return cached_node
-    # The sidebar and hidden Qt pages can contain hundreds of accessibles.
-    # Start with the visible tree and skip the contents of known lists.
-    for node, _, node_role in _walk_showing(a, skip_lists=True, include_role=True):
-        if node_role == "list" and nm(node) == "Messages":
-            _messages_cache = (a, node)
-            return node
-    # Some Qt builds expose a visible viewport through a non-showing ancestor.
-    for n, _ in walk(a):
-        if role(n) == "list" and nm(n) == "Messages" and showing(n):
-            _messages_cache = (a, n)
-            return n
-    return None
+    node = _find_visible_chat_list(a, "Messages")
+    if node is not None:
+        _messages_cache = (a, node)
+    return node
 
 
 def ancestor(node, levels):
@@ -577,14 +582,15 @@ def showing(node):
 
 def chats_list(app):
     global _chats_cache
+    if app is None:
+        return None
     cached_app, cached_node = _chats_cache
     if app == cached_app and cached_node is not None and showing(cached_node):
         return cached_node
-    for node, _ in walk(app):
-        if role(node) == "list" and nm(node) == "Chats" and showing(node):
-            _chats_cache = (app, node)
-            return node
-    return None
+    node = _find_visible_chat_list(app, "Chats")
+    if node is not None:
+        _chats_cache = (app, node)
+    return node
 
 
 def visible_chat_matches(app, name):

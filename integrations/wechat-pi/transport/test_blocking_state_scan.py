@@ -99,6 +99,32 @@ class BlockingStateScanTests(unittest.TestCase):
         with patch.object(bridge, "Atspi", atspi), patch.object(bridge, "_messages_cache", (None, None)):
             self.assertIs(bridge.messages_list(root), messages)
 
+    def test_sidebar_lookup_skips_message_rows_and_hidden_qt_pages(self):
+        row = FakeNode("list item", "fixture message")
+        messages = FakeNode("list", "Messages", children=(row,))
+        hidden_sidebar = FakeNode("list", "Chats", showing=False)
+        hidden = FakeNode("filler", children=(hidden_sidebar,), showing=False)
+        chats = FakeNode("list", "Chats")
+        root = FakeNode("application", children=(hidden, messages, chats))
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING))
+        with patch.object(bridge, "Atspi", atspi), patch.object(bridge, "_chats_cache", (None, None)):
+            self.assertIs(bridge.chats_list(root), chats)
+            self.assertIs(bridge.chats_list(root), chats)
+        self.assertEqual(messages.child_count_calls, 0)
+        self.assertEqual(hidden.child_count_calls, 0)
+        self.assertEqual(row.role_calls, 0)
+        self.assertEqual(root.child_count_calls, 1)
+
+    def test_sidebar_lookup_preserves_fallback_and_rechecks_hidden_cached_sidebar(self):
+        sidebar = FakeNode("list", "Chats")
+        parent = FakeNode("frame", children=(sidebar,), showing=False)
+        root = FakeNode("application", children=(parent,))
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING))
+        with patch.object(bridge, "Atspi", atspi), patch.object(bridge, "_chats_cache", (None, None)):
+            self.assertIs(bridge.chats_list(root), sidebar)
+            sidebar.state.showing = False
+            self.assertIsNone(bridge.chats_list(root))
+
     def test_overlay_scan_reuses_roles_and_still_finds_a_visible_search_list(self):
         hidden = FakeNode("list", showing=False, rect=(110, 115, 300, 320))
         regular = FakeNode("list", "Chats")
