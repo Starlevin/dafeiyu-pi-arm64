@@ -172,6 +172,20 @@ def settle_poll_targets(targets, settling_targets):
     return [target for target in targets if target in settling_targets]
 
 
+def read_poll_hints(watched, wal_wake, *, settle_due):
+    """Defer sidebar and WAL hints until an already-due candidate is checked."""
+    if settle_due:
+        return None, {}, set(), {}
+    app = get_app()
+    signatures = sidebar_signatures(app, watched)
+    if wal_wake is None:
+        return app, signatures, set(), {}
+    if hasattr(wal_wake, "take_pending_with_timing"):
+        roles, times = wal_wake.take_pending_with_timing()
+        return app, signatures, roles, times
+    return app, signatures, wal_wake.take_pending(), {}
+
+
 def keep_pending_settle_group_open(app, target, settler):
     """Cancel a pending settle only when the exact authorized group is no longer open."""
     if not group_is_open(app, target):
@@ -2817,7 +2831,12 @@ def main():
         if args.admin_chat:
             watched.add(args.admin_chat)
         watched.update(privates.keys())
-        if (moments is not None and short_refresh_target is None and jobs.empty()
+        settling_targets = (public_question_settler.pending_targets()
+                            if public_question_settler is not None else set())
+        now = time.monotonic()
+        settle_priority = any(public_question_settler.due_trace(target, now) is not None
+                              for target in settling_targets)
+        if (moments is not None and not settling_targets and short_refresh_target is None and jobs.empty()
                 and replies.empty() and time.monotonic() >= moments_next):
             moments_next = time.monotonic() + 3
             try:
@@ -2826,21 +2845,13 @@ def main():
                     log("moments_read", status="completed")
             except Exception as error:
                 log("moments_read", status=type(error).__name__)
-        app_now = get_app()
-        current_signatures = sidebar_signatures(app_now, watched)
+        app_now, current_signatures, wal_roles, wal_event_times = read_poll_hints(
+            watched, wal_wake, settle_due=settle_priority)
         now = time.monotonic()
         # The WAL change notifier has no chat ID or message payload. When the
         # preview remains unchanged, only the already-open and independently
         # verified conversation can get an extra read. All other sessions
         # retain normal sidebar changes and periodic full checks.
-        wal_event_times = {}
-        if wal_wake is not None:
-            if hasattr(wal_wake, "take_pending_with_timing"):
-                wal_roles, wal_event_times = wal_wake.take_pending_with_timing()
-            else:  # Backward-compatible optional wake implementations.
-                wal_roles = wal_wake.take_pending()
-        else:
-            wal_roles = set()
         wal_message_at = wal_event_times.get("message")
         if wal_message_at is not None:
             log("wal_ingress_stage", stage="loop", role="message",
@@ -2861,8 +2872,6 @@ def main():
             log("wal_hint", role="message" if "message" in wal_roles else "session",
                 verified_open=bool(urgent_target))
             last_wal_hint_log = now
-        settling_targets = (public_question_settler.pending_targets()
-                            if public_question_settler is not None else set())
         # Activity in another sidebar row or a WAL hint is not proof that this
         # exact pending group was answered. Keep its bounded 1.5s poll window;
         # the selected-group check below cancels if the UI really changed scope.
@@ -2880,7 +2889,7 @@ def main():
         else:
             # Preserve the current group while the one in-memory candidate settles.
             targets = settle_poll_targets(targets, settling_targets)
-        if short_refresh_target is not None:
+        if not settle_priority and short_refresh_target is not None:
             competing_activity = any(
                 other != short_refresh_target and signature != last_sidebar.get(other)
                 for other, signature in current_signatures.items())
@@ -2890,7 +2899,7 @@ def main():
             if short_refresh_target is not None:
                 targets = [short_refresh_target]
         verified_recheck_targets = set()
-        if verified_rechecks is not None:
+        if not settle_priority and verified_rechecks is not None:
             verified_recheck_targets = plan_verified_wal_targets(
                 verified_rechecks, args.group, app_now, short_refresh_target, time.monotonic())
             # Another group's settle window can temporarily filter this target
@@ -2918,7 +2927,7 @@ def main():
             verified_pending = (verified_rechecks is not None
                                 and target in verified_rechecks.pending)
             verified_due = target in verified_recheck_targets
-            if target == short_refresh_target and not verified_due:
+            if target == short_refresh_target and not (verified_due or settle_due):
                 continue  # Keep this scope until its actual recheck deadline.
             forced_due = ((sweep.due(target) if sweep is not None else False)
                           or verified_due)
@@ -2953,6 +2962,8 @@ def main():
                 deliver_ready(replies, args, health)
                 app = get_app()
                 if app is None:
+                    if settle_due:
+                        public_question_settler.cancel(target)
                     if health:
                         health.update("client", "client_unavailable")
                     continue
@@ -2967,6 +2978,8 @@ def main():
                             try_saved_login(app, expected_runtime)
                     set_heartbeat_state(blocked is None, None)
                 if blocked:
+                    if settle_due:
+                        public_question_settler.cancel(target)
                     continue
                 if _is_admin_chat(args, target):
                     if not (private_session_is_verified(args, app, target)
@@ -3073,6 +3086,11 @@ def main():
                                 target, args, jobs, health,
                                 public_question_settler=public_question_settler,
                                 rows_observed_at=rows_observed_at)
+                    if pending_settle is not None:
+                        log("public_question_settle", result="checked", queued=bool(accepted),
+                            priority=settle_priority,
+                            scheduler_delay_ms=max(0, int((poll_started - pending_settle.due_at) * 1000)),
+                            check_ms=max(0, int((time.monotonic() - poll_started) * 1000)))
                 elif appended:
                     accepted = handle_rows(
                         app, rows, len(rows) - len(appended), bounds, target,
@@ -3133,6 +3151,8 @@ def main():
                         sweep.completed(target)
                     forced_done = True
             except Exception as error:
+                if settle_due and public_question_settler.pending(target) is pending_settle:
+                    public_question_settler.cancel(target)
                 log("poll_error", target="private" if _is_private_target(args, target) else target, type=type(error).__name__)
             finally:
                 # A verified recheck remains pending after an incomplete read
@@ -3159,6 +3179,8 @@ def main():
             jobs.join()
             deliver_ready(replies, args, health)
             return 0
+        if settle_priority and not public_question_settler.has_pending:
+            continue  # Resume deferred hints immediately once the due candidate is resolved.
         # Database-write hints only shorten idle wait; the sidebar and visible
         # message verification remain the sole authority for replying.
         idle_timeout = max(1, args.interval)

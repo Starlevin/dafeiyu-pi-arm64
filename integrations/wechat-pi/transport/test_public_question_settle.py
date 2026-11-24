@@ -1,6 +1,6 @@
 """Pure scheduling tests: no sleep, UI, network, or candidate text retention."""
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from test_runtime_proactive_bridge import bridge
 
@@ -60,6 +60,22 @@ class PublicQuestionSettleTests(unittest.TestCase):
         with patch.object(bridge, "group_is_open", return_value=False):
             self.assertFalse(bridge.keep_pending_settle_group_open(object(), "群X", queue))
         self.assertFalse(queue.has_pending)
+
+    def test_due_candidate_leaves_sidebar_and_wal_hints_for_the_next_pass(self):
+        app = object()
+        watched = {"群X", "群Y"}
+        wake = Mock()
+        wake.take_pending_with_timing.return_value = ({"message"}, {"message": 12.5})
+        with (patch.object(bridge, "get_app", return_value=app) as get_app,
+              patch.object(bridge, "sidebar_signatures", return_value={"群Y": "changed"}) as sidebar):
+            self.assertEqual(bridge.read_poll_hints(watched, wake, settle_due=True), (None, {}, set(), {}))
+            get_app.assert_not_called()
+            sidebar.assert_not_called()
+            wake.take_pending_with_timing.assert_not_called()
+            self.assertEqual(bridge.read_poll_hints(watched, wake, settle_due=False),
+                             (app, {"群Y": "changed"}, {"message"}, {"message": 12.5}))
+            sidebar.assert_called_once_with(app, watched)
+            wake.take_pending_with_timing.assert_called_once_with()
 
     def test_newer_row_in_same_group_rejects_and_drops_settled_candidate(self):
         queue = PublicQuestionSettleQueue()
