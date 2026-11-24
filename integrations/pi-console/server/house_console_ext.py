@@ -61,7 +61,8 @@ GEMINI_MODEL_NAME = re.compile(r"gemini-[a-z0-9]+(?:[.-][a-z0-9]+)*")
 HOUSE_THEME_VIDEO = re.compile(
     r"/fish_house/themes/[A-Za-z0-9._-]{1,64}/videos/[A-Za-z0-9._-]{1,128}\.mp4")
 PROACTIVE_EVENTS = (
-    "candidate", "gate_passed", "score_passed", "score_rejected", "score_skipped", "score_after_reject", "enqueued", "confirmed",
+    "ordinary", "candidate", "gate_passed", "score_passed", "score_rejected", "score_skipped", "score_after_reject",
+    "enqueued", "confirmed",
 )
 PROACTIVE_LINE = re.compile(
     r"\[qq_proactive_funnel\] at=([0-9]{1,12}(?:\.[0-9]{1,9})?) scope=([0-9a-f]{16}) "

@@ -626,6 +626,7 @@ class HouseConsoleExtTests(unittest.TestCase):
         fractional_stamp = f"{time.time() - 5:.6f}"
         scope = "1234567890abcdef"
         log.write_text(
+            f"[qq_proactive_funnel] at={stamp} scope={scope} event=ordinary reason=-\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=candidate reason=none\n"
             f"[qq_proactive_funnel] at={fractional_stamp} scope={scope} event=candidate reason=none\n"
             f"[qq_proactive_funnel] at={fractional_stamp} scope={scope} event=candidate reason=-\n"
@@ -649,6 +650,8 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(result["qqGroups"][group],
                          {"threshold": 0.75, "freshnessSeconds": 2, "dailyBudget": 60})
         self.assertEqual(result["qqFunnel"]["counts"]["candidate"], 3)
+        self.assertEqual(result["qqFunnel"]["counts"]["ordinary"], 1)
+        self.assertEqual(result["qqFunnel"]["groups"][scope]["ordinary"], 1)
         self.assertEqual(result["qqFunnel"]["counts"]["confirmed"], 0)
         self.assertEqual(result["qqFunnel"]["scoreAfterRejectReasons"], {"new_mention": 1})
         self.assertEqual(result["qqFunnel"]["counts"]["score_rejected"], 2)

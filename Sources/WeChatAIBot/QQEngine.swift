@@ -161,6 +161,22 @@ struct QQEngineSharedState: Sendable {
     private(set) var proactiveMetrics: [String: QQProactiveDailyStats] = [:]
     private func countProactive(_ event: QQProactiveDailyStats.Event, groupKey: String) {
         proactiveMetrics[groupKey, default: QQProactiveDailyStats()].add(event)
+        let name: String
+        switch event {
+        case .ordinary: name = "ordinary"
+        case .candidate: name = "candidate"
+        case .gatePassed: name = "gate_passed"
+        case .queued: name = "enqueued"
+        case .confirmed: name = "confirmed"
+        default: return
+        }
+        logProactiveFunnel(name, groupKey: groupKey)
+    }
+    private func logProactiveFunnel(_ event: String, groupKey: String, reason: String = "-") {
+        // Callers pass fixed reason codes or ReplyDecisionReason values. Never
+        // include the raw group key, message body, sender or credential.
+        let scope = SHA256.hash(data: Data(groupKey.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16)
+        print("[qq_proactive_funnel] at=\(Date().timeIntervalSince1970) scope=\(scope) event=\(event) reason=\(reason)")
     }
     private var groupRecentMessages: [String: [QQMemoryEvent]] = [:]
     private var groupRecentInputs: [String: [String: QQIncoming]] = [:]
@@ -1096,18 +1112,29 @@ struct QQEngineSharedState: Sendable {
                 if let profile = groupProfile {
                     countProactive(.candidate, groupKey: message.key)
                     guard profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) else {
-                        countProactive(.blocked, groupKey: message.key); return
+                        countProactive(.blocked, groupKey: message.key)
+                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "profile_limits")
+                        return
                     }
-                    guard profile.shouldEvaluate(messageCount: count, roll: Double.random(in: 0..<1)) else { return }
+                    guard profile.shouldEvaluate(messageCount: count, roll: Double.random(in: 0..<1)) else {
+                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "sampled_out")
+                        return
+                    }
                     countProactive(.gatePassed, groupKey: message.key)
                 }
                 guard let groupContext, groupContext.hasUnansweredText || (config.effectiveVisionEnabled && !groupContext.recentImages.isEmpty) else {
-                    if groupProfile != nil { countProactive(.contextRejected, groupKey: message.key) }
+                    if groupProfile != nil {
+                        countProactive(.contextRejected, groupKey: message.key)
+                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "no_unanswered_context")
+                    }
                     record(target.id, .skipped, "接话计数已到：当前时段只有未读取媒体或已回复话题，不翻旧话题补答")
                     return
                 }
                 if message.mentionedUsers.contains(where: { $0 != "all" }) {
-                    if groupProfile != nil { countProactive(.contextRejected, groupKey: message.key) }
+                    if groupProfile != nil {
+                        countProactive(.contextRejected, groupKey: message.key)
+                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "other_member_mentioned")
+                    }
                     record(target.id, .skipped, "接话计数已到：当前在点名其他成员，不代答")
                     return
                 }
@@ -1162,12 +1189,21 @@ struct QQEngineSharedState: Sendable {
             let latency = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
             let number = score.map { String($0) } ?? "-"
             print("[qq_decision] trace=\(trace) mode=\(settings.mode.rawValue) model=\(QQProactiveDecision.model) score=\(number) threshold=\(settings.threshold) latency_ms=\(latency)")
-            guard settings.mode == .enforce, let score, score >= settings.threshold,
-                  (try? self.check(epoch, scope: key, target: target)) != nil,
+            guard settings.mode == .enforce else { return }
+            guard let score, score >= settings.threshold else {
+                self.logProactiveFunnel("score_rejected", groupKey: key,
+                                        reason: score == nil ? "scorer_unavailable" : "below_threshold")
+                return
+            }
+            self.logProactiveFunnel("score_passed", groupKey: key)
+            guard (try? self.check(epoch, scope: key, target: target)) != nil,
                   self.proactiveAllowed(for: target),
                   self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? true,
                   self.groupRecentMessages[key]?.last?.id == message.id,
-                  Date().timeIntervalSince1970 - message.time <= 120 else { return }
+                  Date().timeIntervalSince1970 - message.time <= 120 else {
+                self.logProactiveFunnel("score_after_reject", groupKey: key, reason: "post_score_guard")
+                return
+            }
             self.enqueueReply(work, groupKey: self.scopedProactiveProfiles[key] == nil ? nil : key)
         }
     }
@@ -1180,7 +1216,10 @@ struct QQEngineSharedState: Sendable {
         guard !texts.isEmpty, modelClient.provider.baseURL.absoluteString == QQProactiveDecision.gateway,
               sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits,
                               chatCooldown: config.ai.cooldownSeconds) == .allowed,
-              proactiveDecision.reserve(group: key, budget: settings.dailyBudget) else { return }
+              proactiveDecision.reserve(group: key, budget: settings.dailyBudget) else {
+            logProactiveFunnel("score_skipped", groupKey: key, reason: "proactive_preflight")
+            return
+        }
         let epoch = fence.epoch
         let traceID = UUID()
         let start = ContinuousClock.now
@@ -1193,17 +1232,27 @@ struct QQEngineSharedState: Sendable {
             let scorer = QQProactiveScorer(context: texts, bearer: try? self.resolveModelKey())
             guard let trace = await self.replyDecisionGate.decide(
                 message: message, context: context, profile: profile, settings: v2, scorer: scorer
-            ) else { return }
+            ) else {
+                self.logProactiveFunnel("score_skipped", groupKey: key, reason: "parallel_in_flight")
+                return
+            }
             let elapsed = start.duration(to: .now).components
             let latency = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
             let heuristic = trace.result.heuristicScore.map { String(format: "%.4f", $0) } ?? "-"
             print("[qq_reply_decision_v2] trace=\(traceID) mode=enforce mention=\(trace.input.mention.rawValue) heuristic=\(heuristic) score=\(String(format: "%.4f", trace.result.score)) reason=\(trace.result.reason.rawValue) source=\(trace.result.source.rawValue) scorer=\(trace.result.scorerCalled) latency_ms=\(latency)")
-            guard trace.result.action == .speak,
-                  (try? self.check(epoch, scope: key, target: target)) != nil,
+            guard trace.result.action == .speak else {
+                self.logProactiveFunnel("score_rejected", groupKey: key, reason: trace.result.reason.rawValue)
+                return
+            }
+            self.logProactiveFunnel("score_passed", groupKey: key)
+            guard (try? self.check(epoch, scope: key, target: target)) != nil,
                   self.proactiveAllowed(for: target),
                   self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? false,
                   self.groupRecentMessages[key]?.last?.id == message.id,
-                  Date().timeIntervalSince1970 - message.time <= 120 else { return }
+                  Date().timeIntervalSince1970 - message.time <= 120 else {
+                self.logProactiveFunnel("score_after_reject", groupKey: key, reason: "post_score_guard")
+                return
+            }
             self.enqueueReply(work, groupKey: key)
         }
     }

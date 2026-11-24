@@ -82,7 +82,8 @@ final class QQReplyDecisionGate {
         let lim = limits(for: profile, settings: settings)
         let input = QQReplyDecisionInputBuilder.build(message: message, context: context, profile: profile,
                                                       now: now, dailyRemaining: max(0, lim.dailyLimit - state.speaks))
-        let (result, next) = await engine.decide(input, state: state, now: Int(now.timeIntervalSince1970), scorer: scorer)
+        let decisionEngine = ReplyDecisionEngine(limits: lim)
+        let (result, next) = await decisionEngine.decide(input, state: state, now: Int(now.timeIntervalSince1970), scorer: scorer)
         state = next
         states[key] = state
         return QQReplyDecisionTrace(input: input, result: result)

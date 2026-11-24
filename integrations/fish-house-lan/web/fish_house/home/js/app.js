@@ -879,7 +879,8 @@
     var funnel = data.qqFunnel;
     if (funnel && funnel.readableLogs) {
       var c = funnel.counts;
-      panel.appendChild(makeEl("p", "fh-note", "QQ 近 24 小时已采集 · 候选 " + c.candidate +
+      var received = typeof c.ordinary === "number" ? " · 普通群消息 " + c.ordinary : "";
+      panel.appendChild(makeEl("p", "fh-note", "QQ 近 24 小时已采集" + received + " · 候选 " + c.candidate +
         " · 前置通过 " + c.gate_passed + " · 评分通过 " + c.score_passed +
         " · 评分拒绝 " + (c.score_rejected || 0) + " · 评分跳过 " + (c.score_skipped || 0) +
         " · 评分后拦截 " + c.score_after_reject + " · 入队 " + c.enqueued +

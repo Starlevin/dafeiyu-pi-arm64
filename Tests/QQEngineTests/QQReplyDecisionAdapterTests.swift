@@ -77,6 +77,35 @@ import Testing
         #expect(trace?.input.dailyRemaining == 30)
     }
 
+    @MainActor
+    @Test func gateUsesConfiguredV2Threshold() async throws {
+        let gate = QQReplyDecisionGate()
+        let text = "这次编译报错怎么解决？"
+        let message = QQIncoming(id: "m2", sender: "20002", target: "10001", group: true,
+                                 text: text, time: now.timeIntervalSince1970, replyTo: nil,
+                                 images: [], mentionsSelf: false, isOwner: false, mentionedUsers: [])
+        let context = try #require(QQGroupContext(events: [
+            QQMemoryEvent(id: "m1", subject: "PEER", text: "正在编译示例模块", at: now.addingTimeInterval(-10)),
+            QQMemoryEvent(id: "m2", subject: "PEER", text: text, at: now),
+        ], through: "m2", messages: ["m2": message], account: "10001"))
+
+        let cases: [(String?, ReplyDecisionAction, ReplyDecisionReason)] = [
+            (nil, .wait, .heuristicHold), ("0.60", .speak, .heuristicPass), ("0.80", .skip, .heuristicLow),
+        ]
+        for (threshold, action, reason) in cases {
+            var environment = ["DAFEIYU_REPLY_DECISION_V2": "enforce"]
+            environment["DAFEIYU_REPLY_DECISION_THRESHOLD"] = threshold
+            let trace = try #require(await gate.decide(
+                message: message, context: context, profile: profile,
+                settings: .load(environment), now: now
+            ))
+            #expect(trace.result.heuristicScore == 0.622)
+            #expect(trace.result.action == action)
+            #expect(trace.result.reason == reason)
+            #expect(!trace.result.scorerCalled)
+        }
+    }
+
     @Test func legacyAndV2EnforceDoNotBothEnqueue() {
         #expect(suppressesLegacyEnqueue(legacyMode: .shadow, reply: .load(["DAFEIYU_REPLY_DECISION_V2": "enforce"])))
         #expect(suppressesLegacyEnqueue(legacyMode: .enforce, reply: .load(["DAFEIYU_REPLY_DECISION_V2": "off"])))
