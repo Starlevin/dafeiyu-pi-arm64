@@ -146,6 +146,27 @@ def test_workbuddy_account_error_is_scoped(hub):
     print('workbuddy_account_error_scope: PASS')
 
 
+def test_short_wechat_reserves_budget_for_the_visible_reply(hub):
+    profile = {'id': 'workbuddy-deepseek', 'name': 'WorkBuddy', 'model': 'deepseek-v4.1-flash',
+               'protocol': 'chat', 'base_url': hub.GATEWAY_URL, 'reasoning': 'high'}
+    hub.profiles = lambda: [profile]
+    hub.route_log = lambda _row: None
+    hub.clear_cooldown = lambda _profile: None
+    observed = []
+    def invoke(actual, _request):
+        observed.append(actual['reasoning'])
+        return {'choices': [{'message': {'content':
+            '{"participate":false,"text":"","emotion":"neutral","intensity":0}'}}]}
+    hub._invoke = invoke
+    prompt = '本轮来自 wechat 客户端适配层。[QQ_PARTICIPATION] 输出 participate、text、emotion、intensity。'
+    for note, budget in ((prompt, 128), (prompt.replace('wechat', 'qq'), 128), (prompt, 161)):
+        hub.complete({'model': profile['id'], 'max_tokens': budget,
+                      'response_format': {'type': 'json_object'},
+                      'messages': [{'role': 'system', 'content': note}]})
+    assert observed == ['none', 'high', 'high'] and profile['reasoning'] == 'high'
+    print('short_wechat_visible_reply_budget: PASS')
+
+
 def main():
     hub = load()
 
@@ -221,6 +242,7 @@ def main():
 
     test_workbuddy_account_error_is_scoped(load())
     test_workbuddy_account_snapshot_routes(load())
+    test_short_wechat_reserves_budget_for_the_visible_reply(load())
     print('ALL MODEL-HUB OFFLINE TESTS PASS')
 
 

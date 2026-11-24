@@ -849,6 +849,10 @@ def complete(body):
     short_wechat_reply = (strict_mode and is_proactive and '本轮来自 wechat 客户端适配层' in sys_text
                           and type(budget) is int and 0 < budget <= 160 and not body.get('tools')
                           and _is_local_workbuddy(profile))
+    primary = profile
+    if short_wechat_reply and profile.get('reasoning') == 'high':
+        # Reserve the short participation budget for visible text and JSON.
+        primary = dict(profile, reasoning='none')
     # The participation instructions mention sticker_id even when no candidates were sent.
     sticker_mode = strict_mode and (
         '本轮可选表情 JSON：\n[' in sys_text if is_proactive else 'sticker_id' in sys_text)
@@ -915,7 +919,7 @@ def complete(body):
                 return standby_backup('cooldown_' + prior)
 
     try:
-        result = _invoke(profile, body)
+        result = _invoke(primary, body)
         if empty_reply(result):
             raise Fallbackable('empty_reply')
         clear_cooldown(profile['id'])
