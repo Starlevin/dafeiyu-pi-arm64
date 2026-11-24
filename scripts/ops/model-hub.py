@@ -64,6 +64,9 @@ def limit_control():
 # ---- WorkBuddy 本地网关（DeepSeek 通道）----
 GATEWAY_KEY = Path.home() / 'workbuddy-gateway/secrets/api.key'
 GATEWAY_URL = 'http://127.0.0.1:8317/v1'
+WORKBUDDY_STATUS_FILE = GATEWAY_KEY.parent.parent / 'workbuddy-status.json'
+WORKBUDDY_STATUS_MAX_AGE = 90
+WORKBUDDY_NO_ACCOUNT = 'workbuddy_no_available_account'
 FALLBACK_COOLDOWN = 300          # 主通道故障后，多久内直接走备用
 ROUTE_LOG = ROOT / 'run/model-route.log'
 COOLDOWN_FILE = PRIVATE / 'cooldown.json'
@@ -155,22 +158,17 @@ def validate_profile(item):
         raise ValueError('ChatGPT OAuth 仅允许官方 Responses API')
 
 
-def _error_detail(response):
-    """Extract a short, non-sensitive upstream error code/message (max 200 chars)."""
+def _upstream_error(response):
     try:
-        data = json.loads(response.content[:65536])
-    except Exception:
-        return ''
-    if not isinstance(data, dict):
-        return ''
-    error = data.get('error')
+        payload = json.loads(response.content[:65536])
+    except (ValueError, TypeError):
+        payload = {}
+    error = payload.get('error') if isinstance(payload, dict) else None
     if isinstance(error, dict):
-        parts = [str(error.get(k)) for k in ('code', 'type', 'message')
-                 if error.get(k) is not None]
-        return ' '.join(parts)[:200]
-    if isinstance(error, str):
-        return error[:200]
-    return ''
+        detail = ' '.join(str(error[k]) for k in ('code', 'type', 'message') if error.get(k) is not None)
+        kind = 'no_available_account' if error.get('type') == 'no_available_account' else ''
+        return UpstreamError(response.status_code, detail=detail[:200], kind=kind)
+    return UpstreamError(response.status_code, detail=error[:200] if isinstance(error, str) else '')
 
 
 def http(method, url, key=None, proxy=False, body=None, form=None, stream=False, timeout=(10, 150)):
@@ -184,10 +182,11 @@ def http(method, url, key=None, proxy=False, body=None, form=None, stream=False,
     response = session.request(method, url, headers=headers, json=body, data=form,
                                timeout=timeout, allow_redirects=False, stream=True)
     if not 200 <= response.status_code < 300:
-        code = response.status_code
-        detail = _error_detail(response)
-        response.close(); session.close()
-        raise UpstreamError(code, detail=detail)
+        try:
+            raise _upstream_error(response)
+        finally:
+            response.close()
+            session.close()
     if stream:
         return response
     data = bytearray()
@@ -205,9 +204,10 @@ def http(method, url, key=None, proxy=False, body=None, form=None, stream=False,
 
 
 class UpstreamError(Exception):
-    def __init__(self, status, message=None, detail=''):
+    def __init__(self, status, message=None, detail='', kind=''):
         self.status = status
         self.detail = detail or ''
+        self.kind = kind
         super().__init__(message or ('上游接口返回 HTTP ' + str(status)))
 
 
@@ -298,6 +298,40 @@ def _profile_with_override(profile):
 
 # 可显式指定的思考档位；profile 里配 reasoning 即覆盖 idle_effort 的旧行为。
 REASONING_MODES = {'none', 'low', 'medium', 'high'}
+
+
+def _is_local_workbuddy(profile):
+    return (profile.get('id') == 'workbuddy-deepseek'
+            and profile.get('protocol') == 'chat'
+            and profile.get('base_url', '').rstrip('/') == GATEWAY_URL)
+
+
+def _workbuddy_model_state(profile):
+    """Return (availability, observed time) when the gateway snapshot is current."""
+    if not _is_local_workbuddy(profile):
+        return None, 0
+    try:
+        if not WORKBUDDY_STATUS_FILE.is_file():
+            return None, 0
+        with WORKBUDDY_STATUS_FILE.open('rb') as stream:
+            raw = stream.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            return None, 0
+        status = json.loads(raw)
+        at = status.get('updatedAt') if isinstance(status, dict) else None
+        if type(at) not in (int, float) or not -2 <= time.time() - at <= WORKBUDDY_STATUS_MAX_AGE:
+            return None, 0
+        models = status.get('models')
+        if not isinstance(models, list):
+            return None, 0
+        matching = [row for row in models if isinstance(row, dict) and row.get('id') == profile.get('model')]
+        if len(matching) == 1 and matching[0].get('enabled') is True:
+            available = matching[0].get('availableAccounts')
+            if type(available) is int and available >= 0:
+                return available > 0, at
+    except (OSError, ValueError, RecursionError):
+        pass
+    return None, 0
 
 
 def cooldown_state():
@@ -557,6 +591,8 @@ def _invoke(profile, body, _allow_auto=True, *, retry_timeout=None):
             raise Fallbackable('connect_error')
         except UpstreamError as error:
             _usage_note(profile, None, 'http_%d' % error.status)
+            if error.status == 503 and error.kind == 'no_available_account' and _is_local_workbuddy(profile):
+                raise Fallbackable(WORKBUDDY_NO_ACCOUNT, error.status) from error
             if _allow_auto and _model_unavailable(error):
                 replacement = _pick_model(profile, _available_models(profile))
                 if replacement:
@@ -812,8 +848,7 @@ def complete(body):
     budget = body.get('max_tokens')
     short_wechat_reply = (strict_mode and is_proactive and '本轮来自 wechat 客户端适配层' in sys_text
                           and type(budget) is int and 0 < budget <= 160 and not body.get('tools')
-                          and profile.get('id') == 'workbuddy-deepseek' and profile.get('protocol') == 'chat'
-                          and profile.get('base_url', '').rstrip('/') == GATEWAY_URL)
+                          and _is_local_workbuddy(profile))
     # The participation instructions mention sticker_id even when no candidates were sent.
     sticker_mode = strict_mode and (
         '本轮可选表情 JSON：\n[' in sys_text if is_proactive else 'sticker_id' in sys_text)
@@ -857,15 +892,27 @@ def complete(body):
             raise Fallbackable('empty_reply')
         return retry
 
-    if backup and cooldown_until(profile['id']) > time.time():
-        prior = (cooldown_state().get(profile['id']) or {}).get('reason', 'unknown')
+    def standby_backup(reason):
         try:
             result = attempt_backup()
         except Exception as error:
-            raise UpstreamError(503, '主通道处于冷却（%s），备用模型也不可用：%s' % (prior, error))
+            raise UpstreamError(503, '主通道不可用（%s），备用模型也不可用：%s' % (reason, error))
         if empty_reply(result):
-            raise UpstreamError(503, '主通道处于冷却（%s），备用模型返回空回复' % prior)
-        return finish(result, backup['id'], 'cooldown_' + prior)
+            raise UpstreamError(503, '主通道不可用（%s），备用模型返回空回复' % reason)
+        return finish(result, backup['id'], reason)
+
+    if backup:
+        account_available, observed_at = _workbuddy_model_state(profile)
+        if account_available is False:
+            return standby_backup(WORKBUDDY_NO_ACCOUNT)
+        if cooldown_until(profile['id']) > time.time():
+            cooldown = cooldown_state().get(profile['id']) or {}
+            prior = cooldown.get('reason', 'unknown')
+            failed_at = cooldown.get('at')
+            recovered = (account_available is True and prior == WORKBUDDY_NO_ACCOUNT
+                         and type(failed_at) in (int, float) and observed_at > failed_at)
+            if not recovered:
+                return standby_backup('cooldown_' + prior)
 
     try:
         result = _invoke(profile, body)

@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """离线单测：model-hub 400 model_not_available 自动选模与 fallback 判定。"""
 import importlib.util
+import json
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -63,6 +65,85 @@ def test_short_wechat_blank_backup_retries_once(hub):
     assert called == [(primary['id'], 160, None), (backup['id'], 160, None),
                       (backup['id'], 256, (1.25, 3.75))]
     print('short_wechat_blank_backup_retries_once: PASS')
+
+
+def test_workbuddy_account_snapshot_routes(hub):
+    primary = {'id': 'workbuddy-deepseek', 'name': 'WorkBuddy', 'model': 'deepseek-v4.1-flash',
+               'protocol': 'chat', 'base_url': hub.GATEWAY_URL, 'fallback_to': 'sensenova-6.8-flash-lite'}
+    backup = {'id': 'sensenova-6.8-flash-lite', 'name': 'SenseNova'}
+    body = {'model': primary['id'], 'messages': [{'role': 'user', 'content': 'synthetic'}]}
+    calls, routes = [], []
+
+    def invoke(profile, _body):
+        calls.append(profile['id'])
+        return {'choices': [{'message': {'content': 'ok'}}]}
+
+    hub.profiles = lambda: [primary, backup]
+    hub._invoke = invoke
+    hub.route_log = routes.append
+    with tempfile.TemporaryDirectory() as directory:
+        hub.WORKBUDDY_STATUS_FILE = Path(directory) / 'workbuddy-status.json'
+        hub.COOLDOWN_FILE = Path(directory) / 'cooldown.json'
+
+        def publish(accounts, at, model=primary['model']):
+            hub.WORKBUDDY_STATUS_FILE.write_text(json.dumps({
+                'updatedAt': at, 'models': [{'id': model, 'enabled': True, 'availableAccounts': accounts}],
+            }), encoding='utf-8')
+
+        def route(expected, reason=''):
+            calls.clear()
+            hub.complete(body)
+            assert calls == [expected], calls
+            assert routes[-1]['reason'] == reason, routes[-1]
+
+        publish(0, time.time())
+        route(backup['id'], hub.WORKBUDDY_NO_ACCOUNT)
+        assert hub.cooldown_state() == {}
+
+        hub.set_cooldown(primary['id'], hub.WORKBUDDY_NO_ACCOUNT)
+        failed_at = hub.cooldown_state()[primary['id']]['at']
+        publish(1, failed_at - 1)
+        route(backup['id'], 'cooldown_' + hub.WORKBUDDY_NO_ACCOUNT)
+        publish(1, time.time() + .1)
+        route(primary['id'])
+        assert hub.cooldown_state() == {}
+
+        hub.set_cooldown(primary['id'], 'http_429')
+        publish(1, time.time() + .1)
+        route(backup['id'], 'cooldown_http_429')
+        hub.clear_cooldown(primary['id'])
+
+        for count, age, model in ((0, 91, primary['model']), (0, -5, primary['model']),
+                                  (False, 0, primary['model']), (0, 0, 'different-model')):
+            publish(count, time.time() - age, model)
+            route(primary['id'])
+        hub.WORKBUDDY_STATUS_FILE.write_text('{', encoding='utf-8')
+        route(primary['id'])
+    print('workbuddy_account_snapshot: PASS')
+
+
+def test_workbuddy_account_error_is_scoped(hub):
+    payload = json.dumps({'error': {'type': 'no_available_account', 'message': 'fixture private detail'}})
+    parsed = hub._upstream_error(types.SimpleNamespace(status_code=503, content=payload.encode()))
+    assert parsed.kind == 'no_available_account' and 'fixture private detail' not in str(parsed)
+    invoke = hub._invoke
+    with tempfile.TemporaryDirectory() as directory:
+        key = Path(directory) / 'key'
+        key.write_text('fixture')
+        profile = {'id': 'workbuddy-deepseek', 'base_url': hub.GATEWAY_URL, 'protocol': 'chat',
+                   'key_file': str(key), 'model': 'deepseek-v4.1-flash'}
+        def fail(*args, **kwargs):
+            raise parsed
+        hub.http = fail
+        for endpoint, expected in ((hub.GATEWAY_URL, hub.WORKBUDDY_NO_ACCOUNT),
+                                   ('http://127.0.0.1:8318/v1', 'http_503')):
+            try:
+                invoke(dict(profile, base_url=endpoint), {})
+            except hub.Fallbackable as error:
+                assert error.reason == expected, error.reason
+            else:
+                raise AssertionError('upstream refusal accepted')
+    print('workbuddy_account_error_scope: PASS')
 
 
 def main():
@@ -138,6 +219,8 @@ def main():
         assert exc.reason == 'model_not_available'
     print('invoke_fallback: PASS')
 
+    test_workbuddy_account_error_is_scoped(load())
+    test_workbuddy_account_snapshot_routes(load())
     print('ALL MODEL-HUB OFFLINE TESTS PASS')
 
 
