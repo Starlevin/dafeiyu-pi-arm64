@@ -286,6 +286,38 @@ class SendReceiptTests(unittest.TestCase):
         self.assertEqual(harness.state["submit_count"], 1)
         self.assertEqual(harness.state["pre_return_read_count"], 1)
 
+    def test_composer_uses_short_click_only_in_state_wait_mode(self):
+        for enabled, expected in (
+            (False, {"settle": 0.2}),
+            (True, {"settle": 0.12, "move_delay": 0.03, "hold_delay": 0.03}),
+        ):
+            with self.subTest(state_wait_enabled=enabled):
+                harness = SendReplyHarness(state_wait_enabled=enabled)
+                harness.ns["xi"].click = Mock()
+                harness.send()
+                harness.ns["xi"].click.assert_called_once_with(150, 20, **expected)
+                self.assertEqual(harness.state["return_key_count"], 1)
+
+    def test_settled_candidate_baseline_timing_survives_ledger_reservation(self):
+        rows = [("群友提问", (0, 1, 600, 50))]
+        ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, rows, 0)
+        harness = SendReplyHarness(
+            baseline_rows=rows, pre_return_rows=rows,
+            post_rows=rows + [("我的回复", (0, 1, 600, 50))])
+        read = harness.ns["read_messages"]
+
+        def timed_read(app):
+            if not harness.state["returned"]:
+                harness.ns["time"].sleep(0.05)
+            return read(app)
+
+        harness.ns["read_messages"] = timed_read
+        harness.send(auto_ctx=ctx)
+        timing = harness.state["timing_logs"][-1][1]
+        self.assertGreaterEqual(timing["receipt_baseline_ms"], 49)
+        self.assertEqual(harness.state["submit_count"], 1)
+        self.assertEqual(harness.state["return_key_count"], 1)
+
     def setUp(self):
         self.bounds = (0, 0, 600, 400)
         self.previous = [("incoming old", ("incoming", "avatar"))]

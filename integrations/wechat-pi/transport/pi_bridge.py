@@ -1663,8 +1663,11 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
     pre_return_timing["composer_setup_ms"] = int(
         (time.monotonic() - stage_started) * 1000)
     stage_started = time.monotonic()
-    xi.click(rect[0] + 150, rect[1] + rect[3] // 2,
-             settle=0.12 if UI_STATE_WAIT_ENABLED else 0.2)
+    click_x, click_y = rect[0] + 150, rect[1] + rect[3] // 2
+    if UI_STATE_WAIT_ENABLED:
+        xi.click(click_x, click_y, settle=0.12, move_delay=0.03, hold_delay=0.03)
+    else:
+        xi.click(click_x, click_y, settle=0.2)
     pre_return_timing["click_ms"] = int((time.monotonic() - stage_started) * 1000)
     # 门 1（点击后立刻）：轻量复核 SELECTED 行未漂移。
     stage_started = time.monotonic()
@@ -1742,17 +1745,15 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
                 return "auto_reply_stale:recheck_unavailable"
             if not recheck.allow:
                 return "auto_reply_stale:" + recheck.reason
-            # Keep the submission journal immediately before Return. If reservation
-            # fails, remove only a draft still proven to be ours in this session.
-            if on_submit:
-                stage_started = time.monotonic()
-                on_submit()
-                pre_return_timing["ledger_reservation_ms"] = int(
-                    (time.monotonic() - stage_started) * 1000)
-                stage_started = time.monotonic()
-        return_started = time.monotonic()
         pre_return_timing["receipt_baseline_ms"] = int(
-            (return_started - stage_started) * 1000)
+            (time.monotonic() - stage_started) * 1000)
+        # Keep the settled candidate's reservation immediately before Return.
+        if auto_ctx is not None and on_submit:
+            stage_started = time.monotonic()
+            on_submit()
+            pre_return_timing["ledger_reservation_ms"] = int(
+                (time.monotonic() - stage_started) * 1000)
+        return_started = time.monotonic()
         pre_return_timing["pre_return_ms"] = int(
             (return_started - pre_return_started) * 1000)
         ready_to_return = True
