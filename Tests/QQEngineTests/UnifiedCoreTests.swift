@@ -67,7 +67,18 @@ private final class PublicQuestionHTTPFixture: URLProtocol, @unchecked Sendable 
     override func startLoading() {
         let trace = request.value(forHTTPHeaderField: "X-Dafeiyu-Trace-Id") ?? ""
         Self.lock.lock(); Self.requestTraceHeaders.append(trace); Self.lock.unlock()
-        if let data = request.httpBody, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+        var data = request.httpBody ?? Data()
+        if data.isEmpty, let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let size = stream.read(&buffer, maxLength: buffer.count)
+                if size <= 0 { break }
+                data.append(contentsOf: buffer.prefix(size))
+            }
+        }
+        if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             Self.lock.lock(); Self.requestBodies.append(object); Self.lock.unlock()
         }
         let content = #"{"text":"合成短回复","emotion":"neutral","intensity":1}"#

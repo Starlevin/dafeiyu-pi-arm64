@@ -172,9 +172,9 @@ def settle_poll_targets(targets, settling_targets):
     return [target for target in targets if target in settling_targets]
 
 
-def read_poll_hints(watched, wal_wake, *, settle_due):
-    """Defer sidebar and WAL hints until an already-due candidate is checked."""
-    if settle_due:
+def read_poll_hints(watched, wal_wake, *, settling):
+    """Defer sidebar and WAL hints for the candidate's quiet window and final check."""
+    if settling:
         return None, {}, set(), {}
     app = get_app()
     signatures = sidebar_signatures(app, watched)
@@ -2833,9 +2833,7 @@ def main():
         watched.update(privates.keys())
         settling_targets = (public_question_settler.pending_targets()
                             if public_question_settler is not None else set())
-        now = time.monotonic()
-        settle_priority = any(public_question_settler.due_trace(target, now) is not None
-                              for target in settling_targets)
+        settle_priority = bool(settling_targets)
         if (moments is not None and not settling_targets and short_refresh_target is None and jobs.empty()
                 and replies.empty() and time.monotonic() >= moments_next):
             moments_next = time.monotonic() + 3
@@ -2846,7 +2844,7 @@ def main():
             except Exception as error:
                 log("moments_read", status=type(error).__name__)
         app_now, current_signatures, wal_roles, wal_event_times = read_poll_hints(
-            watched, wal_wake, settle_due=settle_priority)
+            watched, wal_wake, settling=settle_priority)
         now = time.monotonic()
         # The WAL change notifier has no chat ID or message payload. When the
         # preview remains unchanged, only the already-open and independently
@@ -2924,6 +2922,8 @@ def main():
             settle_due = (pending_settle is not None
                           and public_question_settler.due_trace(
                               target, time.monotonic()) is not None)
+            if pending_settle is not None and not settle_due:
+                continue  # Check the latest visible row once the quiet window has elapsed.
             verified_pending = (verified_rechecks is not None
                                 and target in verified_rechecks.pending)
             verified_due = target in verified_recheck_targets
