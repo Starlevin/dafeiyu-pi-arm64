@@ -1159,6 +1159,9 @@ class ReviewRegressionTests(unittest.TestCase):
         import tempfile
 
         cases = (
+            ("recheck_fresh", 2, "submit", "auto_reply_recheck_ok", True, None, "replying"),
+            ("recheck_expired", 23, "submit", "auto_reply_recheck_ok", True, None, "idle"),
+            ("cancelled_before_submit", 2, "submit", "auto_policy_disabled", True, None, "idle"),
             ("pending_23s", 23, "submit", "started", True, None, "replying"),
             ("past_grace", 35.1, "submit", "started", True, None, "idle"),
             ("future", -1, "submit", "started", True, None, "idle"),

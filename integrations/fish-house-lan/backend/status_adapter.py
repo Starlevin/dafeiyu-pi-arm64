@@ -57,7 +57,8 @@ def normalize_activity(
         return "thinking"
     if phase == "generation" and reason == "ready":
         return "replying"
-    if phase == "submit" and reason == "started":
+    # The bridge has already prepared a reply when its active-chat recheck passes.
+    if phase == "submit" and reason in {"auto_reply_recheck_ok", "started"}:
         return "replying"
     if phase in {"handoff", "local_handoff"} and event.get("local_handoff") is True:
         return "replying"
