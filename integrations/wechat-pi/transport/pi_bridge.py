@@ -2719,15 +2719,21 @@ def deliver_ready(replies, args, health=None, *, token=""):
                 not memory_account or app_memory_account(app) != memory_account):
             record(health, "submit", "memory_account_changed", trace)
             continue
-        blocked = blocking_state(app)
-        guard_done_at = time.monotonic()
-        if blocked:
-            record(health, "submit", blocked, trace, failed=True)
-            continue
         try:
+            # The text transaction performs a full blocker check before its
+            # first input and again before Return. If the target group is
+            # already proven open, no navigation needs an earlier scan.
+            current_group_text = (is_group and media is None and not sticker_only
+                                  and group_is_open(app, target))
+            if not current_group_text:
+                blocked = blocking_state(app)
+                if blocked:
+                    record(health, "submit", blocked, trace, failed=True)
+                    continue
+            guard_done_at = time.monotonic()
             if is_group:
                 args._private_verified = None
-                ready = group_is_open(app, target) or open_chat(app, target)
+                ready = current_group_text or group_is_open(app, target) or open_chat(app, target)
             elif _is_admin_chat(args, target):
                 ready = (private_session_is_verified(args, app, target)
                          or open_account(app, target, args.admin_account))

@@ -469,6 +469,58 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
             bridge.deliver_ready(responses, self.args)
         return get_app
 
+    def test_current_group_text_checks_blockers_in_the_transaction_before_input(self):
+        responses = Queue()
+        responses.put((GROUP, True, {"ok": True, "action": "reply", "reply": "夹具回复"}, "fixture-trace"))
+        app = object()
+        editor = Mock()
+        reader = Mock(get_character_count=Mock(return_value=0))
+        node = Mock(get_text_iface=Mock(return_value=reader), get_editable_text_iface=Mock(return_value=editor))
+        bounds = (0, 0, 600, 400)
+        xi = Mock()
+        with patch.multiple(
+                bridge, get_app=Mock(return_value=app), group_is_open=Mock(return_value=True),
+                messages_list=Mock(return_value=object()), ext=Mock(return_value=bounds),
+                _tx_header_info=Mock(return_value={"raw_title": GROUP, "showing_target": 1}),
+                _tx_chats_info=Mock(return_value=(1, [GROUP], 1)),
+                composer=Mock(return_value=(node, bounds)),
+                Atspi=SimpleNamespace(Text=SimpleNamespace(get_text=lambda *_: "")),
+                blocking_state=Mock(return_value="window_blocked"), open_chat=Mock(),
+                xi=xi, record=Mock()):
+            bridge.deliver_ready(responses, self.args)
+            bridge.blocking_state.assert_called_once_with(app)
+            bridge.composer.assert_called_once()
+            bridge.open_chat.assert_not_called()
+            bridge.record.assert_any_call(
+                None, "submit", "tx_denied:blocking_state:window_blocked", "fixture-trace",
+                success=False, failed=True, unknown=False)
+        xi.click.assert_not_called()
+        xi.key.assert_not_called()
+        editor.set_text_contents.assert_not_called()
+
+    def test_blockers_still_prevent_navigation_and_sticker_dispatch(self):
+        app = object()
+        for is_group, open_group, payload in (
+                (True, False, {"reply": "夹具回复"}),
+                (False, False, {"reply": "夹具回复"}),
+                (True, True, {"stickerOnly": True, "sticker": {"id": "fixture"}})):
+            with self.subTest(is_group=is_group, open_group=open_group, payload=payload):
+                responses = Queue()
+                responses.put((GROUP, is_group, {"ok": True, "action": "reply", **payload}, "fixture-trace"))
+                with patch.multiple(
+                        bridge, get_app=Mock(return_value=app), group_is_open=Mock(return_value=open_group),
+                        blocking_state=Mock(return_value="window_blocked"), open_chat=Mock(),
+                        open_account=Mock(), open_private_chat=Mock(), dispatch_sticker=Mock(),
+                        send_reply=Mock(), record=Mock()):
+                    bridge.deliver_ready(responses, self.args)
+                    bridge.blocking_state.assert_called_once_with(app)
+                    bridge.record.assert_any_call(None, "submit", "window_blocked", "fixture-trace", failed=True)
+                    bridge.open_chat.assert_not_called()
+                    bridge.open_account.assert_not_called()
+                    bridge.open_private_chat.assert_not_called()
+                    bridge.dispatch_sticker.assert_not_called()
+                    bridge.send_reply.assert_not_called()
+
     def test_disabled_ordinary_messages_do_not_enter_queue_but_native_mentions_do(self):
         self.configure(False)
         self.assertTrue(self.ingest(direct=False).empty())
