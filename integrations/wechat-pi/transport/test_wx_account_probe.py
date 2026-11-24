@@ -95,12 +95,28 @@ class AccountProbeTests(unittest.TestCase):
     def test_qr_request_opens_scan_page_once_then_validates_capture(self):
         login = probe.Login("login", 123, (20, 20, 280, 380), switch=(25, 310, 114, 25))
         scan = probe.Login("scan", 123, (20, 20, 280, 380), (32, 65, 180, 180))
-        inspect_fn = Mock(side_effect=[login, login, scan, scan])
+        inspect_fn = Mock(side_effect=[login, probe.Login("unknown"), login, scan, scan])
         capture, decode, open_page = Mock(return_value=b"pixels"), Mock(return_value="fixture"), Mock(return_value=True)
         result = probe.run("qr", inspect_fn, capture, decode, open_page, sleep=Mock())
         self.assertEqual(result, {"state": "scan", "canScan": True, "qr": "fixture"})
         open_page.assert_called_once_with(login)
         capture.assert_called_once_with(scan)
+
+    def test_native_http_qr_is_limited_to_exact_legacy_weixin_url(self):
+        self.assertTrue(probe._is_login_uri("http://weixin.qq.com/x/A1b2C3d4"))
+        self.assertTrue(probe._is_login_uri("https://login.weixin.qq.com/l/fixture"))
+        invalid = (
+            "http://login.weixin.qq.com/x/A1b2C3d4",
+            "http://weixin.qq.com/login/A1b2C3d4",
+            "http://weixin.qq.com/x/A1b2C3d4?redirect=local",
+            "http://weixin.qq.com/x/A1b2C3d4#fragment",
+            "http://weixin.qq.com.example.test/x/A1b2C3d4",
+            "http://weixin.qq.com:80/x/A1b2C3d4",
+            "http://weixin.qq.com@foreign.test/x/A1b2C3d4",
+            "http://weixin.qq.com/x/A1b2%2f3d4",
+        )
+        for uri in invalid:
+            self.assertFalse(probe._is_login_uri(uri), uri)
 
     def test_window_mapping_handles_measured_offsets_and_rejects_clipping(self):
         accessibility = (351, 178, 280, 380)
@@ -108,12 +124,12 @@ class AccountProbeTests(unittest.TestCase):
         self.assertTrue(probe._matching_geometry(accessibility, x_window))
         self.assertFalse(probe._matching_geometry(accessibility, (366, 185, 880, 640)))
         state = probe.Login("login", 123, accessibility, switch=(354, 513, 116, 22))
-        self.assertEqual(probe._drawable_region(state, x_window, state.switch), (3, 335, 116, 22))
+        self.assertEqual(probe._drawable_region(state, x_window, state.switch), (3, 349, 122, 24))
         self.assertIsNone(probe._drawable_region(state, (366, 185, 292, 350), state.switch))
 
     def test_open_page_requires_same_window_under_pointer_and_fresh_login(self):
         state = probe.Login("login", 123, (351, 178, 280, 380), switch=(354, 513, 116, 22))
-        pointer = (427, 531, 777)
+        pointer = (430, 546, 777)
         fake_input = SimpleNamespace(move=Mock(), click=Mock(), pointer=Mock(return_value=pointer))
         with patch.dict("os.environ", {"DISPLAY": ":99"}), patch.dict("sys.modules", {"pi_xinput": fake_input}), \
              patch.object(probe, "_x_display", return_value=nullcontext((object(), object()))), \
@@ -121,12 +137,12 @@ class AccountProbeTests(unittest.TestCase):
              patch.object(probe, "native_status", return_value=probe.Login("online")) as native:
             self.assertFalse(probe.open_scan_page(state))
             native.return_value = state
-            fake_input.pointer.return_value = (427, 531, 999)
+            fake_input.pointer.return_value = (430, 546, 999)
             self.assertFalse(probe.open_scan_page(state))
             fake_input.click.assert_not_called()
             fake_input.pointer.return_value = pointer
             self.assertTrue(probe.open_scan_page(state))
-            fake_input.click.assert_called_once_with(427, 531, settle=0.1)
+            fake_input.click.assert_called_once_with(430, 546, settle=0.1)
 
 
 if __name__ == "__main__":

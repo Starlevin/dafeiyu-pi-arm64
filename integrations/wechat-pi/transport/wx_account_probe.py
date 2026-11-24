@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from urllib.parse import urlsplit
@@ -220,13 +221,17 @@ def _login_drawable(state, display, x):
 
 
 def _drawable_region(state, bounds, rect):
-    """Map a Qt-relative rectangle into the actual X11 window without clipping."""
-    if not _contains(state.window, rect):
+    """Scale Qt's logical coordinates into the verified X11 drawable."""
+    if not _matching_geometry(state.window, bounds) or not _contains(state.window, rect):
         return None
-    left, top = state.window[:2]
+    left, top, logical_w, logical_h = state.window
     rx, ry, w, h = rect
-    region = (rx - left, ry - top, w, h)
-    return region if _contains((0, 0, bounds[2], bounds[3]), region) else None
+    actual_w, actual_h = bounds[2:]
+    x = (rx - left) * actual_w // logical_w
+    y = (ry - top) * actual_h // logical_h
+    right = ((rx + w - left) * actual_w + logical_w - 1) // logical_w
+    bottom = ((ry + h - top) * actual_h + logical_h - 1) // logical_h
+    return x, y, right - x, bottom - y
 
 
 def capture_region(state):
@@ -282,6 +287,23 @@ def open_scan_page(state):
     return True
 
 
+def _is_login_uri(uri):
+    if not uri.isascii() or not all(ch.isprintable() and not ch.isspace() for ch in uri):
+        return False
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return False
+    host = parsed.netloc.lower()
+    if parsed.scheme == "https":
+        return host in {"login.weixin.qq.com", "weixin.qq.com", "wx.qq.com", "web.wechat.com"} and bool(parsed.path)
+    # The native Linux client encodes this legacy URI. Keep the bytes for the
+    # QR image and never perform a network request to it.
+    return (parsed.scheme == "http" and host == "weixin.qq.com"
+            and not parsed.query and not parsed.fragment
+            and re.fullmatch(r"/x/[A-Za-z0-9_-]{8,160}", parsed.path) is not None)
+
+
 def decode_login_qr(frame):
     if frame is None:
         return None
@@ -306,13 +328,7 @@ def decode_login_qr(frame):
         if not 1 <= length <= 1000:
             return None
         uri = c.string_at(z("symbol_get_data", P, P)(symbol), length).decode("ascii")
-        parsed = urlsplit(uri)
-        if (parsed.scheme == "https" and parsed.hostname in {"login.weixin.qq.com", "weixin.qq.com",
-                                                               "wx.qq.com", "web.wechat.com"}
-                and not parsed.username and not parsed.password and parsed.port is None
-                and parsed.path and all(ch.isprintable() and not ch.isspace() for ch in uri)):
-            return uri
-        return None
+        return uri if _is_login_uri(uri) else None
     finally:
         if image:
             z("image_destroy", None, P)(image)
@@ -331,10 +347,10 @@ def run(action, inspect_fn=native_status, capture=capture_region, decode=decode_
         open_page=open_scan_page, sleep=time.sleep):
     before = inspect_fn()
     if action == "qr" and before.state == "login" and before.switch and open_page(before):
-        for _ in range(3):
+        for _ in range(6):
             sleep(0.2)
             before = inspect_fn()
-            if before.state != "login":
+            if before.state in {"scan", "confirm", "online"}:
                 break
     payload = _status(before)
     if action != "qr" or before.state != "scan" or not before.region:
