@@ -49,8 +49,8 @@ def test_short_wechat_blank_backup_retries_once(hub):
     hub.route_log = lambda _record: None
     called = []
 
-    def invoke(profile, body, _allow_auto=True, *, retry_timeout=None):
-        called.append((profile['id'], body['max_tokens'], retry_timeout))
+    def invoke(profile, body, _allow_auto=True, *, retry_timeout=None, _deadline=None):
+        called.append((profile['id'], body['max_tokens'], retry_timeout, _deadline))
         if profile is primary:
             raise hub.Fallbackable('http_503')
         text = '' if body['max_tokens'] == 160 else '{"participate":true,"text":"fixture","emotion":"neutral","intensity":1}'
@@ -62,8 +62,12 @@ def test_short_wechat_blank_backup_retries_once(hub):
                            'messages': [{'role': 'system', 'content':
                                '本轮来自 wechat 客户端适配层。[QQ_PARTICIPATION] 输出 participate、text、emotion、intensity。'}]})
     assert 'fixture' in result['choices'][0]['message']['content']
-    assert called == [(primary['id'], 160, None), (backup['id'], 160, None),
-                      (backup['id'], 256, (1.25, 3.75))]
+    assert [call[:3] for call in called] == [
+        (primary['id'], 160, None), (backup['id'], 160, None),
+        (backup['id'], 256, (1.25, 3.75)),
+    ]
+    assert called[0][3] < called[1][3]
+    assert called[2][3] <= called[1][3]
     print('short_wechat_blank_backup_retries_once: PASS')
 
 

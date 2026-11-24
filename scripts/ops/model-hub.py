@@ -25,6 +25,8 @@ ROOT = Path.home() / 'dafeiyu-test'
 HERE = Path(__file__).resolve().parent
 PRIVATE = ROOT / 'secrets/model-hub'
 ORIGIN = 'http://127.0.0.1:18090'
+GROUP_CHAT_ROUTE_SECONDS = 22.0
+GROUP_CHAT_PRIMARY_SECONDS = 12.0
 PANEL_PROXY = 'http://127.0.0.1:18091'
 CALLBACK = ORIGIN + '/auth/callback'
 PROXY = 'http://127.0.0.1:17890'
@@ -171,7 +173,21 @@ def _upstream_error(response):
     return UpstreamError(response.status_code, detail=error[:200] if isinstance(error, str) else '')
 
 
-def http(method, url, key=None, proxy=False, body=None, form=None, stream=False, timeout=(10, 150)):
+def _deadline_timeout(deadline, timeout):
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0.02:
+        raise requests.exceptions.Timeout('route_deadline')
+    connect = min(float(timeout[0]), max(0.01, remaining / 3.0))
+    return connect, min(float(timeout[1]), max(0.01, remaining - connect))
+
+
+def _deadline_kwargs(deadline):
+    return {'deadline': deadline} if deadline is not None else {}
+
+
+def http(method, url, key=None, proxy=False, body=None, form=None, stream=False, timeout=(10, 150), deadline=None):
     session = requests.Session()
     session.trust_env = False
     if proxy:
@@ -179,8 +195,12 @@ def http(method, url, key=None, proxy=False, body=None, form=None, stream=False,
     headers = {'User-Agent': 'DaFeiYu/1.0'}
     if key:
         headers['Authorization'] = 'Bearer ' + key
-    response = session.request(method, url, headers=headers, json=body, data=form,
-                               timeout=timeout, allow_redirects=False, stream=True)
+    try:
+        response = session.request(method, url, headers=headers, json=body, data=form,
+                                   timeout=_deadline_timeout(deadline, timeout), allow_redirects=False, stream=True)
+    except Exception:
+        session.close()
+        raise
     if not 200 <= response.status_code < 300:
         try:
             raise _upstream_error(response)
@@ -192,6 +212,8 @@ def http(method, url, key=None, proxy=False, body=None, form=None, stream=False,
     data = bytearray()
     try:
         for chunk in response.iter_content(65536):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise requests.exceptions.Timeout('route_deadline')
             data.extend(chunk)
             if len(data) > 20_000_000:
                 raise ValueError('上游响应过大')
@@ -199,6 +221,12 @@ def http(method, url, key=None, proxy=False, body=None, form=None, stream=False,
             return json.loads(data) if data else {}
         except json.JSONDecodeError as error:
             raise UpstreamError(502, '上游返回不是有效 JSON') from error
+    except requests.exceptions.ConnectionError as error:
+        if deadline is not None:
+            from urllib3.exceptions import ReadTimeoutError
+            if any(isinstance(arg, ReadTimeoutError) for arg in error.args):
+                raise requests.exceptions.Timeout('route_deadline') from error
+        raise
     finally:
         response.close(); session.close()
 
@@ -245,7 +273,7 @@ def _model_unavailable(error):
     return bool(detail) and any(token in detail for token in MODEL_ERROR_HINTS)
 
 
-def _available_models(profile):
+def _available_models(profile, deadline=None):
     """Query {base_url}/models with a short cache; never raises."""
     base = str(profile.get('base_url') or '').rstrip('/')
     if not base or profile.get('protocol') == 'oauth':
@@ -260,7 +288,7 @@ def _available_models(profile):
         return []
     try:
         result = http('GET', base + '/models', key, profile.get('proxy', False),
-                      timeout=(5, 20))
+                      timeout=(5, 20), **_deadline_kwargs(deadline))
     except Exception:
         return []
     items = result.get('data') if isinstance(result, dict) else []
@@ -547,7 +575,7 @@ def _normalize_memory_json(result, body):
     return result
 
 
-def _invoke(profile, body, _allow_auto=True, *, retry_timeout=None):
+def _invoke(profile, body, _allow_auto=True, *, retry_timeout=None, _deadline=None):
     """发一次上游请求。可回退故障统一抛 Fallbackable，其余异常原样上抛。"""
     profile = _profile_with_override(profile)
     payload = copy.deepcopy(body)
@@ -582,7 +610,8 @@ def _invoke(profile, body, _allow_auto=True, *, retry_timeout=None):
         try:
             _result = http('POST', profile['base_url'].rstrip('/') + '/chat/completions', key,
                            profile.get('proxy', False), payload,
-                           timeout=retry_timeout if retry_timeout is not None else (10, limit))
+                           timeout=retry_timeout if retry_timeout is not None else (10, limit),
+                           **_deadline_kwargs(_deadline))
         except requests.exceptions.Timeout:
             _usage_note(profile, None, 'timeout')
             raise Fallbackable('timeout')
@@ -594,12 +623,14 @@ def _invoke(profile, body, _allow_auto=True, *, retry_timeout=None):
             if error.status == 503 and error.kind == 'no_available_account' and _is_local_workbuddy(profile):
                 raise Fallbackable(WORKBUDDY_NO_ACCOUNT, error.status) from error
             if _allow_auto and _model_unavailable(error):
-                replacement = _pick_model(profile, _available_models(profile))
+                replacement = _pick_model(profile, _available_models(profile, _deadline)
+                                          if _deadline is not None else _available_models(profile))
                 if replacement:
                     MODEL_OVERRIDES[profile['id']] = replacement
                     print('[auto-model] profile=%s from=%s to=%s reason=model_not_available'
                           % (profile['id'], profile['model'], replacement), flush=True)
-                    return _invoke(dict(profile, model=replacement), body, False)
+                    return _invoke(dict(profile, model=replacement), body, False,
+                                   **({'_deadline': _deadline} if _deadline is not None else {}))
                 print('[auto-model] profile=%s no_alternative reason=model_not_available'
                       % profile['id'], flush=True)
                 raise Fallbackable('model_not_available', error.status)
@@ -846,6 +877,16 @@ def complete(body):
     except Exception:
         pass
     budget = body.get('max_tokens')
+    fast_group_route = (
+        bool(backup and backup.get('protocol') == 'chat' and not backup.get('warm'))
+        and _is_local_workbuddy(profile)
+        and strict_mode and not body.get('tools') and type(budget) is int and 0 < budget
+        and ((is_proactive and budget <= 160)
+             or ('本轮是群内公开且暂未得到回答的问题' in sys_text and budget <= 400
+                 and all(key in sys_text.lower() for key in ('text', 'emotion', 'intensity'))))
+    )
+    route_deadline = started + GROUP_CHAT_ROUTE_SECONDS if fast_group_route else None
+    primary_deadline = min(route_deadline, started + GROUP_CHAT_PRIMARY_SECONDS) if fast_group_route else None
     short_wechat_reply = (strict_mode and is_proactive and '本轮来自 wechat 客户端适配层' in sys_text
                           and type(budget) is int and 0 < budget <= 160 and not body.get('tools')
                           and _is_local_workbuddy(profile))
@@ -883,14 +924,26 @@ def complete(body):
         return not isinstance(fields, dict) or (
             fields.get('participate') is not False and not str(fields.get('text') or '').strip())
 
+    def invoke_with_deadline(target, payload, deadline, *args, **kwargs):
+        if deadline is not None:
+            if time.monotonic() >= deadline:
+                raise Fallbackable('timeout')
+            kwargs['_deadline'] = deadline
+        result = _invoke(target, payload, *args, **kwargs)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise Fallbackable('timeout')
+        return result
+
     def attempt_backup():
-        result = _invoke(backup, body)
+        result = invoke_with_deadline(backup, body, route_deadline)
         if not short_wechat_reply or backup.get('id') != 'sensenova-6.8-flash-lite':
             return result
         result = salvage_reply(result, strict_mode, is_proactive, sticker_mode)
         if not short_backup_is_empty(result):
             return result
-        retry = _invoke(backup, {**body, 'max_tokens': 256}, False, retry_timeout=(1.25, 3.75))
+        retry_deadline = min(route_deadline, time.monotonic() + 5.0) if route_deadline is not None else None
+        retry = invoke_with_deadline(backup, {**body, 'max_tokens': 256}, retry_deadline,
+                                     False, retry_timeout=(1.25, 3.75))
         retry = salvage_reply(retry, strict_mode, is_proactive, sticker_mode)
         if short_backup_is_empty(retry):
             raise Fallbackable('empty_reply')
@@ -900,6 +953,11 @@ def complete(body):
         try:
             result = attempt_backup()
         except Exception as error:
+            if fast_group_route:
+                failure = 'backup_' + error.reason if isinstance(error, Fallbackable) else 'backup_failed'
+                route_log({'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'requested': profile['id'],
+                           'actual': '', 'fallback': True, 'reason': failure,
+                           'latency_ms': int((time.monotonic() - started) * 1000)})
             raise UpstreamError(503, '主通道不可用（%s），备用模型也不可用：%s' % (reason, error))
         if empty_reply(result):
             raise UpstreamError(503, '主通道不可用（%s），备用模型返回空回复' % reason)
@@ -919,7 +977,7 @@ def complete(body):
                 return standby_backup('cooldown_' + prior)
 
     try:
-        result = _invoke(primary, body)
+        result = invoke_with_deadline(primary, body, primary_deadline)
         if empty_reply(result):
             raise Fallbackable('empty_reply')
         clear_cooldown(profile['id'])
@@ -930,7 +988,11 @@ def complete(body):
                        'actual': '', 'fallback': False, 'reason': error.reason,
                        'latency_ms': int((time.monotonic() - started) * 1000)})
             raise UpstreamError(503, '%s 不可用（%s），且没有配置备用模型' % (profile['name'], error.reason))
+        if fast_group_route and error.reason == 'timeout':
+            return standby_backup('group_primary_timeout')
         set_cooldown(profile['id'], error.reason)
+        if fast_group_route:
+            return standby_backup(error.reason)
         try:
             result = attempt_backup()
         except Exception as secondary:
