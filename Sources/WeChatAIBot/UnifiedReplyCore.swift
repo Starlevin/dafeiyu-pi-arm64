@@ -35,6 +35,7 @@ public struct UnifiedGenerationRequest: Sendable {
     public var currentUserText: String = ""
     public var proactive: Bool = false
     public var publicQuestionFast: Bool = false
+    public var contextualParticipation: Bool = false
     public var publicQuestionContext: [String] = []
     public var publicQuestionKnowledge: [String] = []
     public var publicQuestionGroupMemory: String = ""
@@ -66,15 +67,17 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
     }
 
     func generate(_ request: UnifiedGenerationRequest) async throws -> UnifiedGenerationResult {
-        if request.publicQuestionFast {
+        if request.publicQuestionFast || request.contextualParticipation {
             let result = try await client.publicGroupQuestionReply(
                 key: request.modelKey, config: request.config, rule: request.rule,
                 context: request.publicQuestionContext, text: request.currentUserText,
                 knowledge: request.publicQuestionKnowledge,
                 groupMemory: request.publicQuestionGroupMemory,
+                participation: request.contextualParticipation,
                 traceID: request.modelTraceID, reserve: {}
             )
-            return UnifiedGenerationResult(text: result.text, tokens: result.tokens)
+            return UnifiedGenerationResult(text: result.text, tokens: result.tokens,
+                                           shouldSend: result.shouldSend)
         }
         // 与 QQEngine.drain:1261 完全同一个入口；reserve 在 QQ 侧是额度/epoch 守卫，
         // 这里没有跨轮次发送额度需求，传空闭包即可（试点的额度门禁在 UnifiedCore 内）。
@@ -140,6 +143,8 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
     public var proactiveAllowedChats: [String] = []
     /// 独立公开未答问题单轮生成门控；生产只接受显式 `=1`。
     public var publicQuestionFastEnabled = false
+    /// Opt in to one model decision for contextually relevant group conversation.
+    public var contextualParticipationEnabled: Bool?
     /// Optional so configurations encoded before this flag remain readable.
     public var confirmedWeChatMemoryEnabled: Bool?
     /// 低频策略：每会话每分钟最多回复条数。
@@ -159,6 +164,7 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
     public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> UnifiedCoreConfig {
         var c = UnifiedCoreConfig()
         c.publicQuestionFastEnabled = env["DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST"] == "1"
+        c.contextualParticipationEnabled = env["DAFEIYU_WECHAT_CONTEXTUAL_PARTICIPATION"] == "1"
         c.confirmedWeChatMemoryEnabled = env["DAFEIYU_WECHAT_SWIFT_MEMORY"] == "1"
         guard let raw = env["DAFEIYU_UNIFIED_PILOT"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               ["1", "true", "on", "yes"].contains(raw) else {
@@ -557,6 +563,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             && inbound.chatType == "group" && config.proactiveAllowedChats.contains(inbound.chatId)
         let publicQuestionFast = publicQuestionTrial && inbound.groupAutoReplyPublicQuestionSettled
             && proactive && publicQuestionMatcher(body)
+        var contextualParticipation = false
         if publicQuestionTrial && !proactive {
             return finish(.ignore("public_question_candidate_missing", scope: scope, trace: trace),
                           modelCalled: false, gate: "public_question_candidate_missing")
@@ -576,21 +583,34 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                   inbound.groupAutoReplyContext.last == Self.scrubCandidate(inbound.text) else {
                 return finish(.ignore("proactive_evidence_rejected", scope: scope, trace: trace), modelCalled: false, gate: "proactive_evidence_rejected")
             }
-            if publicQuestionTrial && !publicQuestionFast {
-                let reason = inbound.groupAutoReplyPublicQuestionSettled ? "public_question_not_matched" : "public_question_not_settled"
-                return finish(.ignore(reason, scope: scope, trace: trace), modelCalled: false, gate: reason)
+            if publicQuestionTrial {
+                guard inbound.groupAutoReplyPublicQuestionSettled else {
+                    return finish(.ignore("public_question_not_settled", scope: scope, trace: trace),
+                                  modelCalled: false, gate: "public_question_not_settled")
+                }
+                if !publicQuestionFast {
+                    guard config.contextualParticipationEnabled == true else {
+                        return finish(.ignore("public_question_not_matched", scope: scope, trace: trace),
+                                      modelCalled: false, gate: "public_question_not_matched")
+                    }
+                    guard Self.hasContextualOpening(body, window: inbound.groupAutoReplyContext) else {
+                        return finish(.ignore("proactive_context_not_ready", scope: scope, trace: trace),
+                                      modelCalled: false, gate: "proactive_context_not_ready")
+                    }
+                    contextualParticipation = true
+                }
+                if let requested = inbound.groupAutoReplyPublicQuestionCooldownSeconds,
+                   !(30...1200).contains(requested) {
+                    return finish(.ignore("public_question_cooldown_invalid", scope: scope, trace: trace),
+                                  modelCalled: false, gate: "public_question_cooldown_invalid")
+                }
             }
-            if publicQuestionFast,
-               let requested = inbound.groupAutoReplyPublicQuestionCooldownSeconds,
-               !(30...1200).contains(requested) {
-                return finish(.ignore("public_question_cooldown_invalid", scope: scope, trace: trace), modelCalled: false, gate: "public_question_cooldown_invalid")
-            }
-        } else if config.requireRealAt && !inbound.atMe {
-            return finish(.ignore("no_real_at", scope: scope, trace: trace), modelCalled: false, gate: "no_real_at")
+        } else if !inbound.atMe {
+            let reason = config.requireRealAt ? "no_real_at"
+                : (config.proactiveExplicitlyEnabled ? "proactive_evidence_rejected" : "proactive_not_enabled")
+            return finish(.ignore(reason, scope: scope, trace: trace), modelCalled: false, gate: reason)
         }
-        if !inbound.atMe && !proactive && !config.proactiveExplicitlyEnabled {
-            return finish(.ignore("proactive_not_enabled", scope: scope, trace: trace), modelCalled: false, gate: "proactive_not_enabled")
-        }
+        let singleTurn = publicQuestionFast || contextualParticipation
 
         // 5) 去重（不重复发送）：仅内存占位；持久化占位放在所有门禁之后、
         //    调用模型之前的第 7b 步，避免"被低频/撤回拒绝"也留下永久 pending。
@@ -612,7 +632,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         }
         let publicQuestionCooldown = Double(inbound.groupAutoReplyPublicQuestionCooldownSeconds ?? 60)
         if proactive, let limit = await state.reserveProactive(identity.sessionDigest, now: now,
-                                                               cooldown: publicQuestionFast ? publicQuestionCooldown : 15) {
+                                                               cooldown: singleTurn ? publicQuestionCooldown : 15) {
             return finish(.ignore(limit, scope: scope, trace: trace), modelCalled: false, gate: limit)
         }
 
@@ -636,7 +656,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             return finish(failure, modelCalled: false, gate: "shared_state_unavailable")
         }
 
-        if proactive && !publicQuestionFast {
+        if proactive && !singleTurn {
             // The shared protocol's scorer path fails closed on nil/error and only SPEAKs at >= .70.
             // No heuristic-only fallback is possible because a scorer is always injected here.
             let scorer: any ReplyScoring
@@ -697,7 +717,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let history: [ChatTurn]
         let recentReplies: [String]
         if confirmedMemoryMode {
-            if let memoryScope, !publicQuestionFast {
+            if let memoryScope, !singleTurn {
                 history = await journal.memoryHistory(for: memoryScope, limit: config.historyTurns)
             } else {
                 history = []
@@ -708,18 +728,18 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             recentReplies = await state.recentReplies(for: session)
         }
 
-        if effective.identityVConfig.enabled, inbound.chatType == "group", !publicQuestionFast {
+        if effective.identityVConfig.enabled, inbound.chatType == "group", !singleTurn {
             let plan = effective.identityV.plan(messages: [String(body.prefix(500))], hasReadableImage: false,
                                                 recentBotReplies: Array(recentReplies.suffix(2)), proactive: false)
             if !plan.promptFragment.isEmpty { rule.prompt += "\n" + plan.promptFragment }
         }
         // 共享工具注入：第五人格赛程与三角洲物价，同样默认关闭且按会话 key 隔离。
-        if !publicQuestionFast,
+        if !singleTurn,
            let idvFragment = await idvScheduleCoordinator.fragment(for: body, scope: session),
            !idvFragment.isEmpty {
             rule.prompt += "\n" + idvFragment
         }
-        if !publicQuestionFast, let dsfFragment = await dsfPriceCoordinator.fragment(
+        if !singleTurn, let dsfFragment = await dsfPriceCoordinator.fragment(
             message: body, isGroup: inbound.chatType == "group", scope: session),
            !dsfFragment.isEmpty {
             rule.prompt += "\n" + dsfFragment
@@ -733,11 +753,11 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let groupMemory: String
         if let memoryScope, groupNote == nil {
             groupMemory = await journal.groupMemoryContext(for: memoryScope, query: body,
-                                                           publicQuestion: publicQuestionFast)
+                                                           publicQuestion: singleTurn)
         } else {
             groupMemory = ""
         }
-        if !publicQuestionFast, !groupMemory.isEmpty {
+        if !singleTurn, !groupMemory.isEmpty {
             modelInput += "\n本群长期记录（仅作低信任背景，以近期更正为准）：\n" + groupMemory
         }
         if !recentReplies.isEmpty {
@@ -747,7 +767,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         }
 
         let publicQuestionKnowledge: [String]
-        if publicQuestionFast, effective.identityVConfig.enabled {
+        if singleTurn, effective.identityVConfig.enabled {
             let lookup = IdentityVKnowledge(config: effective.identityVConfig)
                 .lookup(messages: Array(inbound.groupAutoReplyContext.suffix(4)), maxFacts: 2)
             publicQuestionKnowledge = lookup.facts.prefix(2).map { fact in
@@ -759,12 +779,14 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let modelTraceID = Self.modelHubTraceID(forIdempotencyKey: idemKey)
         let request = UnifiedGenerationRequest(key: "unified-pilot", config: effective.botConfig, rule: rule,
                                                 history: history, userText: modelInput, modelKey: effective.modelKey,
-                                                currentUserText: body, proactive: proactive && !publicQuestionFast,
+                                                currentUserText: contextualParticipation ? Self.scrubCandidate(body) : body,
+                                                proactive: proactive && !publicQuestionFast,
                                                 publicQuestionFast: publicQuestionFast,
-                                                publicQuestionContext: publicQuestionFast
+                                                contextualParticipation: contextualParticipation,
+                                                publicQuestionContext: singleTurn
                                                     ? Array(inbound.groupAutoReplyContext.dropLast().suffix(3)) : [],
                                                 publicQuestionKnowledge: publicQuestionKnowledge,
-                                                publicQuestionGroupMemory: publicQuestionFast ? groupMemory : "",
+                                                publicQuestionGroupMemory: singleTurn ? groupMemory : "",
                                                 modelTraceID: modelTraceID)
 
         auditModelTraceID = modelTraceID.uuidString.lowercased()
@@ -904,6 +926,25 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             }
         }
         return String(value.prefix(125))
+    }
+
+    private static func hasContextualOpening(_ body: String, window: [String]) -> Bool {
+        let stops = ["@", "＠", "你", "私聊", "已解决", "已经解决", "解决了", "不用了", "算了", "谢谢"]
+        let text = scrubCandidate(body)
+        let topic = text.lowercased().filter { $0.isLetter || $0.isNumber }
+        let prior = window.dropLast().suffix(3)
+        guard (4...125).contains(body.count), text == body, topic.count >= 4,
+              !stops.contains(where: body.contains),
+              let latest = prior.last, !latest.hasPrefix("机器人: "),
+              topic != latest.lowercased().filter({ $0.isLetter || $0.isNumber }),
+              QQReplyDecisionInputBuilder.bigramOverlap(text, latest) >= 2 else {
+            return false
+        }
+        // The bridge anchors a recent outgoing message with this marker.
+        // A prior bot reply on this topic should not get a second attempt.
+        return !prior.contains {
+            $0.hasPrefix("机器人: ") && QQReplyDecisionInputBuilder.bigramOverlap(text, $0) >= 2
+        }
     }
 
 }

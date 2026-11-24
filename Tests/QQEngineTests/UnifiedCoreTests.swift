@@ -33,6 +33,7 @@ private actor RequestRecorder {
     private(set) var systemPrompts: [String] = []
     private(set) var proactive: [Bool] = []
     private(set) var publicQuestionFast: [Bool] = []
+    private(set) var contextualParticipation: [Bool] = []
     private(set) var publicQuestionContexts: [[String]] = []
     private(set) var publicQuestionKnowledge: [[String]] = []
     private(set) var publicQuestionGroupMemory: [String] = []
@@ -42,6 +43,7 @@ private actor RequestRecorder {
         systemPrompts.append(request.rule.prompt)
         proactive.append(request.proactive)
         publicQuestionFast.append(request.publicQuestionFast)
+        contextualParticipation.append(request.contextualParticipation)
         publicQuestionContexts.append(request.publicQuestionContext)
         publicQuestionKnowledge.append(request.publicQuestionKnowledge)
         publicQuestionGroupMemory.append(request.publicQuestionGroupMemory)
@@ -58,7 +60,14 @@ private final class PublicQuestionHTTPFixture: URLProtocol, @unchecked Sendable 
     private static let lock = NSLock()
     nonisolated(unsafe) static var requestBodies: [[String: Any]] = []
     nonisolated(unsafe) static var requestTraceHeaders: [String] = []
-    static func reset() { lock.lock(); requestBodies = []; requestTraceHeaders = []; lock.unlock() }
+    nonisolated(unsafe) private static var responseContent = ""
+    static func reset(content: String = #"{"text":"合成短回复","emotion":"neutral","intensity":1}"#) {
+        lock.lock()
+        requestBodies = []
+        requestTraceHeaders = []
+        responseContent = content
+        lock.unlock()
+    }
     static var bodies: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return requestBodies }
     static var traceHeaders: [String] { lock.lock(); defer { lock.unlock() }; return requestTraceHeaders }
     override class func canInit(with request: URLRequest) -> Bool { true }
@@ -81,7 +90,9 @@ private final class PublicQuestionHTTPFixture: URLProtocol, @unchecked Sendable 
         if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             Self.lock.lock(); Self.requestBodies.append(object); Self.lock.unlock()
         }
-        let content = #"{"text":"合成短回复","emotion":"neutral","intensity":1}"#
+        Self.lock.lock()
+        let content = Self.responseContent
+        Self.lock.unlock()
         let body = try! JSONSerialization.data(withJSONObject: [
             "choices": [["message": ["content": content], "finish_reason": "stop"]],
             "usage": ["total_tokens": 9]
@@ -343,6 +354,116 @@ private func inbound(_ text: String = "合成消息",
         #expect(UnifiedCoreConfig.fromEnvironment(["DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST": "1"]).publicQuestionFastEnabled)
         #expect(!UnifiedCoreConfig.fromEnvironment(["DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST": "true"]).publicQuestionFastEnabled)
         #expect(!UnifiedCoreConfig.fromEnvironment([:]).publicQuestionFastEnabled)
+        #expect(UnifiedCoreConfig.fromEnvironment(["DAFEIYU_WECHAT_CONTEXTUAL_PARTICIPATION": "1"])
+            .contextualParticipationEnabled == true)
+        #expect(UnifiedCoreConfig.fromEnvironment(["DAFEIYU_WECHAT_CONTEXTUAL_PARTICIPATION": "true"])
+            .contextualParticipationEnabled == false)
+    }
+
+    @Test func settledContextualStatementCanReplyWithoutModelScoringOrDuplicateGeneration() async {
+        var c = makeConfig(allowed: ["fixture-group", "out-of-scope"])
+        c.publicQuestionFastEnabled = true
+        c.contextualParticipationEnabled = true
+        c.proactiveAllowedChats = ["fixture-group"]
+        c.allowedAccounts = ["fixture-account"]
+        let scorer = CallCounter()
+        let generator = CallCounter()
+        let recorder = RequestRecorder()
+        let core = UnifiedReplyCore(
+            config: c,
+            generator: FixtureReplyGenerator(replyJSON: validJSON("会议室到处都是打卡机。"),
+                                             fail: false, calls: generator, recorder: recorder),
+            proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: nil, calls: scorer) },
+            journal: freshJournal()
+        )
+        let body = "厂长开会这梗传得真快"
+        let related = "又看到厂长开会的老梗了"
+        var candidate = inbound(body, atMe: false, msgId: "contextual-statement")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplyContext = [related, body]
+        candidate.groupAutoReplyPublicQuestionCooldownSeconds = 300
+        candidate.groupAutoReplySuperseded = false
+
+        #expect((await core.handle(candidate)).gate == "public_question_not_settled")
+        candidate.groupAutoReplyPublicQuestionSettled = true
+        candidate.groupAutoReplySuperseded = true
+        #expect((await core.handle(candidate)).gate == "proactive_evidence_rejected")
+        candidate.groupAutoReplySuperseded = false
+        var other = candidate
+        other.chatId = "out-of-scope"
+        other.chatTitle = other.chatId
+        #expect((await core.handle(other)).gate == "proactive_evidence_rejected")
+        var unrelated = candidate
+        unrelated.groupAutoReplyContext = [related, "有人说今天在下雨", body]
+        #expect((await core.handle(unrelated)).gate == "proactive_context_not_ready")
+        var direct = candidate
+        direct.text = "你也刷到了厂长开会这梗"
+        direct.groupAutoReplyContext = [related, direct.text]
+        #expect((await core.handle(direct)).gate == "proactive_context_not_ready")
+        var repeated = candidate
+        repeated.groupAutoReplyContext = ["机器人: 厂长开会就是这梗", related, body]
+        #expect((await core.handle(repeated)).gate == "proactive_context_not_ready")
+        #expect(await generator.value() == 0)
+
+        #expect((await core.handle(candidate)).reply.action == "reply")
+        #expect((await core.handle(candidate)).gate == "durable_replay")
+        candidate.msgId = "contextual-later"
+        #expect((await core.handle(candidate)).gate == "proactive_score_cooldown")
+        #expect(await scorer.value() == 0)
+        #expect(await generator.value() == 1)
+        #expect(await recorder.contextualParticipation == [true])
+        #expect(await recorder.publicQuestionContexts == [[related]])
+        #expect(await recorder.publicQuestionFast == [false])
+    }
+
+    @Test func globalProactiveSwitchStillRequiresBridgeEvidenceForNonMentions() async {
+        var c = makeConfig(requireAt: false)
+        c.proactiveExplicitlyEnabled = true
+        let calls = CallCounter()
+        let core = UnifiedReplyCore(config: c,
+                                    generator: FixtureReplyGenerator(replyJSON: validJSON("不该发送"),
+                                                                     fail: false, calls: calls),
+                                    journal: freshJournal())
+        #expect((await core.handle(inbound(atMe: false))).gate == "proactive_evidence_rejected")
+        #expect(await calls.value() == 0)
+    }
+
+    @Test func contextualParticipationUsesOneToolFreeRequestAndStrictExplicitConsent() async throws {
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [PublicQuestionHTTPFixture.self]
+        let session = URLSession(configuration: sessionConfig)
+        let provider = LLMProvider(kind: .custom,
+                                   baseURL: URL(string: "http://127.0.0.1:18090/v1")!, maxRetries: 3)
+        let generator = DeepSeekReplyGenerator(client: DeepSeekClient(provider: provider, session: session))
+        var c = BotConfig()
+        c.model = "fixture"
+        c.maxTokens = 1000
+        let request = UnifiedGenerationRequest(
+            key: "fixture", config: c, rule: ChatRule(name: "fixture"), history: [],
+            userText: "", modelKey: "synthetic-key", currentUserText: "厂长开会这梗传得真快",
+            proactive: true, contextualParticipation: true,
+            publicQuestionContext: ["又看到厂长开会的老梗了"], publicQuestionKnowledge: ["厂长开会：合成梗介绍"]
+        )
+        let decisions: [(String, Bool)] = [
+            (#"{"participate":true,"text":"会议室到处都是打卡机。","emotion":"neutral","intensity":1}"#, true),
+            (#"{"participate":false,"text":"","emotion":"neutral","intensity":0}"#, false),
+            (#"{"participate":"true","text":"不得发送","emotion":"neutral","intensity":1}"#, false),
+            (#"{"text":"不得发送","emotion":"neutral","intensity":1}"#, false),
+        ]
+        for (content, expected) in decisions {
+            PublicQuestionHTTPFixture.reset(content: content)
+            let result = try await generator.generate(request)
+            #expect(result.shouldSend == expected)
+            let bodies = PublicQuestionHTTPFixture.bodies
+            #expect(bodies.count == 1)
+            #expect(bodies.first?["model"] as? String == "fixture")
+            #expect(bodies.first?["max_tokens"] as? Int == 160)
+            #expect(bodies.first?["tools"] == nil)
+            let messages = try #require(bodies.first?["messages"] as? [[String: Any]])
+            #expect((messages.first?["content"] as? String)?.contains("布尔 participate") == true)
+            #expect((messages.last?["content"] as? String)?.contains("又看到厂长开会的老梗了") == true)
+        }
     }
 
     @Test func publicQuestionRecallsOnlyCurrentMatchingMemoryFromItsOwnGroup() async throws {
