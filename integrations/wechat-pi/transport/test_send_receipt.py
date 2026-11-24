@@ -7,6 +7,7 @@ import re
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 import tx_guard as real_tx_guard
 
@@ -602,6 +603,34 @@ class SendReceiptTests(unittest.TestCase):
                          "unconfirmed:receipt_prior_viewport_unavailable")
         self.assertEqual(harness.state["submit_count"], 1)
         self.assertEqual(harness.state["return_key_count"], 1)
+
+    def test_pre_return_reader_failure_clears_only_the_proven_bot_draft(self):
+        for edited_by_user in (False, True):
+            with self.subTest(edited_by_user=edited_by_user):
+                harness = SendReplyHarness()
+                def fail_validation(reader, *_args):
+                    if edited_by_user:
+                        reader.text = "synthetic user draft"
+                    raise RuntimeError("synthetic draft validation failure")
+                harness.ns["Atspi"].Text.get_text = fail_validation
+                harness.guard.clear_proof = Mock(side_effect=lambda draft, _fp:
+                    TxVerdict(harness.reader.text == draft))
+                with self.assertRaisesRegex(RuntimeError, "draft validation failure"):
+                    harness.send()
+                harness.guard.clear_proof.assert_called_once_with(
+                    "我的回复", "synthetic-fingerprint")
+                self.assertEqual(harness.reader.text, "synthetic user draft" if edited_by_user else "")
+                self.assertEqual(harness.state["return_key_count"], 0)
+
+    def test_unknown_return_submission_never_clears_the_draft_or_retries(self):
+        harness = SendReplyHarness()
+        harness.guard.clear_proof = Mock(return_value=TxVerdict(True))
+        harness.ns["xi"].key = Mock(side_effect=RuntimeError("synthetic submit failure"))
+        with self.assertRaisesRegex(RuntimeError, "submit failure"):
+            harness.send()
+        harness.guard.clear_proof.assert_not_called()
+        self.assertEqual(harness.ns["xi"].key.call_count, 1)
+        self.assertEqual(harness.reader.text, "我的回复")
 
     def test_send_reply_rejects_visible_row_after_target_changes(self):
         harness = SendReplyHarness(

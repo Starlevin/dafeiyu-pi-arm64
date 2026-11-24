@@ -1674,97 +1674,80 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
         pre_return_timing["ledger_reservation_ms"] = int(
             (time.monotonic() - stage_started) * 1000)
     stage_started = time.monotonic()
-    editor.set_text_contents(text)
-    # Opt-in: replace ONLY the blind 0.25s after set_text_contents with a
-    # bounded wait for the same draft state the very next line validates.
-    # The final validation below is unchanged in both branches (identity +
-    # exact text), so this can never admit a draft the baseline would reject;
-    # it only reaches that validation earlier when the state is already stable.
-    # OFF => time.sleep(0.25), identical to the production baseline.
-    if UI_STATE_WAIT_ENABLED:
-        _wait_for_state(
-            lambda: Atspi.Text.get_text(reader, 0, -1) == text,
-            DRAFT_SETTLE_S, DRAFT_POLL_S)
-    else:
-        time.sleep(DRAFT_SETTLE_S)
-    pre_return_timing["draft_settle_ms"] = int(
-        (time.monotonic() - stage_started) * 1000)
-    stage_started = time.monotonic()
-    if chat_title(app) != target or Atspi.Text.get_text(reader, 0, -1) != text:
-        return "draft_mismatch"
-    pre_return_timing["draft_validation_ms"] = int(
-        (time.monotonic() - stage_started) * 1000)
-    # 门 2（按 Return 前）：完整复核目标身份与草稿精确匹配；
-    # 仅在 clear_proof 证明仍在原会话原输入框且草稿纯粹为我方文本时才清理，切群或草稿不明绝不清除。
-    stage_started = time.monotonic()
-    g = guard.before_return(text)
-    pre_return_timing["before_return_identity_ms"] = int(
-        (time.monotonic() - stage_started) * 1000)
-    if not g.allow:
-        if guard.clear_proof(text, own_fp).allow:
+    ready_to_return = False
+    try:
+        editor.set_text_contents(text)
+        # Opt-in: replace ONLY the blind 0.25s after set_text_contents with a
+        # bounded wait for the same draft state the very next line validates.
+        # The final validation below is unchanged in both branches (identity +
+        # exact text), so this can never admit a draft the baseline would reject;
+        # it only reaches that validation earlier when the state is already stable.
+        # OFF => time.sleep(0.25), identical to the production baseline.
+        if UI_STATE_WAIT_ENABLED:
+            _wait_for_state(
+                lambda: Atspi.Text.get_text(reader, 0, -1) == text,
+                DRAFT_SETTLE_S, DRAFT_POLL_S)
+        else:
+            time.sleep(DRAFT_SETTLE_S)
+        pre_return_timing["draft_settle_ms"] = int(
+            (time.monotonic() - stage_started) * 1000)
+        stage_started = time.monotonic()
+        if chat_title(app) != target or Atspi.Text.get_text(reader, 0, -1) != text:
+            return "draft_mismatch"
+        pre_return_timing["draft_validation_ms"] = int(
+            (time.monotonic() - stage_started) * 1000)
+        # 门 2（按 Return 前）：完整复核目标身份与草稿精确匹配；
+        # 仅在 clear_proof 证明仍在原会话原输入框且草稿纯粹为我方文本时才清理，切群或草稿不明绝不清除。
+        stage_started = time.monotonic()
+        g = guard.before_return(text)
+        pre_return_timing["before_return_identity_ms"] = int(
+            (time.monotonic() - stage_started) * 1000)
+        if not g.allow:
+            return "tx_denied:" + g.reason
+        # The evidence baseline belongs immediately before Return. Its failure
+        # disables confirmation only; it must not veto a send that passed all
+        # existing target and draft guards.
+        prior_viewport_available = False
+        stage_started = time.monotonic()
+        try:
+            baseline_bounds, previous = read_messages(app)
+            if _valid_receipt_baseline(baseline_bounds, previous):
+                prev_hashes = baseline(previous)
+                prior_viewport_available = True
+        except Exception:
+            if auto_ctx is not None:
+                return "auto_reply_stale:rows_unreadable"
+        if auto_ctx is not None:
             try:
-                editor.set_text_contents("")
+                recheck = tx_guard.auto_reply_recheck(auto_ctx, previous)
+            except Exception:
+                recheck = None
+            if recheck is None:
+                return "auto_reply_stale:recheck_unavailable"
+            if not recheck.allow:
+                return "auto_reply_stale:" + recheck.reason
+            # Keep the submission journal immediately before Return. If reservation
+            # fails, remove only a draft still proven to be ours in this session.
+            if on_submit:
+                stage_started = time.monotonic()
+                on_submit()
+                pre_return_timing["ledger_reservation_ms"] = int(
+                    (time.monotonic() - stage_started) * 1000)
+                stage_started = time.monotonic()
+        return_started = time.monotonic()
+        pre_return_timing["receipt_baseline_ms"] = int(
+            (return_started - stage_started) * 1000)
+        pre_return_timing["pre_return_ms"] = int(
+            (return_started - pre_return_started) * 1000)
+        ready_to_return = True
+    finally:
+        if not ready_to_return:
+            # Re-observe the current chat and exact draft before clearing it.
+            try:
+                if guard.clear_proof(text, own_fp).allow:
+                    editor.set_text_contents("")
             except Exception:
                 pass
-        return "tx_denied:" + g.reason
-    # The evidence baseline belongs immediately before Return. Its failure
-    # disables confirmation only; it must not veto a send that passed all
-    # existing target and draft guards.
-    prior_viewport_available = False
-    stage_started = time.monotonic()
-    try:
-        baseline_bounds, previous = read_messages(app)
-        if _valid_receipt_baseline(baseline_bounds, previous):
-            prev_hashes = baseline(previous)
-            prior_viewport_available = True
-    except Exception:
-        if auto_ctx is not None:
-            if guard.clear_proof(text, own_fp).allow:
-                try:
-                    editor.set_text_contents("")
-                except Exception:
-                    pass
-            return "auto_reply_stale:rows_unreadable"
-    if auto_ctx is not None:
-        try:
-            recheck = tx_guard.auto_reply_recheck(auto_ctx, previous)
-        except Exception:
-            recheck = None
-        if recheck is None:
-            if guard.clear_proof(text, own_fp).allow:
-                try:
-                    editor.set_text_contents("")
-                except Exception:
-                    pass
-            return "auto_reply_stale:recheck_unavailable"
-        if not recheck.allow:
-            if guard.clear_proof(text, own_fp).allow:
-                try:
-                    editor.set_text_contents("")
-                except Exception:
-                    pass
-            return "auto_reply_stale:" + recheck.reason
-        # Keep the submission journal immediately before Return. If reservation
-        # fails, remove only a draft still proven to be ours in this session.
-        if on_submit:
-            stage_started = time.monotonic()
-            try:
-                on_submit()
-            except Exception:
-                if guard.clear_proof(text, own_fp).allow:
-                    try:
-                        editor.set_text_contents("")
-                    except Exception:
-                        pass
-                raise
-            pre_return_timing["ledger_reservation_ms"] = int(
-                (time.monotonic() - stage_started) * 1000)
-            stage_started = time.monotonic()
-    return_started = time.monotonic()
-    pre_return_timing["receipt_baseline_ms"] = int(
-        (return_started - stage_started) * 1000)
-    pre_return_timing["pre_return_ms"] = int(
-        (return_started - pre_return_started) * 1000)
     post_return_reader_error = False
     if UI_STATE_WAIT_ENABLED:
         xi.key("Return", (), 0.05)
