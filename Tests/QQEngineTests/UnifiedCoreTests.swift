@@ -187,12 +187,12 @@ private func inbound(_ text: String = "合成消息",
     @Test func proactiveGroupAllowlistDoesNotDisableRealAtGateGlobally() {
         let c = UnifiedCoreConfig.fromEnvironment([
             "DAFEIYU_UNIFIED_PILOT": "1",
-            "DAFEIYU_UNIFIED_ALLOWED_CHATS": "fixture-group,other-group",
-            "DAFEIYU_UNIFIED_ALLOWED_ACCOUNTS": "fixture-account",
-            "DAFEIYU_UNIFIED_PROACTIVE_GROUPS": "[\"fixture-group\"]",
+            "DAFEIYU_UNIFIED_ALLOWED_CHATS": "别野,Apex",
+            "DAFEIYU_UNIFIED_ALLOWED_ACCOUNTS": "wx-1",
+            "DAFEIYU_UNIFIED_PROACTIVE_GROUPS": "[\"别野\"]",
         ])
         #expect(c.enabled)
-        #expect(c.proactiveAllowedChats == ["fixture-group"])
+        #expect(c.proactiveAllowedChats == ["别野"])
         #expect(c.proactiveExplicitlyEnabled == false)
         #expect(c.requireRealAt == true)
     }
@@ -439,6 +439,53 @@ private func inbound(_ text: String = "合成消息",
         #expect(await recorder.publicQuestionFast == [false])
     }
 
+    @Test func highestWeChatActivityLetsASingleGenerationJudgeParaphrases() async {
+        var config = makeConfig(allowed: ["fixture-group"])
+        config.publicQuestionFastEnabled = true
+        config.contextualParticipationEnabled = true
+        config.proactiveAllowedChats = ["fixture-group"]
+        config.allowedAccounts = ["fixture-account"]
+        let calls = CallCounter()
+        let scores = CallCounter()
+        let recorder = RequestRecorder()
+        let core = UnifiedReplyCore(
+            config: config,
+            generator: FixtureReplyGenerator(replyJSON: validJSON("看来这次的衣服扛不住了。"),
+                                             fail: false, calls: calls, recorder: recorder),
+            proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: nil, calls: scores) },
+            journal: freshJournal()
+        )
+        let previous = "外头突然刮起大风了"
+        let body = "我晾的衣服估计要飞走"
+        var event = inbound(body, atMe: false, msgId: "paraphrase-regular")
+        event.groupAutoReply = true
+        event.groupAutoReplyWindowOK = true
+        event.groupAutoReplySuperseded = false
+        event.groupAutoReplyPublicQuestionSettled = true
+        event.groupAutoReplyContext = [previous, body]
+        event.groupAutoReplyPublicQuestionCooldownSeconds = 60
+        #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+
+        event.msgId = "paraphrase-no-context"
+        event.groupAutoReplyPublicQuestionCooldownSeconds = 30
+        event.groupAutoReplyContext = [body]
+        #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+        event.msgId = "paraphrase-just-replied"
+        event.groupAutoReplyContext = ["机器人: 我刚收好东西了", body]
+        #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+        #expect(await calls.value() == 0)
+
+        event.msgId = "paraphrase-high"
+        event.groupAutoReplyContext = [previous, body]
+        #expect((await core.handle(event)).reply.action == "reply")
+        #expect(await recorder.publicQuestionContexts == [[previous]])
+        #expect(await recorder.contextualParticipation == [true])
+        event.msgId = "paraphrase-high-too-soon"
+        #expect((await core.handle(event)).gate == "proactive_score_cooldown")
+        #expect(await calls.value() == 1)
+        #expect(await scores.value() == 0)
+    }
+
     @Test func globalProactiveSwitchStillRequiresBridgeEvidenceForNonMentions() async {
         var c = makeConfig(requireAt: false)
         c.proactiveExplicitlyEnabled = true
@@ -489,6 +536,7 @@ private func inbound(_ text: String = "合成消息",
             #expect(bodies.first?["max_tokens"] as? Int == 160)
             #expect(bodies.first?["tools"] == nil)
             let messages = try #require(bodies.first?["messages"] as? [[String: Any]])
+            #expect((messages.first?["content"] as? String)?.contains("[QQ_PARTICIPATION]") == true)
             #expect((messages.first?["content"] as? String)?.contains("布尔 participate") == true)
             #expect((messages.last?["content"] as? String)?.contains("又看到厂长开会的老梗了") == true)
         }
@@ -540,6 +588,69 @@ private func inbound(_ text: String = "合成消息",
             #expect(note.contains("周五下午") == expected)
             #expect(!note.contains("周三上午"))
             #expect(note.isEmpty == !expected)
+        }
+    }
+
+    @Test func contextualFollowupRecallsOnlyOneTopicFromTheImmediatelyPreviousGroupMessage() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 20)
+        config.allowedAccounts = ["fixture-account"]
+        config.proactiveAllowedChats = config.allowedChats
+        config.publicQuestionFastEnabled = true
+        config.contextualParticipationEnabled = true
+        config.confirmedWeChatMemoryEnabled = true
+        let reply = validJSON("那就这样定。")
+        let core = UnifiedReplyCore(config: config,
+                                    generator: FixtureReplyGenerator(replyJSON: reply, fail: false,
+                                                                     calls: CallCounter()),
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        for (label, value) in [("团建集合地点", "旧校区北门"), ("团建集合地点", "新校区东门"),
+                               ("周报发布时间", "周五下午")] {
+            let generated = await core.handle(inbound("记住：\(label)＝\(value)", msgId: UUID().uuidString))
+            let receipt = try #require(generated.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(receipt))
+        }
+
+        let topic = "团建集合地点刚才又确认了一下"
+        let followup = "那就按这个来"
+        let cases: [(String, [String], String, String?)] = [
+            ("fixture-group", [topic], followup, "新校区东门"),
+            ("fixture-group", ["周报发布时间已经定了", topic], followup, "新校区东门"),
+            ("fixture-group", [topic, "先出去买饮料"], followup, nil),
+            ("fixture-group", ["团建集合地点和周报发布时间刚确认"], followup, nil),
+            ("fixture-group", ["朋友圈在聊团建集合地点"], followup, nil),
+            ("fixture-group", [topic], "这局的枪法真够离谱", nil),
+            ("fixture-group", [topic], "周报发布时间就这么定", "周五下午"),
+            ("other-group", [topic], followup, nil)
+        ]
+        for (chat, context, message, expected) in cases {
+            let recorder = RequestRecorder()
+            let calls = CallCounter()
+            let restarted = UnifiedReplyCore(config: config,
+                generator: FixtureReplyGenerator(replyJSON: reply, fail: false,
+                                                 calls: calls, recorder: recorder),
+                journal: UnifiedIdempotencyJournal(fileURL: file))
+            var request = inbound(message, chatId: chat, atMe: false, msgId: UUID().uuidString)
+            request.groupAutoReply = true
+            request.groupAutoReplyContext = context + [message]
+            request.groupAutoReplyWindowOK = true
+            request.groupAutoReplySuperseded = false
+            request.groupAutoReplyPublicQuestionSettled = true
+            request.groupAutoReplyPublicQuestionCooldownSeconds = 30
+            let result = await restarted.handle(request)
+            #expect(result.gate == "replied")
+            #expect(await recorder.contextualParticipation == [true])
+            #expect(await calls.value() == 1)
+            let note = try #require(await recorder.publicQuestionGroupMemory.first)
+            #expect(!note.contains("旧校区北门"))
+            if let expected {
+                #expect(note.contains(expected) && note.count <= 220)
+            } else {
+                #expect(note.isEmpty)
+            }
         }
     }
 

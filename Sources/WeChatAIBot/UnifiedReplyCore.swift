@@ -602,7 +602,9 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                         return finish(.ignore("public_question_not_matched", scope: scope, trace: trace),
                                       modelCalled: false, gate: "public_question_not_matched")
                     }
-                    guard Self.hasContextualOpening(body, window: inbound.groupAutoReplyContext) else {
+                    let highestActivity = inbound.groupAutoReplyPublicQuestionCooldownSeconds == 30
+                    guard Self.hasContextualOpening(body, window: inbound.groupAutoReplyContext,
+                                                    allowSemanticMatch: highestActivity) else {
                         return finish(.ignore("proactive_context_not_ready", scope: scope, trace: trace),
                                       modelCalled: false, gate: "proactive_context_not_ready")
                     }
@@ -761,8 +763,10 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         }
         let groupMemory: String
         if let memoryScope, groupNote == nil {
+            let previous = contextualParticipation && Self.isGroupMemoryFollowup(body)
+                ? inbound.groupAutoReplyContext.dropLast().last : nil
             groupMemory = await journal.groupMemoryContext(for: memoryScope, query: body,
-                                                           publicQuestion: singleTurn)
+                                                           shortReply: singleTurn, previous: previous)
         } else {
             groupMemory = ""
         }
@@ -941,16 +945,30 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         return String(value.prefix(125))
     }
 
-    private static func hasContextualOpening(_ body: String, window: [String]) -> Bool {
+    private static let groupMemoryFollowup = try? NSRegularExpression(
+        pattern: #"^(?:(?:那|嗯|好|行|对)[，, ]*)?(?:(?:就)?(?:按|照)(?:这个|那个|刚才的?|前面的?)(?:来|办|走|安排|执行)|(?:这个|那个|这次的)(?:时间|地点|安排|方案)(?:可以|没问题|挺合适|挺好|正好|合适)|(?:就)?这么(?:办|定))[。！!，,～~ ]*$"#
+    )
+
+    private static func isGroupMemoryFollowup(_ text: String) -> Bool {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return groupMemoryFollowup?.firstMatch(in: text, range: range) != nil
+    }
+
+    private static func hasContextualOpening(_ body: String, window: [String],
+                                             allowSemanticMatch: Bool) -> Bool {
         let stops = ["@", "＠", "你", "私聊", "已解决", "已经解决", "解决了", "不用了", "算了", "谢谢"]
         let text = scrubCandidate(body)
         let topic = text.lowercased().filter { $0.isLetter || $0.isNumber }
         let prior = window.dropLast().suffix(3)
         guard (4...125).contains(body.count), text == body, topic.count >= 4,
               !stops.contains(where: body.contains),
-              let latest = prior.last, !latest.hasPrefix("机器人: "),
-              topic != latest.lowercased().filter({ $0.isLetter || $0.isNumber }),
-              QQReplyDecisionInputBuilder.bigramOverlap(text, latest) >= 2 else {
+              let latest = prior.last, !latest.hasPrefix("机器人: ") else {
+            return false
+        }
+        let previousTopic = latest.lowercased().filter { $0.isLetter || $0.isNumber }
+        guard topic != previousTopic,
+              (allowSemanticMatch && previousTopic.count >= 4)
+                || QQReplyDecisionInputBuilder.bigramOverlap(text, latest) >= 2 else {
             return false
         }
         // The bridge anchors a recent outgoing message with this marker.

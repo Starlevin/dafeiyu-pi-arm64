@@ -275,22 +275,36 @@ public actor UnifiedIdempotencyJournal {
         }
     }
 
-    func groupMemoryContext(for scope: String, query: String, publicQuestion: Bool = false) -> String {
+    func groupMemoryContext(for scope: String, query: String, shortReply: Bool = false,
+                            previous: String? = nil) -> String {
         guard storageUsable else { return "" }
-        if !publicQuestion { recoverGroupNotes(for: scope) }
+        if !shortReply { recoverGroupNotes(for: scope) }
         do {
             guard let archive = try groupArchive(scope, create: false) else { return "" }
-            if publicQuestion {
-                // Public replies may recall current notes whose full topic appears in the question.
+            if shortReply {
                 let normalized = query.precomposedStringWithCanonicalMapping.lowercased()
                 let now = Date()
-                let related = archive.items.filter { item in
-                    item.current(now) && item.keywords.count == 1 && item.keywords.contains {
-                        $0.count >= 2 && normalized.contains($0)
+                let current = archive.items.filter {
+                    $0.subject == "CONVERSATION" && $0.current(now)
+                }
+                func matching(_ text: String) -> [QQMemoryItem] {
+                    current.filter { item in
+                        item.keywords.count == 1 && item.keywords.contains {
+                            $0.count >= 2 && text.contains($0)
+                        }
                     }
                 }
+                var related = matching(normalized)
+                var topic = normalized
+                if related.isEmpty, let previous, !previous.hasPrefix("机器人: "),
+                   !previous.contains("朋友圈"), !QQSocialTools.requested(in: previous) {
+                    topic = previous.precomposedStringWithCanonicalMapping.lowercased()
+                    related = matching(topic)
+                    let topics = Set(related.flatMap(\.keywords))
+                    guard topics.count == 1 else { return "" }
+                }
                 guard !related.isEmpty else { return "" }
-                let context = QQMemoryIndex(related).context(normalized, subject: "CONVERSATION",
+                let context = QQMemoryIndex(related).context(topic, subject: "CONVERSATION",
                                                             characters: 220, now: now)
                 return context.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
             }
