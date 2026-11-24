@@ -1634,9 +1634,13 @@
   let wechatAccountBusy = false;
   let wechatAccountPoll = 0;
   let wechatQrExpires = 0;
+  let wechatQrDeadline = 0;
+  const WECHAT_QR_LIFETIME_MS = 30_000;
 
   function hideWeChatQr() {
-    clearTimeout(wechatAccountPoll);
+    clearTimeout(wechatQrDeadline);
+    wechatQrDeadline = 0;
+    wechatQrExpires = 0;
     const image = $('wechatAccountQr');
     image.hidden = true;
     image.removeAttribute('src');
@@ -1652,6 +1656,7 @@
   function closeWeChatAccount() {
     ++wechatAccountRequest;
     wechatAccountBusy = false;
+    clearTimeout(wechatAccountPoll);
     hideWeChatQr();
     $('wechatAccountStatus').textContent = '';
     showWeChatBridge('unknown');
@@ -1660,7 +1665,24 @@
     $('wechatAccountReconnect').disabled = true;
   }
 
+  async function requestWeChatAccount(path, method, body, timeoutMs) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let timer;
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        reject(apiError('微信账号请求超时，请刷新状态确认。', 0));
+        if (controller) controller.abort();
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([request(path, method, body, controller && controller.signal), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function readWeChatAccount(action) {
+    if (wechatQrExpires && Date.now() >= wechatQrExpires) hideWeChatQr();
     if (wechatAccountBusy || !$('wechatAccount').open || !state.session || !state.session.authenticated) return;
     if (action === 'reconnect' && !window.confirm('重连微信桥接会短暂暂停微信消息处理。确认重连吗？')) return;
     const request = ++wechatAccountRequest;
@@ -1677,17 +1699,21 @@
     let result;
     try {
       if (action === 'reconnect') {
-        await apiPost(wechatAccountPath + '/reconnect', { confirmed: true });
+        await requestWeChatAccount(wechatAccountPath + '/reconnect', 'POST', { confirmed: true }, 30_000);
       }
-      result = action === 'qr' ? await apiPost(wechatAccountPath + '/qr', {}) : await apiGet(wechatAccountPath);
+      result = action === 'qr'
+        ? await requestWeChatAccount(wechatAccountPath + '/qr', 'POST', {}, 12_000)
+        : await requestWeChatAccount(wechatAccountPath, 'GET', undefined, 10_000);
       if (request !== wechatAccountRequest) return;
       status.textContent = (action === 'reconnect' ? '桥接已重连。' : '') + result.label;
       status.dataset.state = result.state;
       if (action !== 'qr') showWeChatBridge(result.bridgeStatus);
-      if (typeof result.image === 'string' && result.image.startsWith('data:image/png;base64,')) {
+      if (result.state === 'scan' && typeof result.image === 'string'
+          && result.image.startsWith('data:image/png;base64,')) {
         image.src = result.image;
         image.hidden = false;
-        wechatQrExpires = Date.now() + 30_000;
+        wechatQrExpires = Date.now() + WECHAT_QR_LIFETIME_MS;
+        wechatQrDeadline = setTimeout(hideWeChatQr, WECHAT_QR_LIFETIME_MS);
       }
       if (result.state !== 'scan' || Date.now() >= wechatQrExpires) hideWeChatQr();
       if (!image.hidden) wechatAccountPoll = setTimeout(() => readWeChatAccount(), 6000);
