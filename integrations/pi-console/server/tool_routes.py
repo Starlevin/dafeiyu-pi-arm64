@@ -37,7 +37,9 @@ Rules enforced here
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 import struct
 import subprocess
 import threading
@@ -97,6 +99,7 @@ def app_cfg(handler):
 
 def bind_config(app, cfg):
     app._tools_cfg = dict(cfg or {})
+    app._tools_cfg.setdefault("wechatBridgeLog", str(Path.home() / "dafeiyu-wechat/bridge.log"))
     app._tools_box = None
     app._tools_restart_lock = threading.Lock()
     app._tools_restart_after = 0
@@ -413,13 +416,63 @@ def _watchdog_view(reader, default_path=None):
     return view
 
 
+_WECHAT_EVENT = re.compile(
+    r"^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}) "
+    r"(received|mention|queue|generation|submit|confirmation) "
+    r"trace='([0-9a-f]{64}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})' "
+    r"reason='([a-z0-9_:-]{1,80})'$"
+)
+_WECHAT_EVENT_LABELS = {
+    ("received", "group"): "收到群消息",
+    ("received", "private"): "收到私聊消息",
+    ("mention", "accepted"): "识别到 @",
+    ("mention", "auto_reply"): "符合自动接话条件",
+    ("mention", "direction_unverified"): "消息方向未确认",
+    ("queue", "accepted"): "已入队",
+    ("queue", "queue_full"): "队列已满",
+    ("generation", "started"): "模型开始生成",
+    ("generation", "ready"): "回复已生成",
+    ("generation", "proactive_participation_declined"): "模型选择不接话",
+    ("generation", "generation_failed"): "模型生成失败",
+    ("submit", "started"): "正在提交发送",
+    ("submit", "tx_denied:composer_not_empty"): "输入框有草稿，已停止发送",
+    ("submit", "client_unavailable"): "微信客户端暂不可用",
+    ("confirmation", "visible_outgoing"): "已确认原会话可见",
+}
+
+
+def _wechat_log_view(data, limit):
+    """Project known event states only. No raw log fields reach the console."""
+    rows = []
+    for line in data["lines"]:
+        event = _WECHAT_EVENT.fullmatch(line)
+        if event is None:
+            continue
+        stamp, phase, trace, reason = event.groups()
+        label = _WECHAT_EVENT_LABELS.get((phase, reason))
+        if label is None and phase == "confirmation" and reason.startswith("unconfirmed:"):
+            label = "发送结果未确认"
+        if label is None and phase == "submit" and reason.startswith("auto_reply_stale:"):
+            label = "对话已变化，取消本条接话"
+        if label is not None:
+            reference = hashlib.sha256(trace.encode("ascii")).hexdigest()[:10]
+            rows.append(f"{stamp} [{reference}] {label}")
+    return {"lines": rows[-limit:], "truncated": data["truncated"] or len(rows) > limit,
+            "redacted": len(data["lines"]) - len(rows)}
+
+
 def get_logs(handler):
     reader = box(handler.app, app_cfg(handler))
     q = _query(handler)
     lines = _int_param(q.get("lines"), "lines", 10, 200, 80)
     sources = sorted(reader.log_tails.keys())
     which = _choice(q.get("source"), "source", tuple(sources), "qq-engine")
-    data = reader.tail(which, lines)
+    if which == "wechat-bridge":
+        # Bridge polling is noisy. Read a larger tail within BoxReader's 64 KiB
+        # cap before applying the requested limit to visible chat events.
+        data = _wechat_log_view(reader.tail(which, max(500, lines)), lines)
+    else:
+        data = reader.tail(which, lines)
     handler.json(200, {"ok": True, "source": which, "sources": sources,
                        "lines": data["lines"], "truncated": data["truncated"],
                        "redactedLines": data["redacted"], "readOnly": True})

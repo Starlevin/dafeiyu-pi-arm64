@@ -305,6 +305,36 @@ class BridgeTests(unittest.TestCase):
         self.assertIn("［含敏感内容，已隐去］", "\n".join(d["lines"]))
         self.assertGreaterEqual(d["redactedLines"], 1)
 
+    def test_wechat_tail_reports_only_verified_lifecycle_fields(self):
+        trace = "a" * 64
+        syntax = "2026-11-25 02:36:11"
+        events = [
+            f"{syntax} received trace='{trace}' reason='group'",
+            f"{syntax} mention trace='{trace}' reason='auto_reply'",
+            f"{syntax} queue trace='{trace}' reason='accepted'",
+            f"{syntax} generation trace='{trace}' reason='started'",
+            f"{syntax} submit trace='{trace}' reason='started'",
+            f"{syntax} confirmation trace='{trace}' reason='visible_outgoing'",
+            f"{syntax} confirmation trace='{trace}' reason='unconfirmed:client_unavailable'",
+            f"{syntax} submit trace='{trace}' reason='tx_denied:composer_not_empty'",
+            f"{syntax} poll_slow target='fixture-room-name'",
+            f"{syntax} generation trace='{trace}' reason='fixture-free-text'",
+            f"{syntax} confirmation trace='{trace}' reason='visible_outgoing' text='private fixture body'",
+        ]
+        self.box.log = lambda _name: "\n".join(events + [f"{syntax} wal_hint"] * 100)
+        path = "/api/tools/logs?source=wechat-bridge&lines=10"
+        self.assertEqual(self.c.req("GET", path)[0], 401)
+        self.login()
+        status, data, body = self.c.req("GET", path)
+        self.assertEqual(status, 200, data)
+        self.assertEqual(len(data["lines"]), 8)
+        expected = ["收到群消息", "符合自动接话条件", "已入队", "模型开始生成", "正在提交发送",
+                    "已确认原会话可见", "发送结果未确认", "输入框有草稿，已停止发送"]
+        self.assertEqual([line.split("] ")[1] for line in data["lines"]], expected)
+        self.assertEqual(len({line.split("] ")[0] for line in data["lines"]}), 1)
+        for forbidden in (trace, "fixture-room-name", "fixture-free-text", "private fixture body"):
+            self.assertNotIn(forbidden.encode(), body)
+
     def test_napcat_log_path_cannot_be_escaped(self):
         self.login()
         for bad in ("../../etc/passwd", "/etc/passwd", "..%2f..%2fshadow"):
