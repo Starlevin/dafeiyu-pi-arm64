@@ -846,7 +846,7 @@ def house_state():
         "wechat_activity_state": wx_phase,
         "node_id": node,
         "node_label": PHASE_LABELS[phase],
-        "node_video": VIDEO[node],
+        "node_video": VIDEO.get(node, ""),
         "node_loop": loop,
         "bubble": "",
         "bubble_until": 0,

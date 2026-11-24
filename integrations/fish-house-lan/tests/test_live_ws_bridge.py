@@ -779,6 +779,11 @@ class LoopbackWebSocketTests(unittest.TestCase):
                     self.assertTrue(event["verified"])
             with urllib.request.urlopen(base + "/fish_house/state.json", timeout=5) as response:
                 self.assertEqual(json.load(response)["phase"], "tool")
+            with patch.object(self.server, "VIDEO", {}), \
+                 urllib.request.urlopen(base + "/fish_house/state.json", timeout=5) as response:
+                missing_video = json.load(response)
+                self.assertEqual(missing_video["phase"], "tool")
+                self.assertEqual(missing_video["node_video"], "")
 
             self.state["panel"] = {"runtimeRecords": [
                 {"state": "generating", "timestamp": time.time(),
