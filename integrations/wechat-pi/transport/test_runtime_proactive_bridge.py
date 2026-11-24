@@ -57,6 +57,65 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
             "group": {"proactiveJudge": {"enabled": enabled, "groups": [GROUP]}},
         }), encoding="utf-8")
 
+    def ingest_bieye_text(self, text):
+        target = "别野"
+        self.path.write_text(json.dumps({
+            "group": {"proactiveJudge": {"enabled": True, "groups": [target]}},
+        }), encoding="utf-8")
+        self.args.group = self.args.auto_reply_group = [target]
+        self.args.auto_limiter = Mock(take=Mock(return_value=True))
+        jobs = Queue()
+        with patch.multiple(bridge, avatar_side=Mock(return_value=("incoming", 0)),
+                            chat_title=Mock(return_value=target)):
+            bridge.handle_rows(None, [(text, (1, 1, 2, 2))], 0, (0, 0, 500, 500),
+                               target, self.args, jobs)
+        return jobs
+
+    def test_unaddressed_native_quote_does_not_enter_auto_queue(self):
+        for message in (
+            "我也这么理解\nQuote 某人's message: 夹具原话",
+            "我也这么理解\nQuote 某人's message: @大肥鱼\u2005 夹具原话",
+            "@大肥鱼 我也这么理解\nQuote 某人's message: 夹具原话",
+        ):
+            with self.subTest(message=message):
+                self.assertTrue(self.ingest_bieye_text(message).empty())
+                self.args.auto_limiter.take.assert_not_called()
+
+    def test_native_mention_preserves_multiline_question_and_separates_quote(self):
+        message = (
+            "@大肥鱼\u2005 帮我解释这一段\n"
+            "尤其是第二句的 @大肥鱼 是谁说的\n"
+            "Quote 某人's message: 原话第一句\n原话第二句"
+        )
+        jobs = self.ingest_bieye_text(message)
+        payload = jobs.get_nowait()[2]
+        self.assertTrue(payload["at_me"])
+        self.assertTrue(payload["quoted"])
+        self.assertNotIn("group_auto_reply", payload)
+        self.assertTrue(payload["text"].startswith(
+            "帮我解释这一段\n尤其是第二句的 @大肥鱼 是谁说的\n"))
+        self.assertIn("未验证", payload["text"])
+        self.assertIn("引用者标签：某人；引用内容：原话第一句\n原话第二句", payload["text"])
+        self.assertTrue(bridge._pilot_force_old(payload))
+        self.args.auto_limiter.take.assert_not_called()
+        self.assertTrue(jobs.empty())
+
+    def test_qt_mention_only_reply_retains_reference(self):
+        jobs = self.ingest_bieye_text("@大肥鱼\nQuote 某人's message: 需要说明的原话")
+        payload = jobs.get_nowait()[2]
+        self.assertTrue(payload["at_me"])
+        self.assertTrue(payload["quoted"])
+        self.assertIn("引用内容：需要说明的原话", payload["text"])
+        self.assertTrue(jobs.empty())
+
+    def test_ordinary_multiline_message_remains_auto_candidate(self):
+        message = "我看了这段剧情\nQuote 是这集的标题"
+        payload = self.ingest_bieye_text(message).get_nowait()[2]
+        self.assertFalse(payload["at_me"])
+        self.assertFalse(payload["quoted"])
+        self.assertTrue(payload["group_auto_reply"])
+        self.assertEqual(payload["text"], message)
+
     def ingest(self, direct):
         jobs = Queue(maxsize=2)
         bounds = (0, 0, 500, 500)
