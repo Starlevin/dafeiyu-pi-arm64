@@ -217,6 +217,56 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertEqual(payload["group_auto_reply_public_question_cooldown_seconds"], 240)
         self.assertEqual(payload["msg_id"], trace)
 
+    def test_ordinary_media_topic_stays_on_the_settled_swift_route(self):
+        endpoint = "http://127.0.0.1:41143"
+        routes = SimpleNamespace(
+            swift_pilot_url=Mock(return_value=(endpoint, "fixture-token")),
+            route_for=Mock(return_value=("swift", endpoint)),
+        )
+        env = {"DAFEIYU_WECHAT_SWIFT_PROACTIVE_GROUPS": json.dumps([GROUP]),
+               "DAFEIYU_WECHAT_UNIFIED_ACCOUNT": "wx-fixture"}
+        for text in ("队友的语音里大家都在笑", "相册里的照片拍得挺有意思",
+                     "她说别用语音回复就好", "那个表情包太贴切了"):
+            with self.subTest(text=text), patch.dict(os.environ, env), \
+                 patch.object(bridge, "group_routes", routes):
+                rows = [(text, (1, 1, 2, 2))]
+                settle = bridge.PublicQuestionSettleQueue()
+                accepted, jobs = self.ingest_rows(rows, public_question_settler=settle)
+                self.assertFalse(accepted)
+                self.assertTrue(jobs.empty())
+                pending = settle.pending(GROUP)
+                self.assertIsNotNone(pending)
+                accepted, jobs = self.ingest_rows(
+                    rows, public_question_settler=settle, settled_trace=pending.trace,
+                    monotonic=pending.due_at, cooldown_config={GROUP: 30})
+                self.assertTrue(accepted)
+                payload = jobs.get_nowait()[2]
+                self.assertTrue(payload["group_auto_reply_public_question_settled"])
+                self.assertIn("x-unified-token", bridge.core_target(payload)[1])
+
+    def test_voice_intent_and_real_media_keep_the_compatibility_route(self):
+        env = {"DAFEIYU_WECHAT_SWIFT_PROACTIVE_GROUPS": json.dumps([GROUP]),
+               "DAFEIYU_WECHAT_UNIFIED_ACCOUNT": "wx-fixture"}
+        payload = bridge.inbound_payload("请用语音回复", GROUP, GROUP)
+        payload.update(at_me=False, group_auto_reply=True, group_auto_reply_window_ok=True,
+                       group_auto_reply_superseded=False,
+                       group_auto_reply_context=["请用语音回复"])
+        with patch.dict(os.environ, env):
+            self.assertTrue(bridge._pilot_force_old(payload))
+            for flag in ("photo_present", "quoted", "image_described", "rich_media", "multi_bubble"):
+                with self.subTest(flag=flag):
+                    self.assertTrue(bridge._pilot_force_old(payload | {"text": "闲聊", flag: True}))
+            self.assertTrue(bridge._pilot_force_old(
+                payload | {"at_me": True, "group_auto_reply": False, "text": "给我发张照片"}))
+            with patch.object(bridge, "same_sender_image", return_value=True):
+                accepted, jobs = self.ingest_rows(
+                    [("[图片]", (1, 1, 2, 2)), ("这图很眼熟", (1, 1, 2, 2))],
+                    public_question_settler=bridge.PublicQuestionSettleQueue())
+            self.assertTrue(accepted)
+            media_payload = jobs.get_nowait()[2]
+            self.assertTrue(media_payload["photo_present"])
+            self.assertTrue(bridge._pilot_force_old(media_payload))
+
     def test_occupied_composer_skips_both_proactive_routes_without_consuming_limiter(self):
         reader = Mock(get_character_count=Mock(return_value=7))
         composer = Mock(return_value=(Mock(get_text_iface=Mock(return_value=reader)), None))

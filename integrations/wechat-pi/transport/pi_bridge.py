@@ -1452,22 +1452,26 @@ def _pilot_force_old(payload: dict) -> bool:
     """
     if payload.get("chat_type") == "private":
         return True
-    if payload.get("group_auto_reply"):
-        candidate = dict(payload)
-        if not candidate.get("account"):
-            candidate["account"] = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT", "")
-        # Separate allowlist: existing Apex/Node candidate selection remains unchanged;
-        # only proven candidates in this exact list may route to Swift.
-        if not swift_proactive_candidate_allowed(candidate, configured_swift_proactive_groups()):
-            return True
     if payload.get("quoted") or payload.get("image_described"):
         return True
     if payload.get("rich_media") or payload.get("multi_bubble"):
         return True
     if payload.get("photo_present"):
         return True
-    # Manual sticker/media requests still need the full WeChat pipeline.
     text = str(payload.get("text") or "")
+    if payload.get("group_auto_reply"):
+        candidate = dict(payload)
+        if not candidate.get("account"):
+            candidate["account"] = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT", "")
+        if not swift_proactive_candidate_allowed(candidate, configured_swift_proactive_groups()):
+            return True
+        # The compatibility voiceReply.requested handler also accepts a real
+        # voice request without @. Ordinary mentions of media are still text.
+        return (not re.search(r'不要|别(?:再)?|不想|不用|不能|怎么|如何|他说|她说|有人说|关闭|取消|["“”‘’]', text)
+                and bool(re.search(
+                    r"(?:发|来|说|讲|回复)(?:给我|个|一条|一句|句|段|一段|条|一下|点|一段话|个回复|次|一)?\s*语音"
+                    r"|用语音(?:回|说|讲)|语音(?:回我|回复|说一句)", text)))
+    # Explicitly addressed sticker/media requests still use compatibility.
     if re.search(r"图片|照片|表情|贴纸|动图|梗图|发图|来张图|来个图|meme|sticker|gif|文件|语音|画一|画个|日记|朋友圈", text, re.I):
         return True
     return False
@@ -2346,6 +2350,8 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             record(health, "mention", "accepted" if is_group else "private", trace)
         payload = inbound_payload(body, target, target if is_group else None, private_id=private_id)
         payload["msg_id"] = trace
+        if image_rect is not None:
+            payload["photo_present"] = True
         if animated_sticker and photo:
             payload["_sticker_animated"] = True
         if auto_candidate:
@@ -2457,7 +2463,6 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
                     response = demo
                 else:
                     if photo:
-                        payload["photo_present"] = True
                         dynamic = bool(payload.pop("_sticker_animated", False))
                         prompt = (psv.DYNAMIC_VISION_PROMPT if dynamic and psv is not None
                                   else VISION_PROMPT)
