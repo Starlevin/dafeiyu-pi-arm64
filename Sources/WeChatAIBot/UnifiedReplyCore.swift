@@ -468,19 +468,16 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let botConfig: BotConfig
         let modelKey: String
         let identityVConfig: IdentityVConfig
-        let identityV: IdentityVDialogue
     }
 
     @MainActor private func effectiveState() throws -> Effective {
         if let sharedState {
             let live = try sharedState.currentSharedState()
             return Effective(persona: live.persona, botConfig: live.botConfig,
-                             modelKey: live.modelKey, identityVConfig: live.identityVConfig,
-                             identityV: IdentityVDialogue(config: live.identityVConfig))
+                             modelKey: live.modelKey, identityVConfig: live.identityVConfig)
         }
         return Effective(persona: staticPersona, botConfig: staticBotConfig,
-                         modelKey: staticModelKey, identityVConfig: staticIdentityVConfig,
-                         identityV: identityVDialogueCache)
+                         modelKey: staticModelKey, identityVConfig: staticIdentityVConfig)
     }
 
     /// 持久化账本默认路径：优先 `DAFEIYU_DATA_DIR`；否则用临时目录（fixture/无权限环境下
@@ -740,8 +737,13 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         }
 
         if effective.identityVConfig.enabled, inbound.chatType == "group", !singleTurn {
-            let plan = effective.identityV.plan(messages: [String(body.prefix(500))], hasReadableImage: false,
-                                                recentBotReplies: Array(recentReplies.suffix(2)), proactive: false)
+            // Only the full group reply uses dialogue planning. Keep its resource
+            // load off MainActor and leave single-turn replies to their own lookup.
+            let dialogue = sharedState == nil
+                ? identityVDialogueCache
+                : IdentityVDialogue(config: effective.identityVConfig)
+            let plan = dialogue.plan(messages: [String(body.prefix(500))], hasReadableImage: false,
+                                     recentBotReplies: Array(recentReplies.suffix(2)), proactive: false)
             if !plan.promptFragment.isEmpty { rule.prompt += "\n" + plan.promptFragment }
         }
         // 共享工具注入：第五人格赛程与三角洲物价，同样默认关闭且按会话 key 隔离。
