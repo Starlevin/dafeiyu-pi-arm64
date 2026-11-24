@@ -121,8 +121,9 @@
     e.status = status;
     return e;
   }
-  async function request(path, method, body) {
+  async function request(path, method, body, signal) {
     const opts = { method: method, credentials: 'same-origin', cache: 'no-store', headers: {} };
+    if (signal) opts.signal = signal;
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -283,6 +284,7 @@
   function showAuth(mode, opts) {
     $('authCard').hidden = false;
     $('console').hidden = true;
+    resetHostStatus();
     clearWeChatMemory();
     clearMemoryStorage();
     clearWeChatGroupPersonas();
@@ -314,6 +316,7 @@
   function showConsole() {
     $('authCard').hidden = true;
     $('console').hidden = false;
+    syncHostStatus();
     if (window.location.hash === '#hSettings') refreshChannels();
     if (window.location.hash === '#hDiagnostics') refreshDelivery();
     if (window.location.hash === '#hConversations') refreshWeChatMemory(true);
@@ -424,12 +427,21 @@
   async function onLogout() {
     if (state.busy) return;
     await run('正在退出…', async () => {
+      hostStatus.signingOut = true;
+      stopHostStatus();
       try {
         await apiPost('/api/logout', {});
-      } catch (e) { showFailure(e); return; }
+      } catch (e) {
+        hostStatus.signingOut = false;
+        showFailure(e);
+        syncHostStatus();
+        return;
+      }
       clearSecrets();
       state.overview = null;
       if (state.session) state.session.authenticated = false;
+      resetHostStatus();
+      hostStatus.signingOut = false;
       await loadSession('已退出登录'); // 合同：logout 后重新 GET /api/session 并显示登录
     });
   }
@@ -603,6 +615,201 @@
                 { at: state.lastLoadedAt });
     }
     return true;
+  }
+
+  // ---- 机器采样：只在已认证、可见的总览读取 ----------------------------------
+  const HOST_MISSING = '未采集';
+  const HOST_MIN_INTERVAL = 60000;
+  const HOST_SERVICES = [
+    ['qq', 'QQ'], ['wechatClient', '微信客户端'], ['wechatBridge', '微信桥接'],
+    ['core', '核心'], ['modelHub', '模型网关'], ['house', '家园'],
+  ];
+  const HOST_SERVICE_LABELS = new Map([
+    ['active', ['运行中', 'on']], ['inactive', ['已停止', 'off']],
+    ['failed', ['故障', 'error']], ['activating', ['启动中', 'warning']],
+    ['deactivating', ['停止中', 'warning']],
+  ]);
+  const HOST_CLOCK = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+  const hostStatus = {
+    timer: null, request: null, signingOut: false, nextReadAt: 0,
+    current: null, history: [], loaded: false,
+  };
+
+  function isHostSample(sample) {
+    return sample && num(sample.at) !== null && sample.at > 0 && sample.at <= 8640000000000;
+  }
+  function hostSampleTime(sample) { return HOST_CLOCK.format(new Date(sample.at * 1000)); }
+  function hostBytes(bytes) {
+    let value = bytes;
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    let index = 0;
+    while (value >= 1024 && index < units.length - 1) {
+      value /= 1024;
+      index++;
+    }
+    return value.toFixed(index === 0 ? 0 : 1) + ' ' + units[index];
+  }
+  function hostUsage(label, capacity) {
+    const used = capacity && num(capacity.usedBytes);
+    const total = capacity && num(capacity.totalBytes);
+    if (capacity && used === 0 && total === 0 && label === 'Swap') return [label, '未配置'];
+    if (!capacity || used === null || total === null || used < 0 || total <= 0 || used > total) {
+      return [label, HOST_MISSING];
+    }
+    const percent = used / total * 100;
+    return [label, percent.toFixed(1) + '%', hostBytes(used) + ' / ' + hostBytes(total), percent];
+  }
+  function hostUptime(seconds) {
+    if (seconds === null || seconds < 0) return HOST_MISSING;
+    if (seconds < 60) return Math.floor(seconds) + ' 秒';
+    const minutes = Math.floor(seconds / 60);
+    const days = Math.floor(minutes / 1440);
+    const hours = Math.floor(minutes % 1440 / 60);
+    const rest = minutes % 60;
+    return (days ? days + ' 天 ' : '') + (hours || days ? hours + ' 小时 ' : '') + rest + ' 分钟';
+  }
+  function renderHostStatus() {
+    const last = hostStatus.current;
+    const history = $('hostHistory');
+    const selected = hostStatus.history.find((sample) => String(sample.at) === history.value);
+    const sample = selected || last || {};
+    $('hostLastSample').textContent = '最近采样：' + (last ? hostSampleTime(last) : HOST_MISSING);
+    const cpu = num(sample.cpuPercent);
+    const percent = cpu !== null && cpu >= 0 && cpu <= 100 ? cpu : null;
+    const load = num(sample.load1);
+    const temp = num(sample.tempC);
+    const metrics = [
+      ['CPU', percent !== null ? percent.toFixed(1) + '%' : HOST_MISSING,
+        '1 分钟负载 ' + (load !== null && load >= 0 ? load.toFixed(2) : HOST_MISSING), percent],
+      hostUsage('内存', sample.memory),
+      ['温度', temp !== null ? temp.toFixed(1) + ' °C' : HOST_MISSING],
+      hostUsage('磁盘', sample.disk),
+      hostUsage('Swap', sample.swap),
+      ['开机时长', hostUptime(num(sample.uptimeSeconds))],
+    ];
+    const grid = $('hostMetrics');
+    clear(grid);
+    for (const [label, value, detail, fill] of metrics) {
+      const valueCell = node('dd');
+      valueCell.appendChild(node('span', 'host-metric-value', value));
+      if (detail) valueCell.appendChild(node('span', 'host-metric-detail', detail));
+      if (num(fill) !== null) {
+        const meter = node('progress');
+        meter.max = 100;
+        meter.value = fill;
+        meter.setAttribute('aria-hidden', 'true');
+        valueCell.appendChild(meter);
+      }
+      const metric = node('div', 'host-metric');
+      metric.append(node('dt', '', label), valueCell);
+      grid.appendChild(metric);
+    }
+    const services = $('hostServices');
+    clear(services);
+    for (const [key, title] of HOST_SERVICES) {
+      const value = sample.services && sample.services[key];
+      const [label, kind] = HOST_SERVICE_LABELS.get(value) || ['未确认', 'unknown'];
+      const item = node('li', 'host-service');
+      item.dataset.kind = kind;
+      const dot = node('span', 'host-service-dot');
+      dot.setAttribute('aria-hidden', 'true');
+      item.append(dot, node('span', '', title), node('span', 'host-service-state', label));
+      services.appendChild(item);
+    }
+  }
+  function renderHostHistory() {
+    const select = $('hostHistory');
+    const selectedAt = select.value;
+    const latest = node('option', '', '最新采样');
+    latest.value = '';
+    select.replaceChildren(latest);
+    const entries = document.createDocumentFragment();
+    for (const sample of hostStatus.history.slice().reverse()) {
+      const option = node('option', '', hostSampleTime(sample));
+      option.value = String(sample.at);
+      entries.appendChild(option);
+    }
+    select.appendChild(entries);
+    select.value = hostStatus.history.some((sample) => String(sample.at) === selectedAt) ? selectedAt : '';
+    select.disabled = hostStatus.history.length === 0;
+  }
+  function hostNotice(text) {
+    const message = $('hostStatusMessage');
+    message.textContent = text;
+    message.hidden = !text;
+  }
+  function canReadHostStatus() {
+    return state.session && state.session.authenticated && !hostStatus.signingOut &&
+      document.visibilityState === 'visible' && !$('console').hidden &&
+      !$('hostStatusCard').closest('[data-workspace-pane]').hidden;
+  }
+  function stopHostStatus() {
+    clearTimeout(hostStatus.timer);
+    hostStatus.timer = null;
+    const request = hostStatus.request;
+    if (request) {
+      hostStatus.request = null;
+      if (request.controller) request.controller.abort();
+      if (!hostStatus.loaded) hostStatus.nextReadAt = 0;
+    }
+  }
+  function resetHostStatus() {
+    stopHostStatus();
+    hostStatus.current = null;
+    hostStatus.history = [];
+    hostStatus.loaded = false;
+    hostStatus.nextReadAt = 0;
+    hostNotice('');
+    renderHostHistory();
+    renderHostStatus();
+  }
+  function syncHostStatus(refreshNow = false) {
+    if (!canReadHostStatus()) { stopHostStatus(); return; }
+    if (hostStatus.request) return;
+    clearTimeout(hostStatus.timer);
+    hostStatus.timer = null;
+    const wait = refreshNow ? 0 : hostStatus.nextReadAt - Date.now();
+    if (wait > 0) {
+      hostStatus.timer = setTimeout(() => syncHostStatus(), wait);
+      return;
+    }
+    readHostStatus();
+  }
+  async function readHostStatus() {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const reading = { controller: controller };
+    const deadline = controller ? setTimeout(() => controller.abort(), 12000) : null;
+    hostStatus.request = reading;
+    hostStatus.nextReadAt = Date.now() + HOST_MIN_INTERVAL;
+    if (!hostStatus.loaded) hostNotice('正在读取机器状态…');
+    try {
+      const data = await request('/api/host/status', 'GET', undefined, controller && controller.signal);
+      if (hostStatus.request !== reading || !canReadHostStatus()) return;
+      if (!data || data.ok !== true) throw apiError('读取未完成', 0);
+      hostStatus.current = isHostSample(data.current) ? data.current : null;
+      hostStatus.history = arr(data.history).slice(-1440).filter(isHostSample);
+      hostStatus.loaded = true;
+      const seconds = num(data.sampleSeconds);
+      hostStatus.nextReadAt = Date.now() + (seconds === null
+        ? HOST_MIN_INTERVAL : Math.max(HOST_MIN_INTERVAL, Math.min(3600, seconds) * 1000));
+      renderHostHistory();
+      renderHostStatus();
+      hostNotice(hostStatus.current ? '' : '暂无最新采样。');
+    } catch (error) {
+      if (hostStatus.request !== reading || !canReadHostStatus()) return;
+      if (error.status === 401) { handleUnauthorized(); return; }
+      hostNotice(hostStatus.current || hostStatus.history.length
+        ? '读取失败，已保留上次采样。' : '暂时无法读取机器状态，可用总览刷新重试。');
+    } finally {
+      clearTimeout(deadline);
+      if (hostStatus.request === reading) {
+        hostStatus.request = null;
+        syncHostStatus();
+      }
+    }
   }
 
   // ---- 渲染：平台卡片（连接 / 自动回复 / 客户端 / 模型 四项分开显示） -----------
@@ -1699,6 +1906,7 @@
         else link.removeAttribute('aria-current');
       });
       panes.forEach((pane) => { pane.hidden = pane.dataset.workspacePane !== target; });
+      syncHostStatus();
       if (target === 'hSettings') refreshChannels();
       else if ($('wechatAccount').open) {
         $('wechatAccount').open = false;
@@ -1722,14 +1930,21 @@
     wireAvatar();
     wireThemePicker();
     wireFilters();
+    renderHostStatus();
     const actions = document.querySelectorAll('button[data-action]');
     for (let i = 0; i < actions.length; i++) enable(actions[i], true);
 
     $('setupForm').addEventListener('submit', onSetupSubmit);
     $('loginForm').addEventListener('submit', onLoginSubmit);
     $('passwordForm').addEventListener('submit', onPasswordSubmit);
-    $('refreshBtn').addEventListener('click', () => { if (!state.busy) loadOverview(); });
+    $('refreshBtn').addEventListener('click', () => {
+      if (state.busy) return;
+      loadOverview();
+      syncHostStatus(true);
+    });
     $('logoutBtn').addEventListener('click', onLogout);
+    $('hostHistory').addEventListener('change', renderHostStatus);
+    document.addEventListener('visibilitychange', () => syncHostStatus());
     $('wechatMemory').addEventListener('toggle', () => refreshWeChatMemory(true));
     $('memoryStorage').addEventListener('toggle', () => {
       if ($('memoryStorage').open) refreshMemoryStorage();

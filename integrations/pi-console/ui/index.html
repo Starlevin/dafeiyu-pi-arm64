@@ -7,12 +7,12 @@
 <meta name="theme-color" content="#eef2f7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#151b26" media="(prefers-color-scheme: dark)">
 <title>大肥鱼统一控制台</title>
-<link rel="stylesheet" href="app.css?v=workspace-4">
+<link rel="stylesheet" href="app.css?v=workspace-5">
 <link rel="stylesheet" href="usage.css">
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js?v=workspace-8"></script>
+<script src="app.js?v=workspace-9"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
 <script src="social.js" defer></script>
@@ -109,6 +109,24 @@
         <span>打开动态家园 <span aria-hidden="true">↗</span></span>
       </a>
       <div class="platform-grid" id="platformGrid"></div>
+      <section class="card host-status-card" id="hostStatusCard" aria-labelledby="hostStatusTitle">
+        <div class="host-status-head">
+          <div>
+            <h3 class="card-title" id="hostStatusTitle">机器状态</h3>
+            <p class="card-note" id="hostLastSample">最近采样：未采集</p>
+          </div>
+          <label class="host-history-select">
+            <span>采样回看</span>
+            <select class="select" id="hostHistory" disabled>
+              <option value="">最新采样</option>
+            </select>
+          </label>
+        </div>
+        <p class="card-note" id="hostStatusMessage" role="status" hidden></p>
+        <dl class="host-metrics" id="hostMetrics"></dl>
+        <h4 class="host-services-title">服务状态</h4>
+        <ul class="host-services" id="hostServices"></ul>
+      </section>
     </section>
 
     <section class="section" data-workspace-pane="hConversations" aria-labelledby="hConversations">

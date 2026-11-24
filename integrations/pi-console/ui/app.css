@@ -437,6 +437,73 @@ main.wrap { padding-top: 40px; padding-bottom: 56px; }
   font-weight: 650;
 }
 .workspace-home > span span { margin-left: 6px; }
+.host-status-card { margin-top: 18px; }
+.host-status-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px 20px;
+  margin-bottom: 16px;
+}
+.host-status-head .card-title { font-size: 17px; margin: 0 0 4px; }
+.host-status-head .card-note { margin: 0; }
+.host-history-select {
+  display: grid;
+  gap: 3px;
+  flex: 0 1 206px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+.host-history-select .select { width: 100%; }
+.host-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr));
+  gap: 10px;
+  margin: 0;
+}
+.host-metric {
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+}
+.host-metric dt { color: var(--ink-soft); font-size: 12.5px; }
+.host-metric dd { margin: 4px 0 0; overflow-wrap: anywhere; }
+.host-metric-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+.host-metric-detail { display: block; color: var(--muted); font-size: 12px; }
+.host-metric progress { width: 100%; height: 6px; display: block; margin-top: 7px; accent-color: var(--accent); }
+.host-services-title { font-size: 13px; margin: 16px 0 8px; }
+.host-services {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 128px), 1fr));
+  gap: 8px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.host-service {
+  display: flex;
+  gap: 4px 6px;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.host-service-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.host-service[data-kind="on"] .host-service-dot { background: var(--ok-fg); }
+.host-service[data-kind="warning"] .host-service-dot { background: var(--warn-fg); }
+.host-service[data-kind="error"] .host-service-dot { background: var(--err-fg); }
+.host-service-state { margin-left: auto; color: var(--ink-soft); white-space: nowrap; }
+@media (max-width: 480px) {
+  .host-metrics, .host-services { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .host-history-select { flex: 1 1 100%; }
+}
 .channel-inventory { margin: 0 0 16px; color: var(--ink-soft); }
 .channel-row {
   display: grid;
