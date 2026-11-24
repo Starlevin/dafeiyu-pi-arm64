@@ -716,8 +716,8 @@ def _bieye_search_overlay_visible(app):
     """
     if app is None:
         return False
-    for node, _ in _walk_showing(app, maxd=13, skip_lists=True):
-        if role(node) != "list" or nm(node):
+    for node, _, node_role in _walk_showing(app, maxd=13, skip_lists=True, include_role=True):
+        if node_role != "list" or nm(node):
             continue
         rect = ext(node)
         if rect and 110 <= rect[0] <= 145 and 115 <= rect[1] <= 140 and 300 <= rect[2] <= 340 and 320 <= rect[3] <= 420:
@@ -754,24 +754,32 @@ def group_is_open(app, name):
     return visible_group_title(app) == name and len(visible_chat_matches(app, name)) == 1
 
 
-def open_chat(app, name):
+def open_chat(app, name, *, measure=False):
+    started = time.monotonic()
+    timeout = .4
     if name == "别野":
         if not _dismiss_bieye_search_overlay(app):
             return False
         app = get_app()
+        timeout += .25 * 3
+    overlay_checked = time.monotonic()
     matches = visible_chat_matches(app, name)
     if len(matches) != 1:
         return False
     x, y, w, h = matches[0]
-    xi.click(x + min(40, w // 2), y + h // 2)
-    if name == "别野":
-        # Qt title update may lag click; read only, never repeat the click.
-        for _ in range(3):
-            if group_is_open(get_app(), name):
-                return True
-            time.sleep(0.25)
-        return False
-    return group_is_open(get_app(), name)
+    click_started = time.monotonic()
+    xi.click(x + min(40, w // 2), y + h // 2, settle=0)
+    click_finished = time.monotonic()
+    # Qt can expose the new group immediately or after rendering. Every
+    # observation must prove the group, and no retries issue another click.
+    opened, _ = _wait_for_state(lambda: group_is_open(get_app(), name), timeout, .125)
+    if measure:
+        log("group_navigation_timing", opened=opened,
+            overlay_ms=int((overlay_checked - started) * 1000),
+            sidebar_lookup_ms=int((click_started - overlay_checked) * 1000),
+            navigation_click_ms=int((click_finished - click_started) * 1000),
+            scope_proof_ms=int((time.monotonic() - click_finished) * 1000))
+    return opened
 
 
 _search_field_cache = (None, None)
@@ -3046,7 +3054,8 @@ def main():
                             log("wal_verified_empty_refresh_scan", attempt=attempt)
                     else:
                         verified_scope_open = group_is_open(app, target)
-                        if not verified_scope_open and not open_chat(app, target):
+                        if not verified_scope_open and not open_chat(
+                                app, target, measure=target in changed_targets):
                             continue
                 read_started = time.monotonic()
                 bounds, rows = read_messages(app)

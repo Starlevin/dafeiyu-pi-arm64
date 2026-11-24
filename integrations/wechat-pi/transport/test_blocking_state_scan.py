@@ -77,6 +77,18 @@ def legacy_blocking_state(root):
 
 
 class BlockingStateScanTests(unittest.TestCase):
+    def test_overlay_scan_reuses_roles_and_still_finds_a_visible_search_list(self):
+        hidden = FakeNode("list", showing=False, rect=(110, 115, 300, 320))
+        regular = FakeNode("list", "Chats")
+        overlay = FakeNode("list", rect=(110, 115, 300, 320))
+        root = FakeNode("frame", children=(hidden, regular, overlay))
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING),
+                                CoordType=SimpleNamespace(SCREEN="screen"))
+        with patch.object(bridge, "Atspi", atspi):
+            self.assertTrue(bridge._bieye_search_overlay_visible(root))
+        self.assertEqual(hidden.role_calls, 0)
+        self.assertEqual([node.role_calls for node in (root, regular, overlay)], [1, 1, 1])
+
     def scan(self, root):
         atspi = SimpleNamespace(
             StateType=SimpleNamespace(SHOWING=SHOWING),

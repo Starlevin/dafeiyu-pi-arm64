@@ -274,6 +274,45 @@ class WalGroupReadPlanningTests(unittest.TestCase):
                  patch.object(bridge, "visible_chat_matches", return_value=matches):
                 self.assertEqual(bridge.group_is_open(object(), "夹具群"), expected)
 
+    def test_navigation_returns_on_fresh_scope_proof_without_fixed_delay(self):
+        target = "fixture-group"
+        app = object()
+        elapsed = 0.0
+
+        def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        with patch.object(bridge, "get_app", return_value=app), \
+             patch.object(bridge, "visible_chat_matches", return_value=[(110, 24, 280, 48)]), \
+             patch.object(bridge, "visible_group_title", side_effect=lambda _app: target if elapsed else "other"), \
+             patch.object(bridge.xi, "click", create=True) as click, \
+             patch.object(bridge.time, "monotonic", side_effect=lambda: elapsed), \
+             patch.object(bridge.time, "sleep", side_effect=sleep):
+            self.assertTrue(bridge.open_chat(app, target))
+        click.assert_called_once_with(150, 48, settle=0)
+        self.assertEqual(elapsed, .125)
+
+    def test_navigation_ambiguity_after_click_fails_without_clicking_again(self):
+        target = "fixture-group"
+        app = object()
+        elapsed = 0.0
+        rect = (110, 24, 280, 48)
+
+        def sleep(delay):
+            nonlocal elapsed
+            elapsed += delay
+
+        with patch.object(bridge, "get_app", return_value=app), \
+             patch.object(bridge, "visible_group_title", return_value=target), \
+             patch.object(bridge, "visible_chat_matches", side_effect=[[rect]] + [[rect, rect]] * 5), \
+             patch.object(bridge.xi, "click", create=True) as click, \
+             patch.object(bridge.time, "monotonic", side_effect=lambda: elapsed), \
+             patch.object(bridge.time, "sleep", side_effect=sleep):
+            self.assertFalse(bridge.open_chat(app, target))
+        click.assert_called_once()
+        self.assertAlmostEqual(elapsed, .4)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
