@@ -895,14 +895,14 @@
         " · 评分拒绝 " + (c.score_rejected || 0) + " · 评分跳过 " + (c.score_skipped || 0) +
         " · 评分后拦截 " + c.score_after_reject + " · 入队 " + c.enqueued +
         " · 发送确认 " + c.confirmed + (funnel.truncated ? "（部分日志）" : "")));
-      function appendReasonSummary(label, source) {
+      function appendReasonSummary(label, source, names) {
         var rows = Object.keys(source || {}).filter(function (reason) {
           return /^[a-z0-9_-]{1,48}$/.test(reason) && Number.isFinite(source[reason]) && source[reason] > 0;
         }).map(function (reason) { return [reason, source[reason]]; });
         rows.sort(function (a, b) { return b[1] - a[1] || a[0].localeCompare(b[0]); });
         if (rows.length) {
           panel.appendChild(makeEl("p", "fh-note", label + " · " + rows.slice(0, 8).map(function (row) {
-            return row[0] + " " + row[1];
+            return ((names && names[row[0]]) || row[0]) + " " + row[1];
           }).join(" · ")));
         }
       }
