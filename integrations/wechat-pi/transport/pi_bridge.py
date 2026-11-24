@@ -2225,6 +2225,20 @@ def _make_row_side_fn(bounds, seed=None):
     return cache, row_side
 
 
+def _composer_has_text(app):
+    """Skip optional replies if the visible composer is already occupied."""
+    if app is None:
+        return False
+    try:
+        node, _ = composer(app)
+        reader = node.get_text_iface() if node is not None else None
+        return reader is not None and reader.get_character_count() > 0
+    except Exception:
+        # Unknown is not evidence of a draft. The existing send guard
+        # still requires a verified, empty composer before writing.
+        return False
+
+
 def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                 public_question_settler=None, public_question_settled_trace=None,
                 *, rows_observed_at=None):
@@ -2399,6 +2413,9 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             record(health, "queue", "queue_full", trace, failed=True)
         else:
             if auto_candidate:
+                if _composer_has_text(app):
+                    log("auto_candidate", reason="composer_not_empty")
+                    continue
                 if not settled_candidate:
                     limiter = getattr(args, "auto_limiter", None)
                     if limiter is None or not limiter.take(time.monotonic()):

@@ -70,7 +70,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
     def ingest_rows(self, rows, *, queue_size=4, mention=None, limiter=None,
                     proven=None, jobs=None, health=None, public_question_settler=None,
                     settled_trace=None, swift_route=False, monotonic=123.0,
-                    cooldown_config=None, rows_observed_at=None):
+                    cooldown_config=None, rows_observed_at=None, app=None):
         jobs = jobs or Queue(maxsize=queue_size)
         self.args.auto_limiter = limiter or Mock(take=Mock(return_value=True))
         self.configure(True)
@@ -90,7 +90,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                 "http://127.0.0.1:41143", {"x-unified-token": "fixture-token"}))
         with patch.multiple(bridge, **patches), \
              patch.object(bridge.time, "monotonic", return_value=monotonic):
-            result = bridge.handle_rows(None, rows, 0, (0, 0, 500, 500),
+            result = bridge.handle_rows(app, rows, 0, (0, 0, 500, 500),
                                         GROUP, self.args, jobs, health,
                                         public_question_settler=public_question_settler,
                                         public_question_settled_trace=settled_trace,
@@ -216,6 +216,47 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertTrue(payload["group_auto_reply_public_question_settled"])
         self.assertEqual(payload["group_auto_reply_public_question_cooldown_seconds"], 240)
         self.assertEqual(payload["msg_id"], trace)
+
+    def test_occupied_composer_skips_both_proactive_routes_without_consuming_limiter(self):
+        reader = Mock(get_character_count=Mock(return_value=7))
+        composer = Mock(return_value=(Mock(get_text_iface=Mock(return_value=reader)), None))
+        limiter = Mock(take=Mock(return_value=True))
+        settler = bridge.PublicQuestionSettleQueue()
+        rows = [("夹具普通闲聊消息", (1, 1, 2, 2))]
+        app = object()
+        with patch.object(bridge, "composer", composer):
+            accepted, jobs = self.ingest_rows(rows, limiter=limiter, app=app)
+            self.assertFalse(accepted)
+            self.assertTrue(jobs.empty())
+            _, jobs = self.ingest_rows(rows, public_question_settler=settler,
+                                       swift_route=True, app=app)
+            self.assertTrue(jobs.empty())
+            accepted, jobs = self.ingest_rows(
+                rows, limiter=limiter, public_question_settler=settler,
+                settled_trace=settler.pending(GROUP).trace, swift_route=True,
+                monotonic=124.5, app=app)
+            self.assertFalse(accepted)
+            self.assertTrue(jobs.empty())
+            accepted, jobs = self.ingest_rows(rows, mention="明确提问", app=app)
+            self.assertTrue(accepted)
+            self.assertFalse(jobs.get_nowait()[2].get("group_auto_reply", False))
+        self.assertEqual(composer.call_args_list, [unittest.mock.call(app)] * 2)
+        reader.get_text.assert_not_called()
+        limiter.take.assert_not_called()
+
+    def test_unknown_or_empty_composer_keeps_normal_proactive_admission(self):
+        for result in (0, RuntimeError("unreadable")):
+            with self.subTest(result=result):
+                get_count = (Mock(side_effect=result) if isinstance(result, Exception)
+                             else Mock(return_value=result))
+                node = SimpleNamespace(get_text_iface=lambda: SimpleNamespace(
+                    get_character_count=get_count))
+                with patch.object(bridge, "composer", return_value=(node, None)):
+                    accepted, jobs = self.ingest_rows(
+                        [("夹具普通闲聊消息", (1, 1, 2, 2))], app=object())
+                self.assertTrue(accepted)
+                self.assertTrue(jobs.get_nowait()[2]["group_auto_reply"])
+                get_count.assert_called_once()
 
     def test_native_mention_bypasses_settlement_and_feature_off_keeps_old_limiter(self):
         limiter = Mock(take=Mock(return_value=True))
