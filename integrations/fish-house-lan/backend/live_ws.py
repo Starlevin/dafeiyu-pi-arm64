@@ -494,15 +494,32 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
 
 
 def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
-                  now: float) -> EvidenceSnapshot:
-    """Prefer a verified non-idle stage; the most recent source wins ties."""
+                  now: float, last_sent_at: dict[str, float] | None = None,
+                  current_event: tuple[str, str, float] | None = None) -> EvidenceSnapshot:
+    """Prefer recent verified activity and retain overlapping delivery receipts."""
     wx = wechat_evidence(live, now=now)
     qq = qq_evidence(live, panel, now=now)
     active = [candidate for candidate in (wx, qq)
               if candidate.evidence == EVIDENCE_VERIFIED and candidate.phase != "idle"]
+    if last_sent_at is not None:
+        active = [candidate for candidate in active
+                  if candidate.phase != "sent" or candidate.at <= 0
+                  or candidate.at > last_sent_at.get(candidate.source, 0.0)
+                  or (candidate.source, candidate.phase, candidate.at) == current_event]
+        if len(active) == 2 and all(candidate.phase == "sent" and candidate.at > 0 for candidate in active):
+            # Both platforms can confirm between ticks. Deliver each new
+            # receipt once, before the newer snapshot obscures the older one.
+            unseen = [candidate for candidate in active
+                      if candidate.at > last_sent_at.get(candidate.source, 0.0)]
+            if unseen:
+                return min(unseen, key=lambda candidate: candidate.at)
     if active:
         return max(active, key=lambda candidate: candidate.at)
-    return qq if qq.evidence == EVIDENCE_DEGRADED else wx
+    idle = qq if qq.evidence == EVIDENCE_DEGRADED else wx
+    if idle.phase == "sent":
+        return EvidenceSnapshot(idle.source, "idle", idle.evidence,
+                                reason="receipt_already_presented", at=now)
+    return idle
 
 
 def pending_qq_ingress(panel: dict[str, Any] | None, *, after: float, now: float) -> float:
@@ -552,6 +569,7 @@ class LiveBridge:
         self._reason = ""
         # Dedupe key = (source, phase, real event timestamp).
         self._last_key: tuple[str, str, float] | None = None
+        self._last_sent_at: dict[str, float] = {}
         self._last_qq_ingress_at = 0.0
         self._last_ts = 0.0
         self._thread: threading.Thread | None = None
@@ -686,7 +704,8 @@ class LiveBridge:
             except Exception:
                 panel = None
 
-        evidence = pick_evidence(live, panel, now=now)
+        evidence = pick_evidence(live, panel, now=now, last_sent_at=self._last_sent_at,
+                                 current_event=self._last_key)
         if preserve_qq_ingress and evidence.source == "qq" and evidence.reason in ("active_chat", "active_tool"):
             ingress_at = pending_qq_ingress(panel, after=self._last_qq_ingress_at, now=now)
             if ingress_at:
@@ -795,6 +814,8 @@ class LiveBridge:
                         "orders": goto,
                     }))
                 frames.append(self._wrap("state", evidence, payload))
+                if phase == "sent" and evidence.at > 0:
+                    self._last_sent_at[evidence.source] = evidence.at
                 return frames
 
         # 2) 同一阶段内气泡到期：只发一次清空，不重复。

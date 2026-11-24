@@ -237,10 +237,18 @@ async function main() {
     await cdp.js(`window.__fishHouseLive.apply(${JSON.stringify(Object.assign({},orderedFrame,{type:"state",seq:seq++}))}, false)`);
     const orderedState = await cdp.js("window.__fishHouseLive.getState()");
     check("ordered graph orders play adjacent nodes without expanding or duplicating a fast repeat", orderedState.pendingNode === pickupNode.id && JSON.stringify(orderedState.queued) === JSON.stringify([phoneNode.id,putdownNode.id,waitNode.id]), JSON.stringify(orderedState));
+    const secondReceipt = { ...orderedFrame, source: "wechat", seq: seq++ };
+    await cdp.js(`window.__fishHouseLive.apply(${JSON.stringify(secondReceipt)}, false)`);
+    await cdp.js(`window.__fishHouseLive.apply(${JSON.stringify({ ...secondReceipt, type: "state", seq: seq++ })}, false)`);
+    const twoReceipts = await cdp.js("window.__fishHouseLive.getState()");
+    const secondPath = [pickupNode.id, phoneNode.id, putdownNode.id, waitNode.id];
+    check("confirmed receipts from both platforms queue separately even with the same timestamp",
+      JSON.stringify(twoReceipts.queued.slice(-4)) === JSON.stringify(secondPath)
+      && twoReceipts.queued.filter(id => id === putdownNode.id).length === 2, JSON.stringify(twoReceipts));
     await until(async () => {
       const state = await cdp.js("window.__fishHouseLive.getState()");
       return state.currentNode === waitNode.id && !state.pendingNode && !state.queued.length;
-    }, "ordered action cycle completes before reconnect", 25000);
+    }, "both ordered action cycles complete before reconnect", 40000);
     check("bubble can be disabled and cloned config remains live", await cdp.js("window.__fishHouseLive.getState().themeId === 'live-test-clone' && getComputedStyle(document.getElementById('bubble')).opacity === '0'"), "theme loaded, bubble disabled");
     const beforeHome = await (await fetch(`http://127.0.0.1:${PORT}/fish_house/home.html`)).status;
     check("existing home.html remains available", beforeHome === 200, "HTTP " + beforeHome);

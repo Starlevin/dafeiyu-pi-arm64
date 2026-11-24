@@ -377,6 +377,43 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(live_ws.pick_evidence(idle, None, now=NOW).evidence,
                          live_ws.EVIDENCE_DEGRADED)
 
+    def test_two_fresh_receipts_between_ticks_are_each_published_once(self):
+        live = self.live(wx={"activity_state": "sent", "activity_at": NOW - 1})
+        panel = {"runtimeRecords": [{"state": "confirmed", "timestamp": NOW - 2, "_chat": True}]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: live, lambda: panel)
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            self.assertEqual(bridge.state_snapshot()["source"], "qq")
+            for source, stamp in (("qq", NOW - 2), ("wechat", NOW - 1)):
+                frames = bridge.produce()
+                self.assertEqual([frame["type"] for frame in frames], ["flow_goto", "state"])
+                self.assertEqual([(f["source"], f["phase"], f["event_at"]) for f in frames],
+                                 [(source, "sent", stamp)] * 2)
+                self.assertEqual([o["node_id"] for o in frames[-1]["orders"]],
+                                 ["pick", "ph1", "put", "w1"])
+            self.assertEqual(bridge.state_snapshot()["source"], "wechat")
+            self.assertEqual(bridge.produce(), [])
+
+    def test_presented_receipt_does_not_resume_after_another_source_interrupts(self):
+        live = self.live(wx={"activity_state": "sent", "activity_at": NOW - 2},
+                         qq={"service_running": True})
+        records = []
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: live,
+                                    lambda: {"runtimeRecords": records})
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            first = bridge.produce()[-1]
+            self.assertEqual((first["source"], first["phase"]), ("wechat", "sent"))
+            records.append({"state": "generating", "timestamp": NOW - 1, "_active": True})
+            interrupted = bridge.produce()[-1]
+            self.assertEqual((interrupted["source"], interrupted["phase"]), ("qq", "thinking"))
+            records.clear()
+            self.assertEqual(bridge.state_snapshot()["phase"], "idle")
+            self.assertEqual(bridge.produce()[-1]["phase"], "idle")
+            self.assertEqual(bridge.produce(), [])
+            live["wechat"]["activity_at"] = NOW - 0.5
+            fresh = bridge.produce()[-1]
+            self.assertEqual((fresh["source"], fresh["phase"], fresh["event_at"]),
+                             ("wechat", "sent", NOW - 0.5))
+
 
 # ------------------------------------------------------------------ framing
 class FramingTests(unittest.TestCase):
