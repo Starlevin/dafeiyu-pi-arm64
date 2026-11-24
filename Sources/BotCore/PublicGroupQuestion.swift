@@ -7,19 +7,20 @@
 // configuration and adds no dependencies.
 //
 // The decision is compositional and conservative: a message must survive all
-// exclusions and simultaneously carry (1) a collective address, (2) a question
-// form and (3) concrete content left over after removing the question
-// scaffolding. There is no numeric score and no broad keyword recall.
+// exclusions and carry a concrete topic plus either a collective address or an
+// unaddressed, explicit how-to or factual question. The caller still proves
+// that the question is fresh, unanswered and in an enabled group.
 
 public enum PublicGroupQuestion {
     public static func matches(_ text: String) -> Bool {
         let body = normalize(text)
         guard !body.isEmpty else { return false }
         guard !isExcluded(body) else { return false }
-        guard hasGroupAddressee(body) else { return false }
         guard hasQuestionForm(body) else { return false }
-        guard hasConcreteContent(body) else { return false }
-        return true
+        if containsAny(body, groupAddressMarkers) {
+            return hasGroupAddressee(body) && hasConcreteContent(body)
+        }
+        return isUnaddressedFactualQuestion(body)
     }
 
     // MARK: - Normalization
@@ -161,7 +162,6 @@ public enum PublicGroupQuestion {
     ]
 
     private static func hasGroupAddressee(_ body: String) -> Bool {
-        guard containsAny(body, groupAddressMarkers) else { return false }
         var clauseStart = body.startIndex
         var i = body.startIndex
         while i < body.endIndex {
@@ -175,6 +175,23 @@ public enum PublicGroupQuestion {
             i = body.index(after: i)
         }
         return !containsAny(String(body[clauseStart...]), directedPersonMarkers)
+    }
+
+    private static let factualQuestionForms: [String] = [
+        "什么时候", "什么情况下", "什么原因", "什么意思", "是什么梗", "什么梗",
+        "哪来的", "从哪来", "在哪里", "在哪里看", "在哪查", "哪里看", "哪里下载",
+        "怎么解决", "怎么修复", "怎么处理", "怎么配置", "怎么设置", "怎么判断",
+        "怎么查看", "怎么操作", "怎么计算", "怎么安装", "怎么使用", "如何",
+        "how do i", "how can i", "what does", "when should", "where can i"
+    ]
+
+    private static func isUnaddressedFactualQuestion(_ body: String) -> Bool {
+        // A comma or colon can introduce a named person's question. Bare
+        // questions use a single clause and cannot address the second person.
+        guard body.hasSuffix("?"), !body.contains(where: { "，,、:；;。!\n\r".contains($0) }),
+              !body.contains("你"), !body.split(whereSeparator: { !$0.isLetter }).contains("you"),
+              containsAny(body, factualQuestionForms) else { return false }
+        return hasConcreteContent(removing(body, factualQuestionForms))
     }
 
     private static let questionStarts: [String] = [

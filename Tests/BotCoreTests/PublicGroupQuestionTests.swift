@@ -22,8 +22,10 @@ struct PublicGroupQuestionTests {
         }
     }
 
-    @Test func identityVTerminologyRequiresAnExplicitCollectiveQuestion() {
+    @Test func identityVTerminologyCanAnswerAnUnaddressedFactualQuestion() {
         #expect(PublicGroupQuestion.matches("各位，第五人格什么时候该压机？"))
+        #expect(PublicGroupQuestion.matches("第五人格救人位什么时候该压机？"))
+        #expect(PublicGroupQuestion.matches("厂长开会是什么梗？"))
         #expect(!PublicGroupQuestion.matches("这把压机压得真及时"))
         #expect(!PublicGroupQuestion.matches("压机"))
         #expect(!PublicGroupQuestion.matches("请问大家觉得压机这个梗怎么样？"))
@@ -102,10 +104,18 @@ struct PublicGroupQuestionTests {
         }
     }
 
-    @Test func addresseeIsRequiredAndNotSatisfiedByAQuestionAlone() {
-        #expect(!PublicGroupQuestion.matches("这个报错怎么解决？"))
-        #expect(!PublicGroupQuestion.matches("How do I fix this build error?"))
+    @Test func acceptsUnaddressedHowToButRejectsNamedAndVagueQuestions() {
+        #expect(PublicGroupQuestion.matches("这个报错怎么解决？"))
+        #expect(PublicGroupQuestion.matches("How do I fix this build error?"))
         #expect(PublicGroupQuestion.matches("大家知道这个报错怎么解决吗？"))
+        #expect(!PublicGroupQuestion.matches("小王，第五人格什么时候该压机？"))
+        #expect(!PublicGroupQuestion.matches("老王:这个报错怎么解决？"))
+        #expect(!PublicGroupQuestion.matches("那你知道第五人格什么时候该压机？"))
+        #expect(!PublicGroupQuestion.matches("What does that remind you of?"))
+        #expect(!PublicGroupQuestion.matches("什么时候？"))
+        #expect(!PublicGroupQuestion.matches("怎么解决？"))
+        #expect(!PublicGroupQuestion.matches("玩不玩？"))
+        #expect(!PublicGroupQuestion.matches("第五人格什么时候该压机"))
     }
 
     @Test func normalizationIsRobustForFullwidthAndSeparators() {
