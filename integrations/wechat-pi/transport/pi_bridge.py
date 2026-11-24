@@ -1180,19 +1180,22 @@ def same_sender_image(first_rect, second_rect, bounds, target):
     return _avatar_fuzzy_match(first_rect, second_rect, first[0])
 
 
-def composer(a):
-    ml = messages_list(a)
-    if ml is None:
-        return None, None
-    me = ext(ml)
+def composer(a, message_view=None):
+    if message_view is None:
+        ml = messages_list(a)
+        me = ext(ml) if ml is not None else None
+    else:
+        ml, me = message_view
+        if ml is None or not showing(ml):
+            return None, None
     if not me:
         return None, None
     bottom = me[1] + me[3]
     pane = ancestor(ml, 3)
     if pane is None:
         return None, None
-    for n, _ in _walk_showing(pane, skip_lists=True):
-        if role(n) == "text":
+    for n, _, node_role in _walk_showing(pane, skip_lists=True, include_role=True):
+        if node_role == "text":
             e = ext(n)
             if e and e[1] >= bottom - 20 and e[2] > 300:
                 return n, e
@@ -1210,12 +1213,13 @@ def _tx_composer_fp(node):
         return None
 
 
-def _tx_header_info(app, target):
+def _tx_header_info(app, target, message_view=None):
     """Read the current title and independently count showing target labels."""
-    ml = messages_list(app)
-    if ml is None:
-        return None
-    me = ext(ml)
+    if message_view is None:
+        ml = messages_list(app)
+        me = ext(ml) if ml is not None else None
+    else:
+        ml, me = message_view
     if not me:
         return None
     pane = ancestor(ml, 4)
@@ -1280,23 +1284,29 @@ def _tx_chats_info(app, target):
     return len(matches), selected, selected_matches
 
 
-def _tx_observe(target):
-    """从实时 AT-SPI 状态构造 tx_guard 所需的核验数据。"""
+def _tx_observe(target, text_composer=None):
+    """Read fresh tx evidence. A text send keeps its original input control pinned."""
     if tx_guard is None:
         return {"ok": False, "reason": "tx_guard_module_missing"}
     app = get_app()
     if app is None:
         return {"ok": False, "reason": "client_unavailable", "app_ok": False}
     try:
-        header = _tx_header_info(app, target)
+        if text_composer and app != text_composer["app"]:
+            return {"ok": False, "reason": "client_changed", "app_ok": True}
+        ml = messages_list(app)
+        view = (ml, ext(ml) if ml is not None else None)
+        header = _tx_header_info(app, target, view)
         if header is None:
             return {"ok": False, "reason": "header_unreadable", "app_ok": True}
         visible_matches, selected, selected_matches = _tx_chats_info(app, target)
         if selected is None or visible_matches is None:
             return {"ok": False, "reason": "selected_unreadable", "app_ok": True}
-        node, _ = composer(app)
+        node, rect = composer(app, view)
         if node is None:
             return {"ok": False, "reason": "composer_missing", "app_ok": True}
+        if text_composer and (node != text_composer["node"] or rect != text_composer["rect"]):
+            return {"ok": False, "reason": "composer_replaced", "app_ok": True}
         reader = node.get_text_iface()
         editor = node.get_editable_text_iface()
         draft = Atspi.Text.get_text(reader, 0, -1) if reader is not None else None
@@ -1308,6 +1318,9 @@ def _tx_observe(target):
             return {"ok": False, "reason": "blocking_state:" + blocked, "app_ok": True}
         raw_title = header["raw_title"]
         group_suffix = bool(raw_title and tx_guard.norm_target(raw_title) != raw_title)
+        fp = _tx_composer_fp(node)
+        if text_composer is not None and not text_composer:
+            text_composer.update(app=app, node=node, rect=rect, reader=reader, editor=editor, fp=fp)
         return {
             "ok": True,
             "app_ok": True,
@@ -1320,7 +1333,7 @@ def _tx_observe(target):
             "selected_matches": selected_matches,
             "draft": draft,
             "char_count": char_count,
-            "composer_fp": _tx_composer_fp(node),
+            "composer_fp": fp,
             "composer_editor_ok": editor is not None,
             # Qt AT-SPI 对图片只暴露通用 \ufffc，无法证明附件归属本程序独占。
             "media_identity_proven": False,
@@ -1361,14 +1374,14 @@ def _tx_observe_light(target):
                 "app_ok": True}
 
 
-def _tx_new_guard(target, expected_scope=None):
+def _tx_new_guard(target, expected_scope=None, *, observe=None):
     """构造一次发送的守卫；默认 samples=1 并启用轻量门回调降低 Pi AT-SPI 时延。"""
     if tx_guard is None:
         return None
     samples = int(os.environ.get("DAFEIYU_WECHAT_TX_SAMPLES", "1"))
     gap = float(os.environ.get("DAFEIYU_WECHAT_TX_GAP_S", "0"))
     return tx_guard.TxGuard(
-        target, lambda: _tx_observe(target),
+        target, observe if observe is not None else lambda: _tx_observe(target),
         observe_light=lambda: _tx_observe_light(target),
         samples=samples, gap_s=gap, expected_scope=expected_scope)
 
@@ -1684,7 +1697,7 @@ def _wait_for_state(predicate, timeout, poll, *, clock=None, sleep=None):
     return False, monotonic() - started
 
 
-def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
+def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memory_account=None):
     pre_return_started = time.monotonic()
     pre_return_timing = {
         "before_send_identity_ms": 0, "composer_lookup_ms": 0,
@@ -1696,27 +1709,21 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
     }
     # 门 0（发送前）：独立核验唯一 SELECTED 行、标题唯一性、同名歧义、无弹窗与草稿空。
     stage_started = time.monotonic()
-    guard = _tx_new_guard(target)
+    original = {}
+    guard = _tx_new_guard(target, observe=lambda: _tx_observe(target, original))
     if guard is None:
         return "tx_guard_missing"
     g = guard.before_send()
     if not g.allow:
         return "tx_denied:" + g.reason
-    app = get_app()
-    if app is None or chat_title(app) != target:
+    app = original.get("app")
+    if app is None or get_app() != app or chat_title(app) != target:
         return "target_changed"
     pre_return_timing["before_send_identity_ms"] = int(
         (time.monotonic() - stage_started) * 1000)
     stage_started = time.monotonic()
-    node, rect = composer(app)
-    pre_return_timing["composer_lookup_ms"] = int(
-        (time.monotonic() - stage_started) * 1000)
-    if node is None:
-        return "composer_missing"
-    stage_started = time.monotonic()
-    own_fp = _tx_composer_fp(node)
-    reader = node.get_text_iface()
-    editor = node.get_editable_text_iface()
+    rect, own_fp = original["rect"], original["fp"]
+    reader, editor = original["reader"], original["editor"]
     if reader is None or editor is None or reader.get_character_count() != 0:
         return "composer_unavailable"
     pre_return_timing["composer_setup_ms"] = int(
@@ -1769,12 +1776,7 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
             time.sleep(DRAFT_SETTLE_S)
         pre_return_timing["draft_settle_ms"] = int(
             (time.monotonic() - stage_started) * 1000)
-        stage_started = time.monotonic()
-        if chat_title(app) != target or Atspi.Text.get_text(reader, 0, -1) != text:
-            return "draft_mismatch"
-        pre_return_timing["draft_validation_ms"] = int(
-            (time.monotonic() - stage_started) * 1000)
-        # 门 2（按 Return 前）：完整复核目标身份与草稿精确匹配；
+        # 门 2（按 Return 前）：完整复核原输入框、目标身份与草稿精确匹配；
         # 仅在 clear_proof 证明仍在原会话原输入框且草稿纯粹为我方文本时才清理，切群或草稿不明绝不清除。
         stage_started = time.monotonic()
         g = guard.before_return(text)
@@ -1812,6 +1814,12 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None):
             on_submit()
             pre_return_timing["ledger_reservation_ms"] = int(
                 (time.monotonic() - stage_started) * 1000)
+        stage_started = time.monotonic()
+        if get_app() != app or Atspi.Text.get_text(reader, 0, -1) != text:
+            return "draft_mismatch"
+        if memory_account and app_memory_account(app) != memory_account:
+            return "memory_account_changed"
+        pre_return_timing["draft_validation_ms"] = int((time.monotonic() - stage_started) * 1000)
         return_started = time.monotonic()
         pre_return_timing["pre_return_ms"] = int(
             (return_started - pre_return_started) * 1000)
@@ -2788,7 +2796,7 @@ def deliver_ready(replies, args, health=None, *, token=""):
                     auto_ctx if isinstance(auto_ctx, dict)
                     and auto_ctx.get("settled_public_question") is True else None)
                 status = send_reply(target, reply, mark_submitting,
-                                    auto_ctx=settled_auto_ctx, trace=trace)
+                                    auto_ctx=settled_auto_ctx, trace=trace, memory_account=memory_account)
         except _ProactivePolicyDisabled:
             record(health, "submit", "auto_policy_disabled", trace)
             continue

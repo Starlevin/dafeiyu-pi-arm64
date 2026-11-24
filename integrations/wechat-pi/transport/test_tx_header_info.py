@@ -1,7 +1,7 @@
 """Exercise the real header walk without a running AT-SPI session."""
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from test_blocking_state_scan import FakeNode, SHOWING, bridge
 import tx_guard
@@ -57,6 +57,34 @@ class HeaderProofTests(unittest.TestCase):
                     observe(FakeNode("label", "测试群"), unreadable)
         with self.assertRaisesRegex(RuntimeError, "visible_tree_child_missing"):
             observe(FakeNode("label", "测试群"), FakeNode("filler", children=[None]))
+
+
+class ComposerProofTests(unittest.TestCase):
+    def test_each_guard_pass_shares_one_view_and_requires_the_original_composer(self):
+        app, message_list = object(), object()
+        rect = (0, 0, 600, 100)
+        reader = SimpleNamespace(get_character_count=lambda: 0)
+        node = SimpleNamespace(get_text_iface=lambda: reader, get_editable_text_iface=lambda: object())
+        replacement = SimpleNamespace(get_text_iface=node.get_text_iface,
+                                      get_editable_text_iface=node.get_editable_text_iface, replacement=True)
+        root = {}
+        atspi = SimpleNamespace(Text=SimpleNamespace(get_text=lambda *_: ""))
+        with patch.multiple(bridge, Atspi=atspi, get_app=Mock(return_value=app),
+                            messages_list=Mock(return_value=message_list), ext=Mock(return_value=rect),
+                            _tx_header_info=Mock(return_value={"raw_title": "测试群", "showing_target": 1}),
+                            _tx_chats_info=Mock(return_value=(1, ["测试群"], 1)),
+                            composer=Mock(side_effect=[(node, rect), (replacement, rect)]),
+                            _tx_composer_fp=Mock(return_value=("text", "", rect)),
+                            blocking_state=Mock(return_value=None)):
+            proof = bridge._tx_observe("测试群", root)
+            self.assertTrue(proof["ok"])
+            self.assertIs(root["reader"], reader)
+            bridge.messages_list.assert_called_once_with(app)
+            bridge.ext.assert_called_once_with(message_list)
+            bridge._tx_header_info.assert_called_once_with(app, "测试群", (message_list, rect))
+            bridge.composer.assert_called_once_with(app, (message_list, rect))
+            updated = bridge._tx_observe("测试群", root)
+        self.assertEqual(updated["reason"], "composer_replaced")
 
 
 if __name__ == "__main__":

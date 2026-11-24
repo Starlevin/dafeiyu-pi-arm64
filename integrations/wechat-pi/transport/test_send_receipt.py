@@ -137,7 +137,8 @@ class SendReplyHarness:
             "chat_title": lambda app: self.TARGET if app is self.app else "other",
             "composer": lambda _app: (self.node, (0, 0, 400, 40)),
             "_tx_composer_fp": lambda _node: "synthetic-fingerprint",
-            "_tx_new_guard": lambda _target: self.guard,
+            "_tx_new_guard": self._new_guard,
+            "_tx_observe": self._observe_original,
             "read_messages": self._read_messages,
             "_tx_header_info": self._header_info,
             "_tx_chats_info": self._chats_info,
@@ -162,10 +163,21 @@ class SendReplyHarness:
         exec(compile(ast.Module(body=[_FUNCTIONS_BY_NAME["send_reply"]],
                                 type_ignores=[]), str(SOURCE), "exec"), self.ns)
 
+    def _new_guard(self, _target, *, observe=None):
+        self.state["observe"] = observe
+        return self.guard
+
+    def _observe_original(self, _target, original):
+        original.update(app=self.app, node=self.node, rect=(0, 0, 400, 40),
+                        fp="synthetic-fingerprint", reader=self.reader,
+                        editor=self.node.get_editable_text_iface())
+
     def _guard(self):
         state = self.state
         class Guard:
-            def before_send(self): return TxVerdict(True)
+            def before_send(self):
+                state["observe"]()
+                return TxVerdict(True)
             def after_click(self, _count): return TxVerdict(True)
             def before_return(self, _text): return TxVerdict(True)
             def clear_proof(self, *_args): return TxVerdict(False)
@@ -242,10 +254,10 @@ class SendReplyHarness:
     def _wait(self, predicate, *_args):
         return (bool(predicate()), 0.0)
 
-    def send(self, text="我的回复", auto_ctx=None, *, trace=None):
+    def send(self, text="我的回复", auto_ctx=None, *, trace=None, memory_account=None):
         def submitted(): self.state["submit_count"] += 1
         return self.ns["send_reply"](self.TARGET, text, submitted,
-                                      auto_ctx=auto_ctx, trace=trace)
+                                      auto_ctx=auto_ctx, trace=trace, memory_account=memory_account)
 
 
 _FUNCTIONS_BY_NAME = {node.name: node for node in _FUNCTIONS}
@@ -653,6 +665,26 @@ class SendReceiptTests(unittest.TestCase):
                     "我的回复", "synthetic-fingerprint")
                 self.assertEqual(harness.reader.text, "synthetic user draft" if edited_by_user else "")
                 self.assertEqual(harness.state["return_key_count"], 0)
+
+    def test_new_draft_after_baseline_is_preserved_and_never_sent(self):
+        harness = SendReplyHarness()
+        read = harness.ns["read_messages"]
+
+        def read_with_operator_change(app):
+            view = read(app)
+            harness.reader.text = "operator changed draft"
+            return view
+
+        harness.ns["read_messages"] = read_with_operator_change
+        self.assertEqual(harness.send(), "draft_mismatch")
+        self.assertEqual(harness.state["return_key_count"], 0)
+        self.assertEqual(harness.reader.text, "operator changed draft")
+
+    def test_login_switch_before_return_prevents_submission(self):
+        harness = SendReplyHarness()
+        harness.ns["app_memory_account"] = lambda _app: "other-account"
+        self.assertEqual(harness.send(memory_account="initial-account"), "memory_account_changed")
+        self.assertEqual(harness.state["return_key_count"], 0)
 
     def test_unknown_return_submission_never_clears_the_draft_or_retries(self):
         harness = SendReplyHarness()

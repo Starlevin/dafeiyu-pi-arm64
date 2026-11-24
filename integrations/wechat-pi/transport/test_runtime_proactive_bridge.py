@@ -581,7 +581,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.configure(True)
         writes = []
 
-        def send(target, reply, reserve, *, auto_ctx, trace):
+        def send(target, reply, reserve, *, auto_ctx, trace, memory_account):
             self.assertEqual(trace, "fixture-trace")
             self.configure(False)
             reserve()
@@ -596,7 +596,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.configure(False)
         writes = []
 
-        def send(target, reply, reserve, *, auto_ctx, trace):
+        def send(target, reply, reserve, *, auto_ctx, trace, memory_account):
             self.assertEqual(trace, "fixture-trace")
             reserve()
             writes.append(target)
