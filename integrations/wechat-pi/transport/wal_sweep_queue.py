@@ -167,9 +167,20 @@ class VerifiedWalRescanQueue:
         if not self.hint(target, now=now, earliest_at=due_at, source_at=source_at):
             return None
         if accelerated:
-            self.pending[target]["accelerated"] = True
+            self.pending[target]["regular_due_at"] = last_scan + OPEN_GROUP_RECHECK_S
             self._next_accelerated_at = now + OPEN_GROUP_RECHECK_S
         return due_at, accelerated
+
+    def restore_regular_deadline(self, target, *, now):
+        """An empty early read leaves the original recheck pending without holding the view."""
+        item = self.pending.get(target)
+        if item is None:
+            return None
+        regular_due_at = item.pop("regular_due_at", None)
+        if regular_due_at is None or regular_due_at <= now:
+            return None
+        item["due_at"] = regular_due_at
+        return regular_due_at
 
     def due(self, target, *, now=None):
         now = self.clock() if now is None else now
@@ -226,7 +237,7 @@ class VerifiedWalRescanQueue:
         self._expire(now)
         deadlines = [item["due_at"] for item in self.pending.values()
                      if item.get("empty_refresh_pending")
-                     or (item.get("accelerated") and not item["attempts"] and item["due_at"] > now)]
+                     or ("regular_due_at" in item and not item["attempts"] and item["due_at"] > now)]
         if not deadlines:
             return interval
         return min(interval, max(0.01, min(deadlines) - now))

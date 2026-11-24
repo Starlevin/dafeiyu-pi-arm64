@@ -26,6 +26,16 @@ class VerifiedWalRescanQueueTests(unittest.TestCase):
         self.assertEqual(queue.schedule_open_group("two", now=101, last_scan=100, source_at=101), (108, False))
         self.assertEqual(queue.schedule_open_group("three", now=108, last_scan=107, source_at=108), (109, True))
 
+    def test_empty_early_read_restores_the_original_recheck_without_holding_the_view(self):
+        queue = VerifiedWalRescanQueue(lambda: 100)
+        self.assertEqual(queue.schedule_open_group("group", now=100, last_scan=99, source_at=99.75), (101, True))
+        self.assertEqual(queue.restore_regular_deadline("group", now=101.2), 107)
+        self.assertFalse(queue.empty_refresh_pending("group"))
+        self.assertFalse(queue.due("group", now=102))
+        self.assertEqual(queue.wait_timeout(10, now=102), 10)
+        self.assertTrue(queue.due("group", now=107))
+        self.assertEqual(queue.source_at("group"), 99.75)
+
     def test_stale_untimed_or_uninitialized_hints_use_the_existing_interval(self):
         for last_scan, source_at, due in ((99, 97, 107), (99, None, 107), (None, 100, 108), (99, 101, 107)):
             with self.subTest(last_scan=last_scan, source_at=source_at):

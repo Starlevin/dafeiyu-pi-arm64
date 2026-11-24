@@ -3200,17 +3200,24 @@ def main():
                         viewport_gap=gap_detected[0])
                         and verified_rechecks is not None):
                     short_refresh = None
+                    regular_deadline = None
                     if verified_wal_scan_may_short_refresh(
                             verified_due=verified_due,
                             verified_pending=verified_pending,
                             viewport_gap=gap_detected[0]):
-                        short_refresh = schedule_verified_wal_empty_refresh(
-                            verified_rechecks, target, now=time.monotonic(),
-                            verified_pending=True, scope_open=verified_scope_open,
-                            had_previous_snapshot=previous_snapshot is not None,
-                            appended=bool(appended), viewport_gap=gap_detected[0],
-                            settled=pending_settle is not None)
-                    if short_refresh:
+                        refreshed_at = time.monotonic()
+                        if not appended:
+                            regular_deadline = verified_rechecks.restore_regular_deadline(target, now=refreshed_at)
+                        if regular_deadline is None:
+                            short_refresh = schedule_verified_wal_empty_refresh(
+                                verified_rechecks, target, now=refreshed_at,
+                                verified_pending=True, scope_open=verified_scope_open,
+                                had_previous_snapshot=previous_snapshot is not None,
+                                appended=bool(appended), viewport_gap=gap_detected[0],
+                                settled=pending_settle is not None)
+                    if regular_deadline is not None:
+                        log("wal_early_read_empty", regular_delay_ms=int((regular_deadline - refreshed_at) * 1000))
+                    elif short_refresh:
                         short_refresh_target = target
                         attempt, delay = short_refresh
                         log("wal_verified_empty_refresh_queued",
