@@ -163,17 +163,26 @@ def _clear_draft(bridge, xi, m):
         pass
 
 
-def _composer_pre_return_state(bridge, target, own_fp):
+def _same_composer(bridge, node, original):
+    original_node, (role, _, geometry) = original
+    if node != original_node:
+        return False
+    current = bridge._tx_composer_fp(node)
+    return bool(current and (current[0], current[2]) == (role, geometry))
+
+
+def _composer_pre_return_state(bridge, target, original):
     """选完路径准备按 Return 前，确认仍停在原目标且原输入框仍完全空白。"""
     app = bridge.get_app()
-    if (app is None or not bridge.group_is_open(app, target)
-            or len(bridge.visible_chat_matches(app, target)) != 1):
+    if app is None or not bridge.group_is_open(app, target):
+        return "target_changed"
+    visible, selected, matches = bridge._tx_chats_info(app, target)
+    if visible != 1 or matches != 1 or len(selected or ()) != 1:
         return "target_changed"
     node, _ = bridge.composer(app)
     if node is None:
         return "missing"
-    fp_fn = getattr(bridge, "_tx_composer_fp", None)
-    if not callable(fp_fn) or fp_fn(node) != own_fp:
+    if not _same_composer(bridge, node, original):
         return "composer_replaced"
     reader = node.get_text_iface()
     if reader is None:
@@ -182,6 +191,102 @@ def _composer_pre_return_state(bridge, target, own_fp):
     if (draft or "") != "" or reader.get_character_count() != 0:
         return "concurrent_draft"
     return "ok"
+
+
+PICKER_TITLES = {"open", "open files", "select file", "choose file", "select files",
+                 "choose files", "打开", "打开文件", "选择文件"}
+PICKER_NAME_FIELDS = {"file name", "file name:", "文件名", "文件名:"}
+PICKER_WAIT_S = 8.0
+
+
+def _visible_file_picker(bridge, app):
+    """Only a single native file chooser on the original WeChat app qualifies."""
+    dialogs = []
+    for node, _, role in bridge._walk_showing(app, maxd=12, skip_lists=True, include_role=True):
+        if role == "dialog" and (rect := bridge.ext(node)) and rect[2] > 0 and rect[3] > 0:
+            dialogs.append((node, rect))
+    if len(dialogs) != 1 or bridge.nm(dialogs[0][0]).strip().casefold() not in PICKER_TITLES:
+        return None
+    return dialogs[0]
+
+
+def _owned_picker_window(pf, window, main):
+    transient = ctypes.c_ulong()
+    fn = pf.X.XGetTransientForHint
+    fn.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong)]
+    return bool(fn(pf.dpy(), window, ctypes.byref(transient)) and transient.value == main)
+
+
+def _wait_for_file_picker(bridge, app, pf, main, before, to_x11):
+    """Wait for accessibility and the matching X11 window to agree."""
+    deadline = time.monotonic() + PICKER_WAIT_S
+    observed = None
+    while True:
+        if bridge.get_app() != app:
+            return None, None
+        current = _visible_file_picker(bridge, app)
+        if observed is not None and (current is None or current[0] != observed):
+            return None, None
+        if current is not None:
+            observed, rectangle = current
+            mapped = to_x11(rectangle)
+            matches = [wid for wid, rect in pf.find_new(before)
+                       if all(abs(real - expected) <= 32 for real, expected in zip(rect, mapped))
+                       and _owned_picker_window(pf, wid, main)]
+            if len(matches) == 1:
+                return matches[0], observed
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, observed
+        time.sleep(min(.25, remaining))
+
+
+def _cancel_owned_picker(bridge, app, target, original, observed, path, account):
+    """Cancel the chooser opened by this attempt, leaving any changed draft alone."""
+    if observed is None:
+        return False
+    try:
+        if (bridge.get_app() != app or (account and bridge.app_memory_account(app) != account)
+                or _composer_pre_return_state(bridge, target, original) != "ok"):
+            return False
+        current = _visible_file_picker(bridge, app)
+        if current is None or current[0] != observed:
+            return False
+        fields, buttons = [], []
+        for node, _, role in bridge._walk_showing(observed, maxd=9, skip_lists=True, include_role=True):
+            if role == "text" and bridge.nm(node).strip().casefold() in PICKER_NAME_FIELDS:
+                fields.append(node)
+            elif role == "button" and bridge.nm(node).strip().casefold() in {"cancel", "取消"}:
+                buttons.append(node)
+        if len(fields) != 1 or len(buttons) != 1:
+            return False
+        reader = fields[0].get_text_iface()
+        if reader is None:
+            return False
+        filename = bridge.Atspi.Text.get_text(reader, 0, -1)
+        sticker_directory = (path.stem == "weixin-sticker"
+                             and re.fullmatch(r"sticker-[A-Za-z0-9_-]{8}", path.parent.name)
+                             and isinstance(filename, str)
+                             and re.fullmatch(r"sticker-[A-Za-z0-9_-]{8}", filename))
+        if filename not in ("", str(path)) and not sticker_directory:
+            return False
+        states = buttons[0].get_state_set()
+        if not states.contains(bridge.Atspi.StateType.ENABLED):
+            return False
+        action = buttons[0].get_action_iface()
+        if action is None:
+            return False
+        indices = [i for i in range(action.get_n_actions())
+                   if action.get_action_name(i).strip().casefold() in
+                   {"press", "click", "activate", "按下", "点击", "激活"}]
+        if (len(indices) != 1 or bridge.get_app() != app
+                or (account and bridge.app_memory_account(app) != account)):
+            return False
+        if bridge.Atspi.Text.get_text(reader, 0, -1) != filename:
+            return False
+        return bool(action.do_action(indices[0]))
+    except Exception:
+        return False
 
 
 def _x11_is_same_or_descendant(pf, focus_win, dlg):
@@ -301,7 +406,7 @@ def _target_intact(bridge, target):
     )
 
 
-def _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi):
+def _require_live_focused_picker(bridge, pf, dlg, target, original):
     """每次向文件对话框发键前都必须正面证明：dlg 仍存在、焦点确在 dlg、目标与原输入框空白未变。"""
     if not _picker_window_present(pf, dlg):
         return (
@@ -310,11 +415,9 @@ def _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi):
         )
     if not _picker_has_focus(pf, dlg):
         return "media_picker_focus_failed"
-    state = _composer_pre_return_state(bridge, target, own_fp)
+    state = _composer_pre_return_state(bridge, target, original)
     if state == "ok":
         return None
-    if _picker_window_present(pf, dlg) and _picker_has_focus(pf, dlg):
-        xi.key("Escape", settle=.3)
     if state == "target_changed":
         return "media_draft_target_changed"
     if callable(getattr(bridge, "log", None)):
@@ -322,14 +425,14 @@ def _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi):
     return "media_draft_unverified"
 
 
-def _focus_picker(bridge, pf, dlg, target, own_fp, xi, settle_s):
+def _focus_picker(bridge, pf, dlg, target, original, settle_s):
     """先验证 dlg 尚在且输入框未变，再聚焦并正面核验焦点确实落在 dlg 上。"""
     if not _picker_window_present(pf, dlg):
         return (
             "media_picker_closed" if _target_intact(bridge, target)
             else "media_draft_target_changed"
         )
-    state = _composer_pre_return_state(bridge, target, own_fp)
+    state = _composer_pre_return_state(bridge, target, original)
     if state == "target_changed":
         return "media_draft_target_changed"
     if state != "ok":
@@ -343,28 +446,26 @@ def _focus_picker(bridge, pf, dlg, target, own_fp, xi, settle_s):
             "media_picker_closed" if not _picker_window_present(pf, dlg)
             else "media_picker_focus_failed"
         )
-    return _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    return _require_live_focused_picker(bridge, pf, dlg, target, original)
 
 
-def _drive_picker_input(bridge, pf, dlg, target, own_fp, path, xi, focus_key, settle_s):
+def _drive_picker_input(bridge, pf, dlg, target, original, path, xi, focus_key, settle_s):
     """驱动文件对话框输入并按 Return；任一阶段对话窗关闭或失焦均 fail-closed 中止。"""
-    err = _focus_picker(bridge, pf, dlg, target, own_fp, xi, settle_s)
+    err = _focus_picker(bridge, pf, dlg, target, original, settle_s)
     if err is not None:
         return err
     mods = ("Alt_L",) if focus_key == "n" else ("Control_L",)
     xi.key(focus_key, mods, settle=.25)
-    err = _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    err = _require_live_focused_picker(bridge, pf, dlg, target, original)
     if err is not None:
         return err
     xi.key("a", ("Control_L",), settle=.12)
-    err = _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    err = _require_live_focused_picker(bridge, pf, dlg, target, original)
     if err is not None:
         return err
     if not xi.type_text(str(path), settle=.4):
-        if _picker_window_present(pf, dlg) and _picker_has_focus(pf, dlg):
-            xi.key("Escape", settle=.3)
         return "media_filename_failed"
-    err = _require_live_focused_picker(bridge, pf, dlg, target, own_fp, xi)
+    err = _require_live_focused_picker(bridge, pf, dlg, target, original)
     if err is not None:
         return err
     xi.key("Return", settle=1.0)
@@ -391,6 +492,7 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
             or len(bridge.visible_chat_matches(app, target)) != 1
             or not bridge.group_is_open(app, target)):
         return "media_target_unverified"
+    account = bridge.app_memory_account(app)
     ok_before, _ = verify_fn(target, phase="before_media")
     if not ok_before:
         return "media_target_unverified"
@@ -404,6 +506,7 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
     own_fp = fp_fn(node) if callable(fp_fn) else None
     if own_fp is None:
         return "media_composer_unverified"
+    original = (node, own_fp)
     mapped = _mapper(bridge, pf)
     if mapped is None:
         return "media_layout_unverified"
@@ -420,24 +523,24 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
     # create an attachment draft that another actor might accidentally send.
     on_submit()
     mw = pf.main_window()
-    if mw:
-        pf.focus(mw)
-        time.sleep(.25)
+    if not mw:
+        return "media_layout_unverified"
+    pf.focus(mw)
+    time.sleep(.25)
+    if (bridge.get_app() != app or (account and bridge.app_memory_account(app) != account)
+            or bridge.blocking_state(app) or _composer_pre_return_state(bridge, target, original) != "ok"):
+        return "media_target_unverified"
     before = pf.windows()
     xi.click(sfx + sfw // 2, sfy + sfh // 2, settle=.6)
-    dlg = None
-    for _ in range(16):
-        time.sleep(.5)
-        cands = pf.find_new(before)
-        a2 = bridge.get_app()
-        if cands or (a2 is not None and bridge.blocking_state(a2) == "window_blocked"):
-            dlg = cands[-1][0] if cands else None
-            break
+    dlg, accessible = _wait_for_file_picker(bridge, app, pf, mw, before, m)
     if dlg is None:
+        if _cancel_owned_picker(bridge, app, target, original, accessible, path, account):
+            return "media_picker_cancelled"
         return "media_picker_unverified"
     drive_err = _drive_picker_input(
-        bridge, pf, dlg, target, own_fp, path, xi, "n", settle_s=.35)
+        bridge, pf, dlg, target, original, path, xi, "n", settle_s=.35)
     if drive_err is not None:
+        _cancel_owned_picker(bridge, app, target, original, accessible, path, account)
         return drive_err
 
     def gone():
@@ -453,8 +556,9 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
             break
     if not closed:
         retry_err = _drive_picker_input(
-            bridge, pf, dlg, target, own_fp, path, xi, "l", settle_s=.25)
+            bridge, pf, dlg, target, original, path, xi, "l", settle_s=.25)
         if retry_err is not None:
+            _cancel_owned_picker(bridge, app, target, original, accessible, path, account)
             return retry_err
         for _ in range(6):
             time.sleep(.5)
@@ -462,14 +566,15 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
                 closed = True
                 break
     if not closed:
-        if _picker_window_present(pf, dlg) and _picker_has_focus(pf, dlg):
-            xi.key("Escape", settle=.4)
+        _cancel_owned_picker(bridge, app, target, original, accessible, path, account)
         return "media_picker_failed"
     mw = pf.main_window()
     if mw:
         pf.focus(mw)
         time.sleep(.3)
-    app = bridge.get_app()
+    current_app = bridge.get_app()
+    if current_app != app or (account and bridge.app_memory_account(app) != account):
+        return "media_draft_target_changed"
     ok_send, _ = verify_fn(target, phase="before_media_send")
     if (not ok_send or app is None or bridge.blocking_state(app)
             or _dialog_visible(bridge)
@@ -481,8 +586,7 @@ def send_media(target, spec, media_dir, on_submit, bridge, xi):
     reader = node.get_text_iface() if node is not None else None
     if node is None or reader is None:
         return "media_draft_missing"
-    cur_fp = fp_fn(node) if callable(fp_fn) else None
-    if cur_fp != own_fp:
+    if not _same_composer(bridge, node, original):
         if callable(getattr(bridge, "log", None)):
             bridge.log("media_draft_preserved", stage="before_media_send", reason="composer_replaced")
         return "media_draft_unverified"
