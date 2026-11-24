@@ -108,6 +108,32 @@ class BridgeHealthIngressTests(unittest.TestCase):
             self.assertNotIn("active_generation", finished)
             self.assertEqual(finished["last_event"]["phase"], "queue")
 
+    def test_visible_delivery_retains_precise_time_across_later_diagnostics(self):
+        with tempfile.TemporaryDirectory(prefix="wechat-delivery-health-") as directory:
+            path = Path(directory) / "health.json"
+            health = self.make_health(path)
+            text, sticker = "ab" * 32, "cd" * 32
+            now = [1000.125]
+            with patch.object(bridge_health.time, "time", side_effect=lambda: now[0]):
+                health.update("confirmation", "visible_outgoing", text, success=True)
+                self.assertNotIn("last_confirmed_delivery_at", health.state)
+                self.assertTrue(health.reserve_submit(text))
+                self.assertTrue(health.finish_submit(text, confirmed=True))
+                health.update("confirmation", "visible_outgoing", text, success=True)
+
+                now[0] = 1000.25
+                health.update("mention", "direction_unverified", "ef" * 32, failed=True)
+                health = self.make_health(path)
+                self.assertEqual(health.state["last_confirmed_delivery_at"], 1000.125)
+                self.assertEqual(health.state["last_event"]["time"], 1000.25)
+
+                self.assertTrue(health.reserve_submit(sticker))
+                health.update("sticker", "confirmed", sticker, success=True)
+                self.assertEqual(health.state["last_confirmed_delivery_at"], 1000.125)
+                self.assertTrue(health.finish_submit(sticker, confirmed=True))
+                health.update("sticker", "confirmed", sticker, success=True)
+                self.assertEqual(health.state["last_confirmed_delivery_at"], 1000.25)
+
 
 if __name__ == "__main__":
     unittest.main()

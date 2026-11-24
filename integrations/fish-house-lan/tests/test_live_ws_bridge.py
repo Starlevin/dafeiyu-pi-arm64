@@ -414,6 +414,33 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual((fresh["source"], fresh["phase"], fresh["event_at"]),
                              ("wechat", "sent", NOW - 0.5))
 
+    def test_wechat_delivery_retained_after_a_later_diagnostic_is_sent_once(self):
+        spec = importlib.util.spec_from_file_location("fh_delivery_projection", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        delivered = NOW - 0.75
+        event = {"phase": "mention", "reason": "direction_unverified",
+                 "time": NOW - 0.5, "trace": "c" * 64}
+        diagnostics = {"last_confirmed_delivery_at": delivered, "last_event": event,
+                       "last_failure": event}
+        panel = {"runtimeRecords": [{"state": "generating", "timestamp": NOW - 0.25,
+                                     "_active": True}]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), mod.live_snapshot,
+                                    lambda: panel)
+        with patch.object(mod.bridge_health_file, "read", return_value=diagnostics), \
+             patch.object(mod, "LIVE_STARTED_AT", NOW - 1), \
+             patch.object(live_ws.time, "time", return_value=NOW):
+            self.assertEqual(mod.live_snapshot()["wechat"]["activity_state"], "idle")
+            self.assertEqual(bridge.state_snapshot()["event_at"], delivered)
+            sent = bridge.produce()[-1]
+            self.assertEqual((sent["source"], sent["phase"], sent["event_at"]),
+                             ("wechat", "sent", delivered))
+            self.assertNotIn(event["trace"], json.dumps(sent))
+            self.assertEqual(bridge.produce()[-1]["phase"], "thinking")
+            self.assertEqual(bridge.produce(), [])
+            with patch.object(mod, "LIVE_STARTED_AT", NOW - 0.6):
+                self.assertEqual(mod.live_snapshot()["wechat"]["delivery_at"], 0.0)
+
 
 # ------------------------------------------------------------------ framing
 class FramingTests(unittest.TestCase):

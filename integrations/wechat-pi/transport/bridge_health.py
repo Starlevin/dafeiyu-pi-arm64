@@ -54,6 +54,10 @@ class Health:
                       "last_success", "last_unknown"):
             if isinstance(prior.get(field), dict):
                 self.state[field] = prior[field]
+        delivery_at = prior.get("last_confirmed_delivery_at")
+        self.state.pop("last_confirmed_delivery_at", None)
+        if type(delivery_at) in (int, float) and 0 < delivery_at <= 4102444800:
+            self.state["last_confirmed_delivery_at"] = delivery_at
         self.state.pop("active_generation", None)
         if isinstance(prior.get("active_generation"), dict):
             self.state["active_generation"] = prior["active_generation"]
@@ -212,7 +216,7 @@ class Health:
 
     def update(self, phase, reason, trace=None, *,
                failed=False, success=False, unknown=False):
-        event = {"time": int(time.time()), "phase": phase, "reason": reason}
+        event = {"time": time.time(), "phase": phase, "reason": reason}
         if trace:
             event["trace"] = trace
         with self.lock:
@@ -237,6 +241,12 @@ class Health:
                         self.state["last_failure"] = event
                     if success:
                         self.state["last_success"] = event
+                        if (not failed and not unknown
+                                and (phase, reason) in (("confirmation", "visible_outgoing"),
+                                                       ("sticker", "confirmed"))
+                                and self.outbound.get(trace, {}).get("status") == "confirmed"):
+                            self.state["last_confirmed_delivery_at"] = max(
+                                event["time"], self.state.get("last_confirmed_delivery_at", 0.0))
                     if unknown:
                         self.state["last_unknown"] = event
                     # Only the post-guard queue acceptance is eligible. Keep a

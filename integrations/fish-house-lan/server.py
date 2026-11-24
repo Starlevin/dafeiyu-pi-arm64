@@ -974,8 +974,13 @@ def live_snapshot():
         if generation_at is not None and (phase == "idle" or generation_at > timestamp):
             phase, timestamp = "thinking", generation_at
             activity_until = timestamp + WECHAT_GENERATION_MAX_SECONDS
+    delivery_at = diagnostics.get("last_confirmed_delivery_at")
+    if (type(delivery_at) not in (int, float)
+            or not LIVE_STARTED_AT <= delivery_at <= now
+            or now - delivery_at > live_ws.SENT_WINDOW_SEC):
+        delivery_at = 0.0
     return {"wechat": {"activity_state": phase, "activity_at": timestamp,
-                        "activity_until": activity_until}}
+                        "activity_until": activity_until, "delivery_at": delivery_at}}
 
 
 _THEME_CHOICE_LOCK = threading.Lock()

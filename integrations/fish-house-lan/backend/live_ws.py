@@ -499,6 +499,19 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
     """Prefer recent verified activity and retain overlapping delivery receipts."""
     wx = wechat_evidence(live, now=now)
     qq = qq_evidence(live, panel, now=now)
+    retained_delivery = False
+    wechat = live.get("wechat") if isinstance(live, dict) else None
+    if last_sent_at is not None and isinstance(wechat, dict):
+        delivery_at = wechat.get("delivery_at")
+        if (type(delivery_at) in (int, float)
+                and 0 <= now - delivery_at <= SENT_WINDOW_SEC
+                and delivery_at > last_sent_at.get("wechat", 0.0)):
+            # A later diagnostic or generation can replace last_event before
+            # the next tick. This timestamp is a separate proven send.
+            retained_delivery = wx.phase != "sent" or wx.at != delivery_at
+            if retained_delivery:
+                wx = EvidenceSnapshot("wechat", "sent", EVIDENCE_VERIFIED,
+                                      reason="chat_receipt", at=delivery_at)
     active = [candidate for candidate in (wx, qq)
               if candidate.evidence == EVIDENCE_VERIFIED and candidate.phase != "idle"]
     if last_sent_at is not None:
@@ -513,6 +526,8 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                       if candidate.at > last_sent_at.get(candidate.source, 0.0)]
             if unseen:
                 return min(unseen, key=lambda candidate: candidate.at)
+    if retained_delivery:
+        return wx
     if active:
         return max(active, key=lambda candidate: candidate.at)
     idle = qq if qq.evidence == EVIDENCE_DEGRADED else wx
