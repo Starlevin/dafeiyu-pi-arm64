@@ -21,19 +21,26 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
             "appended": False,
             "viewport_gap": False,
             "settled": False,
-            "source_at": 99.9,
         }
         values.update(overrides)
         return bridge.schedule_verified_wal_empty_refresh(
             self.queue, "授权群", **values)
 
-    def test_valid_empty_scan_wakes_once_after_650ms_then_completes(self):
-        self.assertTrue(self.schedule())
+    def test_two_empty_rechecks_then_completes_without_extending_the_window(self):
+        first, delay = self.schedule()
+        self.assertEqual(first, 1)
+        self.assertAlmostEqual(delay, 0.65)
         self.assertFalse(self.queue.due("授权群", now=100.649))
         self.assertAlmostEqual(self.queue.wait_timeout(5, now=100), 0.65)
         self.now = 100.65
         self.assertTrue(self.queue.due("授权群"))
-        self.assertFalse(self.schedule())
+        second, delay = self.schedule()
+        self.assertEqual(second, 2)
+        self.assertAlmostEqual(delay, 4.45)
+        self.assertFalse(self.queue.due("授权群", now=105.09))
+        self.now = 105.11
+        self.assertTrue(self.queue.due("授权群"))
+        self.assertIsNone(self.schedule())
         self.queue.completed("授权群")
         self.assertEqual(self.queue.pending_count(), 0)
 
@@ -78,7 +85,7 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
                 result = bridge.schedule_verified_wal_empty_refresh(
                     queue, "授权群", now=100.0, verified_pending=True,
                     scope_open=True, had_previous_snapshot=True, appended=False,
-                    viewport_gap=False, settled=False, source_at=source_at)
+                    viewport_gap=False, settled=False)
                 self.assertFalse(result)
                 self.assertFalse(queue.empty_refresh_pending("授权群"))
 
@@ -100,11 +107,10 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
         ):
             with self.subTest(**overrides):
                 queue = VerifiedWalRescanQueue(lambda: self.now)
-                queue.hint("授权群", now=self.now, earliest_at=self.now)
+                queue.hint("授权群", now=self.now, earliest_at=self.now, source_at=99.9)
                 values = dict(now=self.now, verified_pending=True,
                               scope_open=True, had_previous_snapshot=True,
-                              appended=False, viewport_gap=False, settled=False,
-                              source_at=99.9)
+                              appended=False, viewport_gap=False, settled=False)
                 values.update(overrides)
                 result = bridge.schedule_verified_wal_empty_refresh(
                     queue, "授权群", **values)
@@ -141,6 +147,19 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
                     self.assertIsNone(bridge.keep_short_wal_refresh(
                         self.queue, "授权群", object(), targets))
                 self.assertFalse(self.queue.empty_refresh_pending("授权群"))
+
+
+    def test_competing_sidebar_activity_releases_delayed_hold_before_navigation(self):
+        self.assertTrue(self.schedule())
+        with patch.object(bridge, "group_is_open", return_value=True) as opened:
+            self.assertEqual(bridge.keep_short_wal_refresh(
+                self.queue, "授权群", object(), ["授权群"], competing_activity=True), "授权群")
+            self.now = 100.66
+            self.assertEqual(self.schedule()[0], 2)
+            self.assertIsNone(bridge.keep_short_wal_refresh(
+                self.queue, "授权群", object(), ["授权群"], competing_activity=True))
+            opened.assert_called_once()
+        self.assertEqual(self.queue.pending_count(), 0)
 
 
 if __name__ == "__main__":

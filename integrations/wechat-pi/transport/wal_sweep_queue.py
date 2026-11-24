@@ -5,6 +5,12 @@ A WAL file change is only a hint to check *approved* conversations.
 No account IDs, message payloads, credentials, databases, or sending here.
 """
 
+import math
+
+FIRST_EMPTY_REFRESH_S = 0.65
+SECOND_EMPTY_REFRESH_AT_S = 5.2
+EMPTY_REFRESH_EXPIRES_AT_S = 6.5
+
 def should_enqueue_wal_sweep(roles, watched, signatures, last_signatures,
                              urgent_target):
     """Only sweep when a message WAL hint has no safer known chat target.
@@ -111,7 +117,9 @@ class VerifiedWalRescanQueue:
 
     def _expire(self, now):
         for target, item in tuple(self.pending.items()):
-            if now - item["created"] >= self.ttl_s:
+            if (now - item["created"] >= self.ttl_s or
+                    item.get("empty_refresh_pending") and
+                    now >= item["empty_refresh_expires_at"]):
                 self.pending.pop(target, None)
                 self.stats["expired"] += 1
 
@@ -124,8 +132,8 @@ class VerifiedWalRescanQueue:
         item = self.pending.get(target)
         if item is not None:
             # Merge duplicate file notifications without extending TTL or
-            # postponing an already scheduled recheck. Once a short empty-view
-            # refresh is armed, noise must not accelerate its one-shot deadline.
+            # postponing an already scheduled recheck. File-event bursts must
+            # not move a scheduled empty-viewport read or extend its window.
             if not item.get("empty_refresh_pending", False):
                 item["due_at"] = min(item["due_at"], due_at)
             self.stats["coalesced"] += 1
@@ -151,27 +159,40 @@ class VerifiedWalRescanQueue:
         item = self.pending.get(target)
         return item is not None and now >= item["due_at"]
 
-    def retry_empty_once(self, target, *, now=None, delay_s=0.65):
-        """Schedule one short refresh after a valid empty scan; never extend it."""
+    def retry_empty(self, target, *, now=None):
+        """Schedule the next empty-viewport read within the original hint's window."""
         now = self.clock() if now is None else now
         self._expire(now)
         item = self.pending.get(target)
-        if (item is None or item.get("attempts", 0) != 0
-                or item.get("empty_refresh_count", 0) >= 1
-                or item.get("empty_refresh_pending", False)):
-            return False
-        delay_s = float(delay_s)
-        if not 0 < delay_s <= 0.8:
-            raise ValueError("empty refresh delay must be in (0, 0.8] seconds")
-        item["empty_refresh_count"] = 1
+        if item is None or item["attempts"] or now < item["due_at"]:
+            return None
+        source_at = item["source_at"]
+        if (isinstance(source_at, bool) or not isinstance(source_at, (int, float))
+                or not math.isfinite(source_at) or source_at > now):
+            return None
+        count = item["empty_refresh_count"]
+        if count >= 2 or (count == 0 and now - source_at > 5.0):
+            return None
+        due = now + FIRST_EMPTY_REFRESH_S
+        if count == 1:
+            due = max(due, source_at + SECOND_EMPTY_REFRESH_AT_S)
+        expires = source_at + EMPTY_REFRESH_EXPIRES_AT_S
+        if due >= expires:
+            return None
+        item["empty_refresh_count"] = count + 1
         item["empty_refresh_pending"] = True
-        item["due_at"] = now + delay_s
+        item["empty_refresh_expires_at"] = expires
+        item["due_at"] = due
         self.stats["empty_refresh_queued"] += 1
-        return True
+        return count + 1, due - now
+
+    def empty_refresh_attempt(self, target):
+        self._expire(self.clock())
+        item = self.pending.get(target)
+        return item["empty_refresh_count"] if item and item["empty_refresh_pending"] else 0
 
     def empty_refresh_pending(self, target):
-        item = self.pending.get(target)
-        return bool(item and item.get("empty_refresh_pending", False))
+        return self.empty_refresh_attempt(target) > 0
 
     def cancel_empty_refresh(self, target):
         item = self.pending.get(target)

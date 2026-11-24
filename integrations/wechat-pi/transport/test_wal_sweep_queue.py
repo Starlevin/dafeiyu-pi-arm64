@@ -36,9 +36,9 @@ class VerifiedWalRescanQueueTests(unittest.TestCase):
         self.assertEqual(small.pending_count(), 0)
         self.assertEqual(small.stats["expired"], 1)
 
-    def test_empty_refresh_is_one_shot_and_noise_cannot_accelerate_it(self):
-        self.assertTrue(self.queue.hint("group-a", now=100, earliest_at=100))
-        self.assertTrue(self.queue.retry_empty_once("group-a", now=100, delay_s=0.65))
+    def test_noise_cannot_accelerate_or_extend_empty_refresh(self):
+        self.assertTrue(self.queue.hint("group-a", now=100, earliest_at=100, source_at=100))
+        self.assertEqual(self.queue.retry_empty("group-a", now=100)[0], 1)
         self.assertFalse(self.queue.due("group-a", now=100.649))
         self.assertAlmostEqual(self.queue.wait_timeout(10, now=100), 0.65)
 
@@ -49,20 +49,24 @@ class VerifiedWalRescanQueueTests(unittest.TestCase):
         self.assertFalse(self.queue.due("group-a", now=100.649))
         self.assertTrue(self.queue.due("group-a", now=100.65))
 
-        self.assertFalse(self.queue.retry_empty_once("group-a", now=100.65))
-        self.queue.completed("group-a")
-        self.assertFalse(self.queue.due("group-a", now=101))
-        self.assertEqual(self.queue.stats["empty_refresh_queued"], 1)
+        self.assertEqual(self.queue.retry_empty("group-a", now=100.65)[0], 2)
+        self.assertFalse(self.queue.hint("group-a", now=103, earliest_at=103, source_at=103))
+        self.assertFalse(self.queue.due("group-a", now=105.199))
+        self.assertTrue(self.queue.due("group-a", now=105.2))
+        self.assertIsNone(self.queue.retry_empty("group-a", now=105.2))
+        self.assertFalse(self.queue.due("group-a", now=106.5))
+        self.assertEqual(self.queue.stats["empty_refresh_queued"], 2)
+        self.assertEqual(self.queue.pending_count(), 0)
 
     def test_scope_switch_cancels_only_short_refresh_and_failure_returns_to_normal_retry(self):
-        self.queue.hint("group-a", now=100, earliest_at=100)
-        self.queue.retry_empty_once("group-a", now=100, delay_s=0.65)
+        self.queue.hint("group-a", now=100, earliest_at=100, source_at=100)
+        self.queue.retry_empty("group-a", now=100)
         self.assertTrue(self.queue.cancel_empty_refresh("group-a"))
         self.assertFalse(self.queue.due("group-a", now=101))
         self.assertFalse(self.queue.cancel_empty_refresh("group-a"))
 
-        self.queue.hint("group-b", now=110, earliest_at=110)
-        self.queue.retry_empty_once("group-b", now=110, delay_s=0.65)
+        self.queue.hint("group-b", now=110, earliest_at=110, source_at=110)
+        self.queue.retry_empty("group-b", now=110)
         self.queue.failed("group-b", now=110.2)
         self.assertFalse(self.queue.empty_refresh_pending("group-b"))
         self.assertFalse(self.queue.due("group-b", now=118.19))

@@ -6,7 +6,6 @@ import argparse
 from collections import deque
 import hashlib
 import json
-import math
 import os
 from pathlib import Path
 from queue import Empty, Queue
@@ -522,23 +521,14 @@ def sidebar_signatures(app, allowed):
             if len(values) == 1}
 
 
-VERIFIED_WAL_EMPTY_REFRESH_SECONDS = 0.65
-
-
 def schedule_verified_wal_empty_refresh(queue, target, *, now, verified_pending,
                                          scope_open, had_previous_snapshot,
-                                         appended, viewport_gap, settled,
-                                         source_at):
-    """Retain one short re-read only after an eligible verified-open empty scan."""
+                                         appended, viewport_gap, settled):
+    """Recheck only a verified open group after an aligned, empty append scan."""
     if (not verified_pending or not scope_open or not had_previous_snapshot
             or appended or viewport_gap or settled):
-        return False
-    if (isinstance(source_at, bool) or not isinstance(source_at, (int, float))
-            or not math.isfinite(source_at) or source_at > now
-            or now - source_at > 5.0):
-        return False
-    return queue.retry_empty_once(
-        target, now=now, delay_s=VERIFIED_WAL_EMPTY_REFRESH_SECONDS)
+        return None
+    return queue.retry_empty(target, now=now)
 
 
 def verified_wal_scan_may_ack(*, forced_due, verified_pending, viewport_gap):
@@ -561,11 +551,13 @@ def cancel_filtered_empty_refreshes(queue, due_targets, allowed_targets):
     return cancelled
 
 
-def keep_short_wal_refresh(queue, target, app, targets):
-    """Do not navigate away while one verified empty-view refresh is pending."""
-    if target is None or not queue.empty_refresh_pending(target):
+def keep_short_wal_refresh(queue, target, app, targets, *, competing_activity=False):
+    """Keep the verified group open, yielding a delayed retry to other traffic."""
+    attempt = queue.empty_refresh_attempt(target) if target is not None else 0
+    if not attempt:
         return None
-    if target in targets and app is not None and group_is_open(app, target):
+    if (not (attempt == 2 and competing_activity)
+            and target in targets and app is not None and group_is_open(app, target)):
         return target
     queue.cancel_empty_refresh(target)
     return None
@@ -2837,8 +2829,12 @@ def main():
             # Preserve the current group while the one in-memory candidate settles.
             targets = settle_poll_targets(targets, settling_targets)
         if short_refresh_target is not None:
+            competing_activity = any(
+                other != short_refresh_target and signature != last_sidebar.get(other)
+                for other, signature in current_signatures.items())
             short_refresh_target = keep_short_wal_refresh(
-                verified_rechecks, short_refresh_target, app_now, targets)
+                verified_rechecks, short_refresh_target, app_now, targets,
+                competing_activity=competing_activity)
             if short_refresh_target is not None:
                 targets = [short_refresh_target]
         verified_recheck_targets = set()
@@ -2849,7 +2845,7 @@ def main():
                 if target == short_refresh_target or (app_now is not None and group_is_open(app_now, target)):
                     verified_recheck_targets.add(target)
                 else:
-                    # A one-shot short refresh is valid only while the same
+                    # A short refresh is valid only while the same
                     # independently verified group remains selected.
                     verified_rechecks.cancel_empty_refresh(target)
             # Another group's settle window can temporarily filter this target
@@ -2876,6 +2872,8 @@ def main():
             verified_pending = (verified_rechecks is not None
                                 and target in verified_rechecks.pending)
             verified_due = target in verified_recheck_targets
+            if target == short_refresh_target and not verified_due:
+                continue  # Keep this scope until its actual recheck deadline.
             forced_due = ((sweep.due(target) if sweep is not None else False)
                           or verified_due)
             is_priv = _is_private_target(args, target)
@@ -2953,7 +2951,10 @@ def main():
                                 verified_rechecks.cancel_empty_refresh(target)
                             continue
                         if target == short_refresh_target:
-                            log("wal_verified_empty_refresh_scan")
+                            attempt = verified_rechecks.empty_refresh_attempt(target)
+                            if not attempt:
+                                continue
+                            log("wal_verified_empty_refresh_scan", attempt=attempt)
                     else:
                         verified_scope_open = group_is_open(app, target)
                         if not verified_scope_open and not open_chat(app, target):
@@ -3043,7 +3044,7 @@ def main():
                         forced_due=forced_due, verified_pending=verified_pending,
                         viewport_gap=gap_detected[0])
                         and verified_rechecks is not None):
-                    short_refresh = False
+                    short_refresh = None
                     if verified_wal_scan_may_short_refresh(
                             verified_due=verified_due,
                             verified_pending=verified_pending,
@@ -3053,11 +3054,12 @@ def main():
                             verified_pending=True, scope_open=verified_scope_open,
                             had_previous_snapshot=previous_snapshot is not None,
                             appended=bool(appended), viewport_gap=gap_detected[0],
-                            settled=pending_settle is not None, source_at=wal_source_at)
+                            settled=pending_settle is not None)
                     if short_refresh:
                         short_refresh_target = target
+                        attempt, delay = short_refresh
                         log("wal_verified_empty_refresh_queued",
-                            delay_ms=int(VERIFIED_WAL_EMPTY_REFRESH_SECONDS * 1000))
+                            attempt=attempt, delay_ms=round(delay * 1000))
                     else:
                         verified_rechecks.completed(target)
                     verified_done = True
