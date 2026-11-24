@@ -21,7 +21,8 @@ rules = {
     'provider credential': r'\b(?:sk-[A-Za-z0-9_-]{24,}|cfut_[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})\b',
     'dotted provider credential': r'\b[a-f0-9]{32}\.[A-Za-z0-9]{16,}\b',
     'private key': r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----',
-    'personal absolute path': r'/(?:Users|home)/[A-Za-z0-9_.-]+/|\b[A-Za-z]:\\(?:Users|个人)\\[^\\/\s]+\\|~/' + r'dafeiyu' + r'-test/',
+    # A relative application asset such as ./home/assets/ is not a user home.
+    'personal absolute path': r'(?<!\.)/(?:Users|home)/[A-Za-z0-9_.-]+/|\b[A-Za-z]:\\(?:Users|个人)\\[^\\/\s]+\\|~/' + r'dafeiyu' + r'-test/',
     'private email': r'\b[\w.+-]+@(?:gmail|qq|hotmail|outlook)\.com\b',
     'control URL token': r'https?://127\.0\.0\.1:\d+/#\S{16,}',
 }
