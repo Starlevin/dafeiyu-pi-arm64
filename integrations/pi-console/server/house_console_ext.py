@@ -749,40 +749,86 @@ def _build_delivery_summary(cfg, qq_adapter) -> dict:
     }
 
 
-def _build_trace_summary(cfg: dict) -> dict:
-    qroot = _qq_root(cfg)
-    latencies = []
-    fallbacks = 0
-    recent_calls = 0
-    if qroot:
-        for rel in ("secrets/model-hub/route.jsonl", "model-hub/route.jsonl", "logs/model-hub-route.jsonl"):
-            p = qroot / rel
-            if p.is_file():
-                try:
-                    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
-                    for line in lines:
-                        try:
-                            rec = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(rec, dict) and isinstance(rec.get("latency_ms"), (int, float)):
-                            latencies.append(float(rec["latency_ms"]))
-                            recent_calls += 1
-                            if rec.get("fallback") is True:
-                                fallbacks += 1
-                except OSError:
-                    pass
+TRACE_TAIL_BYTES = 64 * 1024
+TRACE_SAMPLE_LIMIT = 200
+TRACE_ID = re.compile(r"[0-9a-f]{64}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.I)
+WECHAT_DELIVERY_LINE = re.compile(
+    rb"^[0-9 :-]{19} delivery_timing trace='[0-9a-f-]{36,64}' kind='(?:group|private)' "
+    rb"[^\r\n]*\bqueue_to_send_result_ms=([0-9]{1,8}) [^\r\n]*\bconfirmed=True$"
+)
+
+
+def _trace_tail(path: Path) -> list[bytes]:
+    with path.open("rb") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        offset = max(0, size - TRACE_TAIL_BYTES)
+        stream.seek(offset)
+        data = stream.read(min(size, TRACE_TAIL_BYTES))
+    if offset:
+        data = data.partition(b"\n")[2]
+    return data.splitlines()
+
+
+def _gateway_trace_samples(root: Path | None) -> list[tuple[float, bool, bool]]:
+    if root is None:
+        return []
+    for rel in ("run/model-route.log", "secrets/model-hub/route.jsonl",
+                "model-hub/route.jsonl", "logs/model-hub-route.jsonl"):
+        try:
+            lines = _trace_tail(root / rel)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return []
+        samples = []
+        for line in reversed(lines):
+            try:
+                record = json.loads(line)
+            except (UnicodeError, ValueError, RecursionError):
+                continue
+            if not isinstance(record, dict):
+                continue
+            latency = record.get("latency_ms")
+            if type(latency) not in (int, float) or not 0 <= latency <= 86_400_000:
+                continue
+            trace = record.get("trace_id")
+            samples.append((latency, record.get("fallback") is True,
+                            isinstance(trace, str) and TRACE_ID.fullmatch(trace) is not None))
+            if len(samples) == TRACE_SAMPLE_LIMIT:
                 break
+        return samples
+    return []
+
+
+def _wechat_delivery_samples(cfg: dict) -> list[float]:
+    log = Path(cfg.get("wechatBridgeLog") or (Path.home() / "dafeiyu-wechat/bridge.log")).expanduser()
+    try:
+        lines = _trace_tail(log)
+    except OSError:
+        return []
+    samples = [int(found[1]) for line in lines if (found := WECHAT_DELIVERY_LINE.fullmatch(line))]
+    return samples[-TRACE_SAMPLE_LIMIT:]
+
+
+def _build_trace_summary(cfg: dict) -> dict:
+    gateway = _gateway_trace_samples(_qq_root(cfg))
+    latencies = [item[0] for item in gateway]
+    delivery = _wechat_delivery_samples(cfg)
     return {
         "ok": True,
-        "gatewayTrace": "model-hub active (X-Dafeiyu-Trace-Id)",
-        "qqP50Ms": _percentile(latencies, 0.50) if latencies else "--",
-        "qqP95Ms": _percentile(latencies, 0.95) if latencies else "--",
-        "wechatP50Ms": "--",
+        "gatewayTrace": "已读取共享网关路由记录" if gateway else "暂无共享网关路由样本",
+        "gatewayP50Ms": _percentile(latencies, 0.50),
+        "gatewayP95Ms": _percentile(latencies, 0.95),
+        "gatewayTracedCalls": sum(item[2] for item in gateway),
+        "qqP50Ms": "--",
+        "qqP95Ms": "--",
+        "wechatP50Ms": _percentile(delivery, 0.50),
+        "wechatP95Ms": _percentile(delivery, 0.95),
+        "wechatConfirmedSamples": len(delivery),
         "contextP50Ms": "--",
         "promptP50Ms": "--",
-        "recentCalls": recent_calls,
-        "fallbackCount": fallbacks,
+        "recentCalls": len(gateway),
+        "fallbackCount": sum(item[1] for item in gateway),
     }
 
 

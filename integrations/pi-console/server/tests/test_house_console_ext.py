@@ -490,6 +490,38 @@ class HouseConsoleExtTests(unittest.TestCase):
         _, pr = self._get("/api/proactive/config")
         self.assertTrue(json.loads(pr)["ok"])
 
+    def test_trace_reads_production_route_and_confirmed_bridge_samples(self):
+        route = self.qq_root / "run" / "model-route.log"
+        route.parent.mkdir()
+        trace = "a" * 64
+        route.write_text("\n".join(map(json.dumps, [
+            {"latency_ms": True, "fallback": True},
+            {"latency_ms": float("inf"), "fallback": True},
+            {"latency_ms": -100, "fallback": True},
+            {"latency_ms": 1700, "fallback": False, "trace_id": trace, "prompt": "fixture-private"},
+            {"latency_ms": 3700, "fallback": True},
+        ])), encoding="utf-8")
+        bridge = self.wx_root / "bridge.log"
+        self.app.content_cfg["wechatBridgeLog"] = str(bridge)
+        base = f"2026-11-25 03:20:00 delivery_timing trace='{trace}' kind='group'"
+        bridge.write_text("\n".join([
+            f"{base} pickup_ms=7 queue_to_send_result_ms=5100 send_ms=1100 confirmed=True",
+            f"{base} pickup_ms=7 queue_to_send_result_ms=6600 send_ms=1700 confirmed=True",
+            f"{base} pickup_ms=7 queue_to_send_result_ms=100 send_ms=100 confirmed=False",
+            f"{base} pickup_ms=7 queue_to_send_result_ms=-1 send_ms=100 confirmed=True",
+        ]), encoding="utf-8")
+        with self.assertRaises(urllib.error.HTTPError) as anonymous:
+            self._get("/api/trace/summary", authed=False)
+        self.assertEqual(anonymous.exception.code, 401)
+        _, raw = self._get("/api/trace/summary")
+        result = json.loads(raw)
+        self.assertEqual((result["recentCalls"], result["fallbackCount"], result["gatewayTracedCalls"]), (2, 1, 1))
+        self.assertEqual((result["gatewayP50Ms"], result["gatewayP95Ms"]), (1700, 3700))
+        self.assertEqual((result["wechatP50Ms"], result["wechatP95Ms"], result["wechatConfirmedSamples"]), (5100, 6600, 2))
+        self.assertEqual(result["qqP50Ms"], "--")
+        self.assertNotIn(trace, raw.decode())
+        self.assertNotIn("fixture-private", raw.decode())
+
     def test_memory_storage_requires_auth_and_distinguishes_store_paths(self):
         endpoint = "/api/memory/storage"
         with self.assertRaises(urllib.error.HTTPError) as anonymous:

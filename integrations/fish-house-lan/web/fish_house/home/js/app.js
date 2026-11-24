@@ -1182,20 +1182,30 @@
       clearEl(trBody);
       var trSlot = ex.trace;
       var logSlot = ex.logs;
-      if ((trSlot.status === "live" || trSlot.status === "fixture") && trSlot.data) {
+      var traceRequiresLogin = trSlot.status === "auth_required" || apiAdapter.state.consoleMode === "auth_required";
+      if (!traceRequiresLogin && (trSlot.status === "live" || trSlot.status === "fixture") && trSlot.data) {
         trTag.className = "fh-tag " + (trSlot.status === "live" ? "real" : "demo");
         trTag.textContent = trSlot.status === "live" ? "实时接口" : "模拟数据";
         var td = trSlot.data;
-        trBody.appendChild(makeKvRow("共享网关 Trace 状态", td.gatewayTrace || "ready"));
-        trBody.appendChild(makeKvRow("QQ / 微信 P50 延迟", (td.qqP50Ms || "--") + "ms / " + (td.wechatP50Ms || "--") + "ms"));
-        trBody.appendChild(makeKvRow("微信上下文 / Prompt", (td.contextP50Ms || "--") + "ms / " + (td.promptP50Ms || "--") + "ms"));
+        var ms = function (value) { return typeof value === "number" ? value + " ms" : "—"; };
+        trBody.appendChild(makeKvRow("共享网关", td.gatewayTrace || "暂无路由样本"));
+        if (typeof td.recentCalls === "number") {
+          trBody.appendChild(makeKvRow("最近请求 / 回退 / 带 Trace",
+            td.recentCalls + " / " + td.fallbackCount + " / " + td.gatewayTracedCalls));
+        }
+        trBody.appendChild(makeKvRow("网关处理 P50 / P95", ms(td.gatewayP50Ms) + " / " + ms(td.gatewayP95Ms)));
+        var sampleCount = td.wechatConfirmedSamples || 0;
+        trBody.appendChild(makeKvRow("微信入队到确认 P50 / P95",
+          sampleCount ? ms(td.wechatP50Ms) + " / " + ms(td.wechatP95Ms) + "（" + sampleCount + " 条）"
+            : "暂无已确认样本"));
       } else {
         trTag.className = "fh-tag";
-        trTag.textContent = trSlot.status === "auth_required" ? "需登录" : "契约预留";
+        trTag.textContent = traceRequiresLogin ? "需登录" : "暂不可用";
         trBody.appendChild(makeEl("p", "fh-note",
-          "共享 Trace 聚合契约预留：GET /api/trace/summary（对齐 Codex model-hub trace 与 wechat_latency 阶段口径）。"));
+          traceRequiresLogin ? "登录控制台后查看路由与送达耗时。" : "暂时无法读取路由与送达统计。"));
       }
-      if ((logSlot.status === "live" || logSlot.status === "fixture") && logSlot.data && logSlot.data.lines) {
+      if (!traceRequiresLogin && (logSlot.status === "live" || logSlot.status === "fixture") &&
+          logSlot.data && logSlot.data.lines) {
         var box = makeEl("div", "fh-log-box");
         box.style.marginTop = "8px";
         var lines = logSlot.data.lines.slice(-6);

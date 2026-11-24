@@ -330,9 +330,11 @@ class DevHandler(SimpleHTTPRequestHandler):
                 if path == "/api/proactive/config":
                     return self._json(200, {"ok": True, "mock": True, "judgeMode": "enforce-v2", "threshold": 0.68})
                 if path == "/api/trace/summary":
-                    return self._json(200, {"ok": True, "mock": True, "gatewayTrace": "model-hub active",
-                                            "qqP50Ms": 2480, "wechatP50Ms": 3120,
-                                            "contextP50Ms": 142, "promptP50Ms": 116.8})
+                    return self._json(200, {"ok": True, "mock": True, "gatewayTrace": "模拟路由样本",
+                                            "recentCalls": 34, "fallbackCount": 3, "gatewayTracedCalls": 21,
+                                            "gatewayP50Ms": 2480, "gatewayP95Ms": 3720,
+                                            "wechatP50Ms": 4120, "wechatP95Ms": 6340,
+                                            "wechatConfirmedSamples": 16})
 
         if path.startswith("/fish_house/"):
             return super().do_GET()
