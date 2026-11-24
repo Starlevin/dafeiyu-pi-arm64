@@ -294,6 +294,47 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
             self.assertTrue(media_payload["photo_present"])
             self.assertTrue(bridge._pilot_force_old(media_payload))
 
+    def test_adjacent_picture_needs_a_reference_from_an_automatic_candidate(self):
+        group = "别野"
+        self.args.group = self.args.auto_reply_group = [group]
+        self.args.vision = True
+        self.path.write_text(json.dumps({
+            "group": {"proactiveJudge": {"enabled": True, "groups": [group]}},
+        }), encoding="utf-8")
+        env = {"DAFEIYU_WECHAT_SWIFT_PROACTIVE_GROUPS": json.dumps([group]),
+               "DAFEIYU_WECHAT_UNIFIED_ACCOUNT": "wx-fixture"}
+        direct = f"@大肥鱼{bridge.MENTION_TOKEN}这是什么？"
+        cases = [
+            ("今天队友配合得真不错", True, False, False),
+            ("地图里有两条路可以走", True, False, False),
+            ("这张截图里写的是什么", True, True, False),
+            ("这张截图里写的是什么", False, False, False),
+            (direct, True, True, True),
+        ]
+        for body, same_sender, capture_expected, addressed in cases:
+            with self.subTest(body=body, same_sender=same_sender):
+                self.args.auto_limiter = Mock(take=Mock(return_value=True))
+                frame = (1, 1, 400, 80)
+                rows = [("[图片]", frame), (body, (1, 82, 400, 60))]
+                jobs = Queue(maxsize=2)
+                with patch.dict(os.environ, env), patch.multiple(
+                    bridge, avatar_side=Mock(return_value=("incoming", 0)),
+                    chat_title=Mock(return_value=group), psv=None,
+                    same_sender_image=Mock(return_value=same_sender),
+                    capture_media=Mock(return_value=b"fixture-image"),
+                ):
+                    self.assertTrue(bridge.handle_rows(
+                        None, rows, 1, (0, 0, 500, 500), group, self.args, jobs))
+                    _, _, payload, photo, *_ = jobs.get_nowait()
+                    self.assertEqual(payload["at_me"], addressed)
+                    self.assertEqual(payload.get("photo_present", False), capture_expected)
+                    self.assertEqual(bool(photo), capture_expected)
+                    self.assertEqual(bridge._pilot_force_old(payload), capture_expected)
+                    if capture_expected:
+                        bridge.capture_media.assert_called_once_with(frame, (0, 0, 500, 500))
+                    else:
+                        bridge.capture_media.assert_not_called()
+
     def test_occupied_composer_skips_both_proactive_routes_without_consuming_limiter(self):
         reader = Mock(get_character_count=Mock(return_value=7))
         composer = Mock(return_value=(Mock(get_text_iface=Mock(return_value=reader)), None))

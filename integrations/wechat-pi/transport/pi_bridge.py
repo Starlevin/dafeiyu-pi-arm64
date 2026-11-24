@@ -250,6 +250,15 @@ _MEDIA_DEMO_COMMANDS = {
 }
 
 
+# A neighboring picture is not part of an ordinary turn unless the text
+# actually points at it. In particular, words such as 地图 and 截图功能
+# describe topics and do not identify the preceding attachment.
+PRIOR_IMAGE_REFERENCE = re.compile(
+    r"(?:这|那|刚发的|上面(?:的)?|前面(?:的)?)(?:张|幅|个)?(?:图(?:片|像)?|截图|截屏|照片|动图|表情包)"
+    r"|(?<!地)(?:图|图片|截图|截屏|照片|动图)(?:里|中|上)(?:面|的|有|是|那|这|写|显示)"
+)
+
+
 def eligible_auto_text(raw):
     """Reject media placeholders, commands, other-member mentions and noise."""
     if not isinstance(raw, str):
@@ -2324,10 +2333,14 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             if is_image(next_text) and same_sender_image(rect, next_rect, bounds, target):
                 image_rect = next_rect
                 image_marker = next_text
-        # In the approved Bieye group, any explicit @ question can refer to
-        # the immediately preceding image; requiring the word "图" missed
-        # natural questions such as "这是什么？". Never search past one row.
-        if is_group and image_rect is None and i > 0 and (target == "别野" or "图" in body):
+        # Preserve the broader interpretation of an explicit @ in Bieye,
+        # including "这是什么？". An automatic text candidate needs its own
+        # reference to the picture. Both paths still require the same sender.
+        refers_to_previous_image = (
+            PRIOR_IMAGE_REFERENCE.search(body) is not None
+            if auto_candidate else target == "别野" or "图" in body
+        )
+        if is_group and image_rect is None and i > 0 and refers_to_previous_image:
             previous_text, previous_rect = rows[i - 1]
             if is_image(previous_text) and same_sender_image(rect, previous_rect, bounds, target):
                 image_rect = previous_rect
