@@ -596,8 +596,8 @@ class WeChatAdapter:
                     "qrcode_required", "logout_required")
 
     # The client window cannot receive replies in these phases.
-    BLOCKED_REASONS = SCAN_REASONS + ("window_blocked", "window_not_ready",
-                                      "client_unavailable", "client_runtime_changed")
+    WINDOW_REASONS = ("window_blocked", "window_not_ready",
+                      "client_unavailable", "client_runtime_changed")
 
     def _bridge_gateway(self, st):
         gateways = st.get("gateways", []) or [] if isinstance(st, dict) else []
@@ -628,12 +628,16 @@ class WeChatAdapter:
             if isinstance(reported, str):
                 reason = reported
 
-        if reason in self.SCAN_REASONS:
-            return "qr", reason
         if enabled is False:
             return "disabled", reason
-        if reason in self.BLOCKED_REASONS:
+        if reason in self.SCAN_REASONS:
+            return "qr", reason
+        if online is False:
             return "offline", reason
+        if reason in self.WINDOW_REASONS:
+            # A live bridge can temporarily lose its native window. This is
+            # evidence about observation and delivery, not about login.
+            return "unknown", reason
         if online is True:
             if listener is False:
                 # Heartbeating but declined to add the message listener.
@@ -646,16 +650,31 @@ class WeChatAdapter:
                 # Listener up, account verdict not reported yet: reachable.
                 return "ok", reason
             return "unknown", reason
-        if online is False:
-            return "offline", reason
         return "unknown", reason
+
+    def _bridge_state(self, bridge, state, reason):
+        if state == "disabled":
+            return "disabled"
+        if bridge.get("online") is False:
+            return "offline"
+        if bridge.get("online") is not True:
+            return "unknown"
+        if state == "qr":
+            return "login_pending"
+        if reason in self.WINDOW_REASONS:
+            return "window_pending"
+        if bridge.get("listener") is False:
+            return "listener_paused"
+        if bridge.get("accountOk") is False:
+            return "account_blocked"
+        return "ready" if state == "ok" else "unknown"
 
     def status(self):
         """Return (wechat_dict, diagnostics list).
 
         Shape (additive to the previous contract):
           {connected, running, model, client, clientState, clientReason,
-           lastRead, enabled, bridge:{online,listener,accountOk,lastSeenSec},
+           lastRead, enabled, bridgeStatus, bridge:{online,listener,accountOk,lastSeenSec},
            diagnostics:{fresh, phase, reason, time}, capabilities}
 
         connected/running are None whenever they cannot be read — never false
@@ -665,7 +684,7 @@ class WeChatAdapter:
         last_read = _now()
         empty = {"connected": None, "running": None, "model": "", "client": "",
                  "clientState": "unknown", "clientReason": "", "lastRead": None,
-                 "enabled": None, "bridge": None, "diagnostics": None,
+                 "enabled": None, "bridgeStatus": "unknown", "bridge": None, "diagnostics": None,
                  "capabilities": {"model": False}}
         try:
             st = self._get("/api/status")
@@ -687,17 +706,23 @@ class WeChatAdapter:
         enabled = gw.get("enabled") if isinstance(gw.get("enabled"), bool) else None
 
         state, reason = self._client_state(bridge, diag, enabled)
+        bridge_state = self._bridge_state(bridge, state, reason)
         if state == "disabled":
             client, connected, running = "微信客户端未启用", False, False
         elif state == "qr":
             client = "微信客户端等待扫码登录"
             connected, running = False, False
         elif state == "offline":
-            client = "微信本地桥接离线"
+            client = {"offline": "微信桥接心跳中断",
+                      "listener_paused": "微信桥接监听暂停",
+                      "account_blocked": "微信桥接账号校验未通过"}.get(bridge_state, "微信桥接暂不可用")
             connected, running = False, False
         elif state == "ok":
-            client = "微信客户端在线"
+            client = "微信客户端在线" if bridge.get("accountOk") is True else "微信桥接监听正常"
             connected, running = True, True
+        elif reason in self.WINDOW_REASONS:
+            client = "微信窗口暂不可用"
+            connected, running = None, False
         else:
             # Never guess in the failure direction either: say "未确认".
             client = "微信连接状态未确认"
@@ -724,6 +749,7 @@ class WeChatAdapter:
             "clientReason": reason,
             "lastRead": last_read,
             "enabled": enabled,
+            "bridgeStatus": bridge_state,
             "bridge": {
                 "online": bridge.get("online") if isinstance(bridge.get("online"), bool) else None,
                 "listener": bridge.get("listener") if isinstance(bridge.get("listener"), bool) else None,

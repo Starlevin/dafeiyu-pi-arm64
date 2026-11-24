@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js?v=workspace-9"></script>
+<script src="app.js?v=workspace-14"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
 <script src="social.js" defer></script>
@@ -269,6 +269,7 @@
       <details class="card maintenance-tools" id="wechatAccount">
         <summary>微信扫码与重连</summary>
         <p class="card-note" id="wechatAccountStatus" role="status" aria-live="polite"></p>
+        <p class="card-note" id="wechatBridgeStatus">桥接状态待确认</p>
         <img id="wechatAccountQr" width="196" height="196" alt="微信登录二维码" hidden>
         <div class="memory-toolbar">
           <button type="button" class="btn btn-quiet btn-sm" id="wechatAccountRefresh">刷新窗口状态</button>

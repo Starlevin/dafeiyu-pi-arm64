@@ -322,6 +322,29 @@ class HouseConsoleExtTests(unittest.TestCase):
             self.assertEqual(wechat_account._reconnect(self.wx_root, {})[0], 409)
             command.assert_called_once()
 
+    def test_wechat_account_separates_native_login_from_the_bridge(self):
+        situations = (
+            (True, {"online": True, "listener": False}, "window_blocked", "window_pending"),
+            (True, {"online": False}, "client_unavailable", "offline"),
+            (True, {"online": True, "listener": False}, "", "listener_paused"),
+            (True, {"online": True, "listener": True, "accountOk": False}, "", "account_blocked"),
+            (True, {"online": True, "listener": False}, "login_required", "login_pending"),
+            (True, {"online": True, "listener": True}, "", "ready"),
+            (False, {"online": True, "listener": True}, "login_required", "disabled"),
+        )
+        for enabled, bridge, reason, expected in situations:
+            with self.subTest(expected=expected):
+                status = {"gateways": [{"platform": "wechat", "enabled": enabled, "bridge": bridge}],
+                          "bridgeDiagnostics": {"fresh": True, "client": {"reason": reason}}}
+                with patch.object(wechat_account, "_native", return_value={"state": "online"}), \
+                        patch.object(uc.adapters.WeChatAdapter, "_get", return_value=status):
+                    _, body = self._get("/api/account/wechat")
+                    data = json.loads(body)
+                    self.assertEqual(data["state"], "online")
+                    self.assertEqual(data["bridgeStatus"], expected)
+                    self.assertFalse(data["canScan"])
+                    self.assertNotIn("image", data)
+
     def test_live_video_proxies_get_head_and_unsatisfiable_range(self):
         url = self.base + "/fish_house/themes/default/videos/example.mp4"
         request = urllib.request.Request(url, headers={"Range": "bytes=2-4"})

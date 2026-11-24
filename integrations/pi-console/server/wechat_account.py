@@ -145,5 +145,9 @@ def resolve(handler, method, path, root, cfg):
         status, result = _reconnect(root, cfg)
         handler.json(status, result)
     else:
-        handler.json(200, _status(root, action))
+        result = _status(root, action)
+        if action == "status":
+            status, _ = handler.app.console.wechat.status()
+            result["bridgeStatus"] = status.get("bridgeStatus", "unknown")
+        handler.json(200, result)
     return True

@@ -901,6 +901,20 @@ class StatusTruthTests(unittest.TestCase):
         self.assertIs(w["running"], False)
         self.assertNotIn("已连接", w["client"])
 
+    def test_wechat_window_observation_failure_is_not_a_logout(self):
+        for reason in ("window_blocked", "window_not_ready", "client_unavailable", "client_runtime_changed"):
+            with self.subTest(reason=reason):
+                w = self.wx_status(
+                    bridge={"online": True, "listener": False, "accountOk": True},
+                    bridgeDiagnostics={"fresh": True, "client": {"reason": reason}},
+                )
+                self.assertEqual(w["clientState"], "unknown")
+                self.assertEqual(w["clientReason"], reason)
+                self.assertEqual(w["client"], "微信窗口暂不可用")
+                self.assertIsNone(w["connected"])
+                self.assertFalse(w["running"])
+                self.assertTrue(w["bridge"]["online"])
+
     def test_wechat_qr_required_is_explicit(self):
         w = self.wx_status(bridge={"online": False, "listener": None, "accountOk": False},
                           bridgeDiagnostics={"fresh": True, "client": {
@@ -937,6 +951,14 @@ class StatusTruthTests(unittest.TestCase):
         w = self.wx_status(bridge={"online": True, "listener": False, "accountOk": None})
         self.assertIs(w["connected"], False)
         self.assertNotEqual(w["clientState"], "ok")
+        self.assertEqual(w["bridgeStatus"], "listener_paused")
+        self.assertEqual(w["client"], "微信桥接监听暂停")
+
+    def test_wechat_ready_listener_does_not_claim_login_without_account_check(self):
+        w = self.wx_status(bridge={"online": True, "listener": True, "accountOk": None})
+        self.assertIs(w["connected"], True)
+        self.assertEqual(w["bridgeStatus"], "ready")
+        self.assertEqual(w["client"], "微信桥接监听正常")
 
     def test_wechat_unknown_when_probe_missing(self):
         w = self.adapter("wechat", {"wechat": {}}).status()[0]

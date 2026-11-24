@@ -488,6 +488,7 @@
       clientReason: str(p.clientReason),
       enabled: bool(p.enabled),
       bridge: normBridge(p.bridge),
+      bridgeStatus: str(p.bridgeStatus),
       lastRead: normEpoch(p.lastRead),
       diagFresh: diag ? diag.fresh === true : null,
       diagPhase: diag ? str(diag.phase) : null,
@@ -818,6 +819,10 @@
   function connectionBadge(p) {
     if (p.clientState === 'qr') return badge('待扫码', 'warning');
     if (p.clientState === 'disabled') return badge('已停用', 'off');
+    if (p.bridgeStatus === 'listener_paused') return badge('监听暂停', 'warning');
+    if (p.bridgeStatus === 'window_pending') return badge('窗口待恢复', 'warning');
+    if (p.bridgeStatus === 'account_blocked') return badge('账号校验未通过', 'warning');
+    if (p.bridgeStatus === 'offline') return badge('心跳中断', 'off');
     if (p.connected === true) return badge('已连接', 'on');
     if (p.connected === false) return badge('未连接', 'off');
     return badge('未确认', 'unknown'); // 读不到 ≠ 不可用
@@ -839,9 +844,13 @@
     }
     if (key === 'wechat') {
       if (p.clientState === 'qr') return '微信客户端在等待扫码或手机确认';
-      if (p.clientState === 'offline') return '本地桥接没有心跳，回复发不出去';
-      if (p.clientState === 'disabled') return '网关被停用（停用不等于已连接）';
-      if (p.clientState === 'ok') return '桥接在线且账号可用';
+      if (p.clientState === 'disabled') return '微信网关已停用';
+      if (p.bridgeStatus === 'offline') return '当前未收到桥接心跳，微信登录状态可在账号页单独确认';
+      if (p.bridgeStatus === 'listener_paused') return '桥接仍有心跳，消息监听暂未运行';
+      if (p.bridgeStatus === 'window_pending') return '等待微信窗口恢复后继续收发';
+      if (p.bridgeStatus === 'account_blocked') return '桥接未通过当前账号的校验';
+      if (p.clientState === 'ok') return p.bridge && p.bridge.accountOk === true
+        ? '桥接在线且账号已通过校验' : '桥接监听正常，客户端登录状态可在账号页确认';
       return '桥接状态读不到，先不判断';
     }
     return '';
@@ -1611,6 +1620,16 @@
   let savingMemory = false;
   const memoryRoute = '/api/memory/wechat';
   const wechatAccountPath = '/api/account/wechat';
+  const wechatBridgeLabels = {
+    ready: ['桥接监听正常', 'ok'],
+    window_pending: ['桥接等待微信窗口就绪', 'scan'],
+    listener_paused: ['桥接在线，消息监听暂停', 'scan'],
+    login_pending: ['桥接在线，等待客户端登录', 'scan'],
+    account_blocked: ['桥接在线，账号校验未通过', 'offline'],
+    offline: ['桥接心跳未收到', 'offline'],
+    disabled: ['桥接已停用', 'unknown'],
+    unknown: ['桥接状态待确认', 'unknown'],
+  };
   let wechatAccountRequest = 0;
   let wechatAccountBusy = false;
   let wechatAccountPoll = 0;
@@ -1623,11 +1642,19 @@
     image.removeAttribute('src');
   }
 
+  function showWeChatBridge(stateName) {
+    const label = wechatBridgeLabels[stateName] || wechatBridgeLabels.unknown;
+    const field = $('wechatBridgeStatus');
+    field.textContent = label[0];
+    field.dataset.state = label[1];
+  }
+
   function closeWeChatAccount() {
     ++wechatAccountRequest;
     wechatAccountBusy = false;
     hideWeChatQr();
     $('wechatAccountStatus').textContent = '';
+    showWeChatBridge('unknown');
     $('wechatAccountRefresh').disabled = false;
     $('wechatAccountGetQr').disabled = true;
     $('wechatAccountReconnect').disabled = true;
@@ -1655,6 +1682,8 @@
       result = action === 'qr' ? await apiPost(wechatAccountPath + '/qr', {}) : await apiGet(wechatAccountPath);
       if (request !== wechatAccountRequest) return;
       status.textContent = (action === 'reconnect' ? '桥接已重连。' : '') + result.label;
+      status.dataset.state = result.state;
+      if (action !== 'qr') showWeChatBridge(result.bridgeStatus);
       if (typeof result.image === 'string' && result.image.startsWith('data:image/png;base64,')) {
         image.src = result.image;
         image.hidden = false;
@@ -1667,6 +1696,7 @@
       if (error.status === 401) { handleUnauthorized(); return; }
       hideWeChatQr();
       status.textContent = error.message;
+      if (action !== 'qr') showWeChatBridge('unknown');
     } finally {
       if (request === wechatAccountRequest) {
         wechatAccountBusy = false;
