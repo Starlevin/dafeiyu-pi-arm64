@@ -50,6 +50,7 @@ from urllib.parse import parse_qs, urlsplit
 import adapters
 import usage_adapter
 import content
+import host_status
 import tool_routes
 try:
     import social_sidecar
@@ -673,6 +674,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.need_auth():
                     return
                 return self.json(200, self.app.usage.section())
+            if path == "/api/host/status":
+                if not self.need_auth():
+                    return
+                return self.json(200, self.app.host_status.section())
             if house_console_ext is not None and house_console_ext.resolve(self, "GET", path):
                 return
             if path == "/api/ca":
@@ -1029,6 +1034,8 @@ class App:
         self.auth_lock = threading.RLock()
         self.console = adapters.Console(cfg, fixture)
         self.usage = usage_adapter.UsageAdapter(cfg, fixture)
+        self.host_status = host_status.HostStatus(
+            self.state_dir, enabled=fixture is None and sys.platform.startswith("linux"))
         self.fixture = fixture
         tool_routes.bind_config(self, cfg)
         content_cfg = dict(cfg)
@@ -1215,11 +1222,13 @@ def main(argv=None):
     if len(servers) == 1:
         print("提示：未找到 TLS 证书，局域网入口未启动；本机入口仍可用", file=sys.stderr)
 
-    # Periodic session sweep.
+    # One thread runs both maintenance tasks at a steady one-minute cadence.
     def sweeper():
         while True:
-            time.sleep(60)
+            started = time.monotonic()
             app.sessions.sweep()
+            app.host_status.record()
+            time.sleep(max(0, host_status.SAMPLE_SECONDS - (time.monotonic() - started)))
     threading.Thread(target=sweeper, daemon=True).start()
 
     threads = []

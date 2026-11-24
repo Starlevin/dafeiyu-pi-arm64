@@ -143,6 +143,16 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(d["secure"])              # loopback HTTP
         self.assertTrue(d["lanUrl"].startswith("https://"))
 
+    def test_host_status_uses_existing_session_and_fixtures_remain_offline(self):
+        s, _, _ = self.client.req("GET", "/api/host/status")
+        self.assertEqual(s, 401)
+
+        self.client.cookie = "dafeiyu_session=" + self.app.sessions.create()
+        s, d, _ = self.client.req("GET", "/api/host/status")
+        self.assertEqual(s, 200)
+        self.assertEqual(d, {"ok": True, "sampleSeconds": 60, "current": None, "history": []})
+        self.assertFalse(self.app.host_status.enabled)
+
     def test_setup_needs_loopback(self):
         # A forged non-loopback client address cannot be simulated through the
         # socket here, but we can at least verify the pair is required.
