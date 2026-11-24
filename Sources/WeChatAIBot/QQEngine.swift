@@ -678,15 +678,7 @@ struct QQEngineSharedState: Sendable {
     private func establishConnection(current: UUID) async throws {
         let token = try resolveOneBotToken()
         try await connection.connect(endpoint: config.endpoint, token: token)
-        let response = try await connection.action("get_login_info")
-        guard session == current else { throw CancellationError() }
-        guard let data = response["data"] as? [String: Any], QQPolicy.identifier(data["user_id"]) == config.expectedSelfID else {
-            throw AppFailure.message("实际登录 QQ 与配置不一致，已停止连接")
-        }
-        let health = try await connection.action("get_status")
-        guard session == current else { throw CancellationError() }
-        guard let healthData = health["data"] as? [String: Any], healthData["online"] as? Bool == true,
-              healthData["good"] as? Bool == true else { throw AppFailure.message("QQ 未在线或服务状态异常") }
+        try await verifyOneBotSession(current: current)
         let friends = try await connection.action("get_friend_list")
         let groups = try await connection.action("get_group_list")
         guard session == current else { throw CancellationError() }
@@ -713,6 +705,18 @@ struct QQEngineSharedState: Sendable {
                 self.scheduleMemoryLearning()
             }
         }
+    }
+
+    private func verifyOneBotSession(current: UUID?, timeout: Duration = .seconds(15)) async throws {
+        let response = try await connection.action("get_login_info", timeout: timeout)
+        guard session == current else { throw CancellationError() }
+        guard let data = response["data"] as? [String: Any], QQPolicy.identifier(data["user_id"]) == config.expectedSelfID else {
+            throw AppFailure.message("实际登录 QQ 与配置不一致，已停止连接")
+        }
+        let health = try await connection.action("get_status", timeout: timeout)
+        guard session == current else { throw CancellationError() }
+        guard let data = health["data"] as? [String: Any], data["online"] as? Bool == true,
+              data["good"] as? Bool == true else { throw AppFailure.message("QQ 未在线或服务状态异常") }
     }
 
     // MARK: - 断线自愈
@@ -1844,8 +1848,7 @@ struct QQEngineSharedState: Sendable {
                 heldOwnerEvents = heldOwnerEvents.filter { !$0.key.hasPrefix(message.key + ":") }
                 if proactive, scopedProactiveProfiles[message.key] != nil {
                     if waitingForReceipt {
-                        let reason = error is OneBotExplicitRejection ? "send_rejected" : "send_unconfirmed"
-                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: reason)
+                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "send_unconfirmed")
                     } else if waitingForModel, fence.permits(epoch), !(error is CancellationError) {
                         logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "model_failed")
                     }
@@ -1857,11 +1860,12 @@ struct QQEngineSharedState: Sendable {
                         proactiveSendHistory[message.key, default: []].append(Date())
                         record(target.id, .uncertain, "发送结果未知，不重发，计入本群主动接话冷却和限额")
                         if fence.permits(epoch), connected {
-                            let response = try? await connection.action("get_login_info", timeout: .seconds(3))
-                            guard fence.permits(epoch), !Task.isCancelled else { continue }
-                            let account = (response?["data"] as? [String: Any]).flatMap { QQPolicy.identifier($0["user_id"]) }
-                            if account != config.expectedSelfID {
-                                handleConnectionLoss(AppFailure.message("QQ 发送超时后账号探测未通过"))
+                            do {
+                                try await verifyOneBotSession(current: session, timeout: .seconds(3))
+                            } catch {
+                                if fence.permits(epoch), !Task.isCancelled {
+                                    handleConnectionLoss(AppFailure.message("QQ 发送超时后连接验证未通过"))
+                                }
                             }
                         }
                     } else {
