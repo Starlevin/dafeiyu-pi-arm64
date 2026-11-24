@@ -395,7 +395,7 @@ def _controller_panel(qa):
 
     对应 dafeiyu-test/qq-admin/admin_core.py 的 ``Controller``（state =
     self.panel）。runtimeRecords 已是 newest-first，这里按原顺序保留头部，
-    不再取尾部。detail 只用于进程内判定「是否聊天确认」，绝不外传。
+    不再取尾部。detail 只在进程内用于识别有明确信号的聊天和工具状态。
     """
     ctl = qa._controller_instance()
     if ctl is None:
@@ -411,12 +411,13 @@ def _controller_panel(qa):
 
 
 def qq_panel_evidence(panel):
-    """把 QQ 面板压成 {state, timestamp, chat, ingress, active}，丢弃原文。
+    """只保留 QQ 阶段、时间和验证过的标记。
 
     ``chat`` 是布尔：只有确切以 OneBot 已接受发送 开头的 confirmed 记录才
     为 True，插画/性格/设置命令一律 False。
     ``ingress`` 是布尔：只有固定原生聊天入队标记才为 True。
     ``active`` 是布尔：只有核心当前的聊天模型或 OneBot 调用才为 True。
+    ``tool`` 是布尔：只有核心当前的聊天工具执行标记才为 True。
     """
     records = []
     raw = panel.get("runtimeRecords") if isinstance(panel, dict) else None
@@ -435,7 +436,8 @@ def qq_panel_evidence(panel):
                     and detail.startswith(live_ws.QQ_CHAT_CONFIRM_PREFIX))
             ingress = live_ws.qq_native_chat_ingress(item)
             records.append({"state": state, "timestamp": float(ts),
-                            "chat": chat, "ingress": ingress, "active": live_ws.qq_active_chat(item)})
+                            "chat": chat, "ingress": ingress, "active": live_ws.qq_active_chat(item),
+                            "tool": live_ws.qq_tool_running(item)})
     queued = panel.get("queued") if isinstance(panel, dict) else None
     return {
         "available": isinstance(panel, dict),
@@ -567,7 +569,8 @@ def qq_panel_view():
     evidence = qq_panel_evidence(panel)
     return {"runtimeRecords": [
         {"state": item["state"], "timestamp": item["timestamp"],
-         "_chat": item["chat"], "_ingress": item["ingress"], "_active": item["active"]}
+         "_chat": item["chat"], "_ingress": item["ingress"], "_active": item["active"],
+         "_tool": item["tool"]}
         for item in evidence["runtime_records"]]}
 
 

@@ -739,6 +739,55 @@ class LoopbackWebSocketTests(unittest.TestCase):
         finally:
             sock.close()
 
+    def test_tool_state_reaches_live_transports_through_qq_projection(self):
+        stamp = time.time()
+        self.state["panel"] = {"runtimeRecords": [
+            {"state": "generating", "timestamp": stamp, "detail": live_ws.QQ_TOOL_DETAIL,
+             "target": "private-fixture-room"},
+        ]}
+        poller = self.server.QQEvidencePoller(lambda: self.state["panel"], interval=0.05)
+        poller.tick()
+        base = "http://127.0.0.1:%d" % self.port
+
+        def next_sse(stream):
+            for line in stream:
+                if line.startswith(b"data: "):
+                    return json.loads(line[6:])
+            self.fail("event stream closed before a state arrived")
+
+        with patch.object(self.server, "qq_poller", poller), \
+             patch.object(self.server.bridge, "_panel_reader", self.server.qq_panel_view):
+            sock, head = self.connect()
+            self.addCleanup(sock.close)
+            self.assertIn("101", head)
+            reader = self.reader(sock)
+            self.assertEqual(self.next_json(reader)["type"], "config")
+            state = self.next_json(reader)
+            self.assertEqual((state["source"], state["phase"], state.get("event_at")),
+                             ("qq", "tool", stamp))
+            self.assertTrue(state["verified"])
+            self.assertGreater(state["ttl_ms"], 250000)
+            self.assertNotIn("private-fixture-room", json.dumps(state))
+            self.assertNotIn("detail", state)
+
+            for path in ("/api/house/live-events", "/api/house/events"):
+                with urllib.request.urlopen(base + path, timeout=5) as stream:
+                    event = next_sse(stream)
+                    if event.get("type") == "config":
+                        event = next_sse(stream)
+                    self.assertEqual((event["source"], event["phase"]), ("qq", "tool"))
+                    self.assertTrue(event["verified"])
+            with urllib.request.urlopen(base + "/fish_house/state.json", timeout=5) as response:
+                self.assertEqual(json.load(response)["phase"], "tool")
+
+            self.state["panel"] = {"runtimeRecords": [
+                {"state": "generating", "timestamp": time.time(),
+                 "detail": live_ws.QQ_TOOL_DETAIL + " extra text"},
+            ]}
+            poller.tick()
+            idle, _ = self.wait_for(reader, lambda m: m["type"] == "state" and m["phase"] == "idle")
+            self.assertFalse(idle["verified"])
+
     def test_frames_never_leak_private_material(self):
         self.state["wechat_activity"] = "thinking"
         self.state["panel"] = {"runtimeRecords": [
@@ -1351,7 +1400,7 @@ class ReviewRegressionTests(unittest.TestCase):
         # newest-first 保留头部 6 条，而不是尾部。
         self.assertEqual(kept[0]["timestamp"], 300.0)
         self.assertEqual(len(kept), 6)
-        self.assertEqual(set(kept[0]), {"state", "timestamp", "chat", "ingress", "active"})
+        self.assertEqual(set(kept[0]), {"state", "timestamp", "chat", "ingress", "active", "tool"})
         self.assertTrue(kept[0]["chat"])
         self.assertFalse(kept[0]["ingress"])
         blob = json.dumps(panel, ensure_ascii=False)
@@ -1371,7 +1420,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertTrue(panel["runtime_records"][0]["ingress"])
         self.assertFalse(panel["runtime_records"][1]["ingress"])
         self.assertEqual(set(panel["runtime_records"][0]),
-                         {"state", "timestamp", "chat", "ingress", "active"})
+                         {"state", "timestamp", "chat", "ingress", "active", "tool"})
         self.assertNotIn("真实消息正文", json.dumps(panel, ensure_ascii=False))
 
     def test_non_chat_confirm_is_not_a_receipt(self):
@@ -1396,7 +1445,7 @@ class ReviewRegressionTests(unittest.TestCase):
         view = mod.qq_panel_view()
         self.assertEqual(view["runtimeRecords"][0],
                          {"state": "generating", "timestamp": NOW - 10,
-                          "_chat": False, "_ingress": False, "_active": True})
+                          "_chat": False, "_ingress": False, "_active": True, "_tool": False})
         self.assertEqual(live_ws.qq_evidence({}, view, now=NOW).phase, "thinking")
         with patch.object(mod.time, "monotonic", return_value=mod.qq_poller._read_at + 6):
             self.assertIsNone(mod.qq_panel_view())

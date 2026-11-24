@@ -404,7 +404,7 @@ def qq_active_chat(item: dict[str, Any]) -> bool:
 
 def qq_tool_running(item: dict[str, Any]) -> bool:
     return (item.get("state") == "generating"
-            and _record_detail(item).strip() == QQ_TOOL_DETAIL)
+            and (item.get("_tool") is True or _record_detail(item).strip() == QQ_TOOL_DETAIL))
 
 
 def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
