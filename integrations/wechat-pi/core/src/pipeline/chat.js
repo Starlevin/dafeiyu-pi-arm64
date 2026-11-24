@@ -2083,23 +2083,21 @@ class Bot {
     // 记一笔全局回复时间（跨会话共用），_decide 的全局闸门读它
     this.globalReplyTimes.push(this.now().getTime());
     if (this.globalReplyTimes.length > 600) this.globalReplyTimes = this.globalReplyTimes.slice(-300);
-    // 写库失败照常返回 bubbles：话已经生成了，不能因为落库失败把回复丢了。
     // 日记标记只存占位符，避免把整篇日记又写进聊天记忆。
     const hasDiaryMark = /\[\[diary:[^\]]{1,32}\]\]/i.test(text);
     const storeText = hasDiaryMark
       ? text.replace(/\[\[diary:[^\]]{1,32}\]\]/gi, '（读取日记）')
       : text;
     if (!msg.momentsContextUsed) {
-      try {
-        this.store.appendMessage(decision.key, {
-          role: 'assistant',
-          name: this.config.persona.name,
-          text: storeText,
-          ts: this.now().getTime(),
-          error,
-        });
-      } catch (err) {
-        this.logger && this.logger.error('写入回复失败（照常发送）：' + describeError(err));
+      const message = { role: 'assistant', name: this.config.persona.name, text: storeText, error };
+      if (decision.stageAssistant) {
+        decision.stageAssistant(decision.key, message);
+      } else {
+        try {
+          this.store.appendMessage(decision.key, { ...message, ts: this.now().getTime() });
+        } catch (err) {
+          this.logger && this.logger.error('写入回复失败（照常发送）：' + describeError(err));
+        }
       }
     }
     // 每轮一个 checkpoint：重启后能知道停在哪、episode 有没有关
@@ -2172,13 +2170,13 @@ class Bot {
    * 非流式的完整处理，给微信网关用。
    * @returns {{action: string, reply?: string, bubbles?: string[], reason: string, commandType?: string}}
    */
-  async handle(rawMsg, { signal, localWechat = false } = {}) {
+  async handle(rawMsg, { signal, localWechat = false, stageAssistant } = {}) {
     // M21：同一会话串行、不同会话并发。
     // 网关会并发调 handle，而 decide() 里多处 await 之间读改写共享 state，
     // 同会话两条消息并发处理会互相覆盖计数、双回复（CHANGELOG 的并发漏拦即此类）。
     const chainKey = this.sessionKey(this.normalize(rawMsg));
     const prev = this._handleChains.get(chainKey) || Promise.resolve();
-    const run = prev.then(() => this._handleOnce(rawMsg, { signal, localWechat }));
+    const run = prev.then(() => this._handleOnce(rawMsg, { signal, localWechat, stageAssistant }));
     // 链尾留在表里给后来者排队；跑完（成功或失败）把自己清掉，别把 Map 越攒越大
     const guard = run.then(() => null, () => null);
     this._handleChains.set(chainKey, guard);
@@ -2210,7 +2208,7 @@ class Bot {
   }
 
   /** handle 的实际处理体，由 handle() 按会话串行调用（不同会话仍然并发） */
-  async _handleOnce(rawMsg, { signal, localWechat } = {}) {
+  async _handleOnce(rawMsg, { signal, localWechat, stageAssistant } = {}) {
     let decision;
     try {
       decision = await this.decide(rawMsg);
@@ -2224,6 +2222,7 @@ class Bot {
       try { this.store.checkpoint(decision.key); } catch { /* 忽略的消息也要留断点 */ }
       return { action: 'ignore', reason: decision.reason };
     }
+    decision.stageAssistant = stageAssistant;
     if (decision.action === 'command') {
       const bubbles = this.finalize(decision, decision.text);
       return { action: 'reply', reply: decision.text, bubbles, reason: 'command', commandType: decision.commandType };

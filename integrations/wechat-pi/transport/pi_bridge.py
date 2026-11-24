@@ -1608,7 +1608,9 @@ def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhoo
         response = _ask_core_once(CORE_URL, path, compat_payload, token, timeout)
         extra = {}
     receipt = response.pop("memoryReceipt", None)
+    compat_receipt = response.pop("compatMemoryReceipt", None)
     response.pop("_swift_memory_receipt", None)
+    response.pop("_compat_memory_receipt", None)
     if (path == "/webhook/wechat" and "x-unified-token" in extra
             and response.get("ok") and response.get("action") == "reply"
             and isinstance(receipt, str) and len(receipt) == 36):
@@ -1616,7 +1618,21 @@ def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhoo
             response["_swift_memory_receipt"] = str(uuid.UUID(receipt))
         except ValueError:
             pass
+    if (path == "/webhook/wechat" and not extra and routed.get("memory_account")
+            and response.get("ok") and response.get("action") == "reply"
+            and isinstance(compat_receipt, str) and len(compat_receipt) == 36):
+        try:
+            response["_compat_memory_receipt"] = str(uuid.UUID(compat_receipt))
+        except ValueError:
+            pass
     return response
+
+
+def confirm_compat_memory(receipt, account, trace, token):
+    result = _ask_core_once(CORE_URL, "/api/bridge/memory/confirmed",
+                            {"receipt": receipt, "memory_account": account, "trace": trace},
+                            token, 0.5)
+    log("compat_memory", trace=trace, status="stored" if result.get("confirmed") is True else "not_stored")
 
 
 def confirm_swift_memory(receipt, trace):
@@ -2619,7 +2635,7 @@ def dispatch_sticker(target, candidate, args, health, parent_trace, *, proactive
     return status
 
 
-def deliver_ready(replies, args, health=None):
+def deliver_ready(replies, args, health=None, *, token=""):
     while True:
         try:
             target, is_group, response, trace = replies.get_nowait()
@@ -2809,8 +2825,11 @@ def deliver_ready(replies, args, health=None):
             health.finish_submit(trace, confirmed)
         record(health, "confirmation" if submitted else "submit", status, trace,
                success=confirmed, failed=not confirmed, unknown=submitted and not confirmed)
-        if confirmed and submitted and media is None and response.get("_swift_memory_receipt"):
-            confirm_swift_memory(response["_swift_memory_receipt"], trace)
+        if confirmed and submitted and media is None:
+            if response.get("_swift_memory_receipt"):
+                confirm_swift_memory(response["_swift_memory_receipt"], trace)
+            elif memory_account and token and response.get("_compat_memory_receipt"):
+                confirm_compat_memory(response["_compat_memory_receipt"], memory_account, trace, token)
         if confirmed and media is None and isinstance(response.get("sticker"), dict):
             dispatch_sticker(
                 target, response["sticker"], args, health, trace, proactive=auto_ctx is not None,
@@ -3015,7 +3034,7 @@ def main():
             print("client_runtime_changed", flush=True)
             return 4
         try:
-            deliver_ready(replies, args, health)
+            deliver_ready(replies, args, health, token=token)
         except Exception as error:
             log("send_result", status=type(error).__name__)
         privates = _private_accounts(args)
@@ -3176,7 +3195,7 @@ def main():
             elif target == urgent_target or target == supplemental_group:
                 wal_source_at = wal_message_at
             try:
-                deliver_ready(replies, args, health)
+                deliver_ready(replies, args, health, token=token)
                 app = get_app()
                 if app is None:
                     if settle_due:
@@ -3367,7 +3386,7 @@ def main():
                     else:
                         ready_signal.wait(timeout=12.0)
                     ready_signal.clear()
-                    deliver_ready(replies, args, health)
+                    deliver_ready(replies, args, health, token=token)
                 if (verified_wal_scan_may_ack(
                         forced_due=forced_due, verified_pending=verified_pending,
                         viewport_gap=gap_detected[0])
@@ -3428,12 +3447,12 @@ def main():
             if target == short_refresh_target and verified_rechecks.empty_refresh_pending(target):
                 break
         try:
-            deliver_ready(replies, args, health)
+            deliver_ready(replies, args, health, token=token)
         except Exception as error:
             log("send_result", status=type(error).__name__)
         if args.once:
             jobs.join()
-            deliver_ready(replies, args, health)
+            deliver_ready(replies, args, health, token=token)
             return 0
         if ((resume_for_sidebar or settle_priority or deferred_wal_hint is not None)
                 and (public_question_settler is None or not public_question_settler.has_pending)):

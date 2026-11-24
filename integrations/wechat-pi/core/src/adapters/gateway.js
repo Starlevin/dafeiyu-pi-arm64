@@ -13,10 +13,14 @@ const { sendDenial } = require('../core/wechatSendPolicy');
 const http = require('node:http');
 const https = require('node:https');
 const { URL } = require('node:url');
+const { randomUUID } = require('node:crypto');
 
 // 只保留微信：抖音桥接早已不适配，代码删掉后不再留一个永远连不上的平台名。
 const PLATFORMS = ['wechat'];
 const { isMemoryAccount } = require('../memory/sessionKey');
+const MEMORY_RECEIPT_TTL_MS = 5 * 60 * 1000;
+const MAX_PENDING_MEMORY = 128;
+const LOCAL_TRACE = /^(?:[0-9a-f]{64}|[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/i;
 
 function firstDefined(obj, keys) {
   for (const k of keys) {
@@ -118,6 +122,7 @@ class Gateway {
     };
     this.bot = bot;
     this.logger = logger;
+    this.pendingMemory = new Map();
     this.stats = { received: 0, replied: 0, sent: 0, failed: 0, lastMessageAt: 0, lastError: '' };
     // 本地桥接的存活信息：桥接每 20 秒来一次心跳，状态接口据此报告「桥接在线 / 离线」
     this.bridge = {
@@ -236,7 +241,11 @@ class Gateway {
         `[${this.platform}] 收到 ${msg.chatType === 'group' ? '群' : '私聊'}消息 ${msg.senderName}（${String(msg.text).length} 字）`
       );
     const localWechat = local && this.platform === 'wechat';
-    const result = await this.bot.handle(msg, { localWechat });
+    const awaitVisible = localWechat && msg.memoryAccount && this.bot.config?.wechat?.memoryAccountBinding
+      && !this.options.outboundUrl;
+    let pending;
+    const stageAssistant = awaitVisible ? (key, message) => { pending = { key, message }; } : undefined;
+    const result = await this.bot.handle(msg, { localWechat, stageAssistant });
     if (result.action !== 'reply' || !result.reply) {
       return { ok: true, action: 'ignore', reason: result.reason || 'ignored' };
     }
@@ -284,10 +293,13 @@ class Gateway {
     } catch (err) {
       this.logger && this.logger.warn && this.logger.warn('挑表情包失败：' + (err && err.message ? err.message : err));
     }
+    const compatMemoryReceipt = pending && out?.local && out.ok && LOCAL_TRACE.test(msg.msgId)
+      ? this.stageMemoryReceipt(msg, pending) : null;
     return {
       ok: true,
       action: 'reply',
       reply: result.reply,
+      ...(compatMemoryReceipt ? { compatMemoryReceipt } : {}),
       bubbles: result.bubbles || [result.reply],
       ...(sticker ? { sticker } : {}),
       ...(localWechat && result.separateText ? { separateText: true } : {}),
@@ -299,6 +311,42 @@ class Gateway {
       mock: Boolean(this.bot && this.bot.llm && this.bot.llm.isMock),
       outbound: out,
     };
+  }
+
+  stageMemoryReceipt(msg, pending) {
+    const now = Date.now();
+    for (const [id, entry] of this.pendingMemory) {
+      if (entry.expiresAt > now && this.pendingMemory.size < MAX_PENDING_MEMORY) break;
+      this.pendingMemory.delete(id);
+    }
+    const receipt = randomUUID();
+    this.pendingMemory.set(receipt, {
+      ...pending, account: msg.memoryAccount, trace: msg.msgId, expiresAt: now + MEMORY_RECEIPT_TTL_MS,
+    });
+    return receipt;
+  }
+
+  confirmMemory({ receipt, memory_account: account, trace }) {
+    const entry = this.pendingMemory.get(receipt);
+    if (!entry || entry.account !== account || entry.trace !== trace) return false;
+    if (entry.expiresAt <= Date.now()) {
+      this.pendingMemory.delete(receipt);
+      return false;
+    }
+    if (entry.confirmed) return true;
+    // Consume before writing so even an uncertain disk failure cannot duplicate a reply.
+    this.pendingMemory.delete(receipt);
+    try {
+      this.bot.store.appendMessage(entry.key, entry.message);
+    } catch {
+      this.logger?.warn('微信确认回执的记忆写入失败');
+      return false;
+    }
+    // Keep only the receipt identity for duplicate acknowledgements.
+    this.pendingMemory.set(receipt, {
+      account, trace, expiresAt: Date.now() + MEMORY_RECEIPT_TTL_MS, confirmed: true,
+    });
+    return true;
   }
 
   async send({ chatId, chatType, text, bubbles = [text], replyTo = '', senderName = '', local = false }) {

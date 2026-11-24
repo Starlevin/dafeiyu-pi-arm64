@@ -1,5 +1,6 @@
 import hashlib
 import unittest
+import uuid
 from contextlib import nullcontext
 from pathlib import Path
 from queue import Queue
@@ -52,6 +53,58 @@ class MemoryScopeTests(unittest.TestCase):
             self.assertEqual(forwarded["memory_account"], "b" * 64)
             self.assertNotIn("_memory_account_pid", forwarded)
             candidate_routes.route_for.assert_not_called()
+
+    def test_compatibility_receipt_comes_only_from_the_scoped_compatibility_route(self):
+        receipt = str(uuid.uuid4())
+        payload = {"memory_account": "a" * 64}
+        response = {"ok": True, "action": "reply", "compatMemoryReceipt": receipt,
+                    "_compat_memory_receipt": "spoofed"}
+        swift = ("http://127.0.0.1:41143", {"x-unified-token": "fixture"})
+        compat = (bridge.CORE_URL, {})
+        for route, inbound, valid in ((compat, payload, True), (compat, {}, False),
+                                      (swift, payload, False)):
+            with self.subTest(route=route, valid=valid), \
+                 patch.object(bridge, "core_target", return_value=route), \
+                 patch.object(bridge, "_ask_core_once", return_value=dict(response)):
+                result = bridge.ask_core_routed(inbound, "fixture")
+                self.assertNotIn("compatMemoryReceipt", result)
+                self.assertEqual(result.get("_compat_memory_receipt"), receipt if valid else None)
+        with patch.object(bridge, "core_target", return_value=swift), \
+             patch.object(bridge, "_ask_core_once", side_effect=[
+                 {"ok": False, "error": "core_connection_refused"}, dict(response)
+             ]):
+            self.assertEqual(bridge.ask_core_routed(payload, "fixture").get("_compat_memory_receipt"),
+                             receipt)
+
+    def test_compatibility_memory_requires_a_visible_submission_on_the_same_account(self):
+        account, trace, receipt = "a" * 64, "c" * 64, str(uuid.uuid4())
+        args = SimpleNamespace(_memory_account_binding=account, group=["fixture"])
+        scenarios = (("visible_outgoing", True, account, True),
+                     ("unconfirmed:receipt_timeout", True, account, False),
+                     ("visible_outgoing", True, "b" * 64, False),
+                     ("visible_outgoing", False, account, False))
+        for result, submit, last_account, stored in scenarios:
+            with self.subTest(result=result, submit=submit, stored=stored):
+                replies = Queue()
+                replies.put(("fixture", True, {"ok": True, "action": "reply", "reply": "fixture",
+                                              "_compat_memory_receipt": receipt,
+                                              "_bridge_memory_account": account}, trace))
+                def send(_target, _reply, before_return, **_):
+                    if submit:
+                        before_return()
+                    return result
+
+                with patch.multiple(
+                        bridge, get_app=Mock(),
+                        app_memory_account=Mock(side_effect=[account, account, last_account]
+                                                if submit else [account, last_account]),
+                        blocking_state=Mock(return_value=""), group_is_open=Mock(return_value=True),
+                        send_reply=Mock(side_effect=send), confirm_compat_memory=Mock()):
+                    bridge.deliver_ready(replies, args, token="fixture")
+                    if stored:
+                        bridge.confirm_compat_memory.assert_called_once_with(receipt, account, trace, "fixture")
+                    else:
+                        bridge.confirm_compat_memory.assert_not_called()
 
     def test_account_switch_before_return_preserves_delivery_ledger(self):
         account = "a" * 64

@@ -16,6 +16,8 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const { EventEmitter } = require('node:events');
+const registerBridge = require('../src/http/routes/bridge');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
@@ -126,6 +128,66 @@ test('verified accounts isolate the same group, private chat, message ID and old
   assert.equal(cold.isDuplicate(scopeA, MSG_ID), true);
   assert.equal(cold.isDuplicate(scopeB, MSG_ID), true);
   assert.equal(cold.messages(KEY_A, 2)[0].text, '无主旧记录夹具');
+});
+
+test('managed WeChat stores assistant text only after the signed, matching UI receipt', async (t) => {
+  const account = 'a'.repeat(64);
+  const token = 'local-fixture-secret';
+  const { dir, store, gateway } = gatewayFixture(t);
+  gateway.options.inboundToken = token;
+  gateway.bot.config.wechat = { memoryAccountBinding: account };
+  const send = (group) => gateway.handleInbound(
+    { ...inbound(group, '这是一条入站测试消息'), memory_account: account },
+    { local: true, trustedLocal: true },
+  );
+  const accepted = await send(GROUP_A);
+  const abandoned = await send(GROUP_B);
+  assert.ok(accepted.compatMemoryReceipt);
+  assert.ok(abandoned.compatMemoryReceipt);
+  assert.notEqual(accepted.compatMemoryReceipt, abandoned.compatMemoryReceipt);
+  const scopeA = `wechat:a:${account}:g:${GROUP_A}`;
+  const scopeB = `wechat:a:${account}:g:${GROUP_B}`;
+  const roles = (db, scope) => db.messages(scope, 20).map((row) => row.role);
+  assert.deepEqual(roles(store, scopeA), ['user']);
+  assert.deepEqual(roles(store, scopeB), ['user']);
+
+  const routes = new Map();
+  registerBridge({ post: (path, handler) => routes.set(path, handler), pattern() {} });
+  const ack = routes.get('/api/bridge/memory/confirmed');
+  async function request(body, auth = token, address = '127.0.0.1') {
+    const req = Object.assign(new EventEmitter(), {
+      socket: { remoteAddress: address },
+      headers: { 'x-whale-bridge': '1', 'x-bot-token': auth },
+    });
+    let status, response;
+    const res = {
+      writeHead(value) { status = value; },
+      end(value) { response = JSON.parse(value); },
+    };
+    const run = ack({ gateways: new Map([['wechat', gateway]]) }, req, res);
+    req.emit('data', Buffer.from(JSON.stringify(body)));
+    req.emit('end');
+    await run;
+    return [status, response];
+  }
+  const receipt = { receipt: accepted.compatMemoryReceipt, memory_account: account, trace: MSG_ID };
+  assert.equal((await request(receipt, 'bad-token'))[0], 403);
+  assert.equal((await request(receipt, token, '192.0.2.15'))[0], 403);
+  assert.deepEqual(await request({ ...receipt, memory_account: 'b'.repeat(64) }), [200, { ok: true, confirmed: false }]);
+  assert.deepEqual(await request({ ...receipt, trace: 'missing' }), [200, { ok: true, confirmed: false }]);
+  assert.deepEqual(roles(store, scopeA), ['user']);
+  const passed = [200, { ok: true, confirmed: true }];
+  assert.deepEqual(await request(receipt), passed);
+  assert.deepEqual(await request(receipt), passed);
+  assert.deepEqual(roles(store, scopeA), ['user', 'assistant']);
+
+  store.close();
+  const cold = new Store({ dir });
+  t.after(() => cold.close());
+  const restarted = new Gateway({ platform: 'wechat', bot: { store: cold } });
+  assert.equal(restarted.confirmMemory({ ...receipt, receipt: abandoned.compatMemoryReceipt }), false);
+  assert.deepEqual(roles(cold, scopeA), ['user', 'assistant']);
+  assert.deepEqual(roles(cold, scopeB), ['user']);
 });
 
 test('a reply derived from an owner Moments snapshot never enters cold chat memory', async (t) => {

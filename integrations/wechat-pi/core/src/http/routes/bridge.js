@@ -4,12 +4,16 @@ const { json, readBody } = require('../util');
 const { isLoopbackRequest, safeEqual } = require('../security');
 const styles = require('../../persona/bridge-styles');
 
+function isSignedLocalBridge(req, gateway) {
+  const token = gateway?.options.inboundToken;
+  return isLoopbackRequest(req) && req.headers['x-whale-bridge'] === '1'
+    && Boolean(token) && token !== 'change-me-wechat' && safeEqual(req.headers['x-bot-token'], token);
+}
+
 module.exports = function register(router) {
   router.post('/api/bridge/proactive', async (runtime, req, res) => {
     const gateway = runtime.gateways.get('wechat');
-    const token = gateway?.options.inboundToken;
-    if (!isLoopbackRequest(req) || req.headers['x-whale-bridge'] !== '1' || !token ||
-        token === 'change-me-wechat' || !safeEqual(req.headers['x-bot-token'], token)) {
+    if (!isSignedLocalBridge(req, gateway)) {
       return json(res, 403, { ok: false, error: 'bridge authorization required' });
     }
     const { messages, style } = await readBody(req, 12_000);
@@ -36,6 +40,15 @@ module.exports = function register(router) {
           Array.from(reply).length <= 50) return json(res, 200, { ok: true, action: 'reply', reply });
     } catch { /* An unavailable or malformed model result cannot authorize proactive speech. */ }
     return json(res, 200, ignore);
+  });
+
+  router.post('/api/bridge/memory/confirmed', async (runtime, req, res) => {
+    const gateway = runtime.gateways.get('wechat');
+    if (!isSignedLocalBridge(req, gateway)) {
+      return json(res, 403, { ok: false, error: 'bridge authorization required' });
+    }
+    const body = await readBody(req, 4096);
+    return json(res, 200, { ok: true, confirmed: Boolean(body && gateway.confirmMemory(body)) });
   });
 
   // 桥接心跳：让状态接口知道「桥接在不在、UIA 通不通」。没这个，服务端只能看到
@@ -78,10 +91,7 @@ module.exports = function register(router) {
     // 本地桥接会带 x-whale-bridge: 1（或 body.local=true）。它靠 HTTP 响应拿回复，
     // 所以「没配 outboundUrl」对它是正常的，不该按「发不出去」报警。
     const isLocalBridge = String(req.headers['x-whale-bridge'] || '') === '1' || Boolean(body && body.local);
-    const expectedToken = gateway.options.inboundToken;
-    const trustedLocal = isLoopbackRequest(req) && req.headers['x-whale-bridge'] === '1'
-      && Boolean(expectedToken) && expectedToken !== 'change-me-wechat'
-      && safeEqual(req.headers['x-bot-token'], expectedToken);
+    const trustedLocal = isSignedLocalBridge(req, gateway);
     const result = await gateway.handleInbound(body, { local: isLocalBridge, trustedLocal });
     return json(res, 200, result);
   });
