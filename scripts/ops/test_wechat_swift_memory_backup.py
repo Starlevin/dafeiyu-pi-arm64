@@ -11,6 +11,7 @@ OPS = runpy.run_path(str(Path(__file__).with_name("wechat-swift-memory-backup.py
 JOURNAL = "unified-pilot-journal.json"
 SCOPE = "a" * 64
 STATE = f"wechat-group-memory/{SCOPE}/state.json"
+POLICY = f"wechat-group-memory/{SCOPE}/recall-policy.json"
 SEGMENT = f"wechat-group-memory/{SCOPE}/journal/seg-000001.log"
 
 
@@ -26,6 +27,7 @@ class SwiftMemoryBackupTests(unittest.TestCase):
             JOURNAL: b'{"version":1,"entries":[{"state":"done"}]}',
             STATE: json.dumps({"v": 1, "scope": SCOPE}).encode(),
             STATE + ".bak": json.dumps({"v": 1, "scope": SCOPE}).encode(),
+            POLICY: json.dumps({"version": 1, "scope": SCOPE, "pausedTopics": ["group topic"]}).encode(),
             SEGMENT: b'{"seq":1}\n',
         }
         for name, content in self.files.items():
@@ -37,7 +39,7 @@ class SwiftMemoryBackupTests(unittest.TestCase):
 
     def test_roundtrip_preserves_bytes_and_excludes_adjacent_files(self):
         summary = OPS["create"](self.source, self.output)
-        self.assertEqual({"files": 4, "journalEntries": 1, "scopes": 1}, summary)
+        self.assertEqual({"files": 5, "journalEntries": 1, "scopes": 1}, summary)
         self.assertEqual(summary, OPS["restore"](self.output, self.destination))
         restored = {p.relative_to(self.destination).as_posix(): p.read_bytes()
                     for p in self.destination.rglob("*") if p.is_file()}
@@ -80,6 +82,13 @@ class SwiftMemoryBackupTests(unittest.TestCase):
             OPS["restore"](self.output, self.destination)
         self.assertFalse(self.destination.exists())
         self.assertFalse((self.root / "outside.json").exists())
+
+    def test_recall_policy_cannot_be_restored_to_a_different_group(self):
+        foreign = json.dumps({"version": 1, "scope": "b" * 64, "pausedTopics": ["topic"]}).encode()
+        self.write_archive({**self.files, POLICY: foreign})
+        with self.assertRaisesRegex(ValueError, "recall policy scope mismatch"):
+            OPS["restore"](self.output, self.destination)
+        self.assertFalse(self.destination.exists())
 
 
 if __name__ == "__main__":

@@ -929,6 +929,14 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         return try await journal.correctGroupMemory(for: scope, id: id, value: value)
     }
 
+    func setWeChatMemoryPause(scope: String, id: UUID, paused: Bool,
+                              previous: Bool) async throws -> WeChatMemoryEntry {
+        guard try wechatMemoryGroups().contains(where: { $0.id == scope }) else {
+            throw WeChatMemoryAdminError.unknownScope
+        }
+        return try await journal.setGroupMemoryPause(for: scope, id: id, paused: paused, previous: previous)
+    }
+
     public func auditSnapshot() -> [UnifiedAuditEntry] {
         auditLock.lock(); defer { auditLock.unlock() }
         return audit

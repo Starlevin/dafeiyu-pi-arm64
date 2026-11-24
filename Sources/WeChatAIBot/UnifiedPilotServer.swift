@@ -307,13 +307,26 @@ public final class UnifiedPilotServer {
                         let entries = try await core.wechatMemoryEntries(scope: scope)
                         send(connection, PilotHTTP.response(200, PilotMemoryResult(entries: entries)))
                     } else {
-                        struct Correction: Decodable { let id: UUID; let value: String }
+                        struct Update: Decodable {
+                            let id: UUID
+                            let value: String?
+                            let paused: Bool?
+                            let previousPaused: Bool?
+                        }
                         guard method == "POST", body.count <= 2048,
                               headers["content-type"]?.components(separatedBy: ";").first?.lowercased() == "application/json",
-                              let update = try? JSONDecoder().decode(Correction.self, from: body) else {
+                              let update = try? JSONDecoder().decode(Update.self, from: body) else {
                             throw WeChatMemoryAdminError.invalid
                         }
-                        let entry = try await core.correctWeChatMemory(scope: scope, id: update.id, value: update.value)
+                        let entry: WeChatMemoryEntry
+                        if let value = update.value, update.paused == nil, update.previousPaused == nil {
+                            entry = try await core.correctWeChatMemory(scope: scope, id: update.id, value: value)
+                        } else if update.value == nil, let paused = update.paused, let previous = update.previousPaused {
+                            entry = try await core.setWeChatMemoryPause(scope: scope, id: update.id,
+                                                                        paused: paused, previous: previous)
+                        } else {
+                            throw WeChatMemoryAdminError.invalid
+                        }
                         send(connection, PilotHTTP.response(200, PilotMemoryResult(entry: entry)))
                     }
                 }

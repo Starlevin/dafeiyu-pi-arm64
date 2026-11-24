@@ -117,7 +117,7 @@ def _qq_root(cfg: dict) -> Path | None:
 def _wechat_memory_admin(cfg, method, scope, body):
     path = "/api/admin/wechat-memory" + ("/" + scope if scope else "")
     return _wechat_admin(cfg, method, path, body, {
-        400: "更正内容无效，请检查长度和敏感信息",
+        400: "记忆修改请求无效，请检查条目和内容",
         404: "该群记忆当前不可管理",
         409: "条目已被更新或到期，请刷新后重试",
         503: "微信记忆服务暂不可用，请刷新核对",
@@ -1136,16 +1136,21 @@ def resolve(handler, method: str, path: str) -> bool:
         body = None
         if method == "POST":
             if not handler.headers.get("Origin") or not handler.origin_ok():
-                handler.fail(403, "请从本控制台页面更正记忆")
+                handler.fail(403, "请从本控制台页面管理记忆")
                 return True
             try:
                 body = handler.read_json()
-                if (not scope or set(body) != {"id", "value"}
-                        or not isinstance(body["id"], str) or len(body["id"]) != 36
-                        or not isinstance(body["value"], str) or len(body["value"]) > 500):
-                    raise ValueError("更正请求无效")
+                if (not scope or not isinstance(body, dict) or not isinstance(body.get("id"), str)
+                        or len(body["id"]) != 36):
+                    raise ValueError("记忆修改请求无效")
+                correction = (set(body) == {"id", "value"} and isinstance(body["value"], str)
+                              and len(body["value"]) <= 500)
+                pause = (set(body) == {"id", "paused", "previousPaused"}
+                         and type(body["paused"]) is bool and type(body["previousPaused"]) is bool)
+                if not (correction or pause):
+                    raise ValueError("记忆修改请求无效")
             except ValueError:
-                handler.fail(400, "更正请求无效")
+                handler.fail(400, "记忆修改请求无效")
                 return True
         code, result = _wechat_memory_admin(cfg, method, scope, body)
         handler.json(code, result)

@@ -247,10 +247,12 @@ main.wrap { padding-top: 40px; padding-bottom: 56px; }
 }
 .memory-record h4, .memory-record p { margin: 0; overflow-wrap: anywhere; }
 .memory-record .memory-meta { margin-top: 5px; color: var(--muted); font-size: 12px; }
+.memory-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .memory-storage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 8px; }
 .memory-storage-grid .memory-record { display: block; }
 .memory-storage-grid .memory-record h4 { margin-bottom: 4px; font-size: 14px; }
 @media (max-width: 420px) {
+  .memory-record { grid-template-columns: minmax(0, 1fr); }
   .memory-storage-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .memory-editor { padding: 12px; background: var(--surface-2); border-radius: var(--radius); }

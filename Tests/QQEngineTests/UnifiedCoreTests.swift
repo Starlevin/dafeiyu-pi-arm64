@@ -1395,6 +1395,63 @@ private func inbound(_ text: String = "合成消息",
         #expect(await recorder.systemPrompts.last?.contains("当前会话唯一生效性格：雌小鬼") == true)
     }
 
+    @Test func memoryRecallPauseSurvivesRestartAndCorrectionWithoutAffectingOtherGroups() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 20)
+        config.allowedAccounts = ["fixture-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let journal = UnifiedIdempotencyJournal(fileURL: file)
+        let core = UnifiedReplyCore(config: config, generator: generator, journal: journal)
+        let groups = try core.wechatMemoryGroups()
+        let first = try #require(groups.first { $0.label == "fixture-group" })
+        let other = try #require(groups.first { $0.label == "other-group" })
+        let label = "团建集合地点"
+        for (chat, value) in [(first, "合成新校区东门"), (other, "合成图书馆西门")] {
+            let outcome = await core.handle(inbound("记住：\(label)＝\(value)", chatId: chat.label, msgId: chat.id))
+            let receipt = try #require(outcome.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(receipt))
+        }
+        let initial = try #require(try await core.wechatMemoryEntries(scope: first.id).first)
+        #expect(!initial.paused)
+        let id = try #require(UUID(uuidString: initial.id))
+        #expect((await journal.groupMemoryContext(for: first.id, query: label, shortReply: true)).contains(initial.value))
+        do {
+            _ = try await core.setWeChatMemoryPause(scope: other.id, id: id, paused: true, previous: false)
+            Issue.record("A memory entry was accepted in the wrong group.")
+        } catch WeChatMemoryAdminError.stale {}
+        let paused = try await core.setWeChatMemoryPause(scope: first.id, id: id, paused: true, previous: false)
+        #expect(paused.paused && paused.value == initial.value)
+        do {
+            _ = try await core.setWeChatMemoryPause(scope: first.id, id: id, paused: false, previous: false)
+            Issue.record("A stale pause state was accepted.")
+        } catch WeChatMemoryAdminError.stale {}
+
+        let reopenedJournal = UnifiedIdempotencyJournal(fileURL: file)
+        let reopened = UnifiedReplyCore(config: config, generator: generator, journal: reopenedJournal)
+        #expect(try await reopened.wechatMemoryEntries(scope: first.id).first?.paused == true)
+        #expect((await reopenedJournal.groupMemoryContext(for: first.id, query: "之前的" + label)).isEmpty)
+        #expect((await reopenedJournal.groupMemoryContext(for: first.id, query: label, shortReply: true)).isEmpty)
+        #expect((await reopenedJournal.groupMemoryContext(for: first.id, query: "那就这样办", shortReply: true,
+                                                           previous: label + "已经确认了")).isEmpty)
+        #expect((await reopenedJournal.groupMemoryContext(for: other.id, query: label, shortReply: true))
+            .contains("合成图书馆西门"))
+        let updated = try await reopened.correctWeChatMemory(scope: first.id, id: id, value: "合成体育馆正门")
+        #expect(updated.paused)
+        let updatedID = try #require(UUID(uuidString: updated.id))
+        let resumed = try await reopened.setWeChatMemoryPause(scope: first.id, id: updatedID,
+                                                             paused: false, previous: true)
+        #expect(!resumed.paused && resumed.value == updated.value)
+        let last = UnifiedIdempotencyJournal(fileURL: file)
+        let active = await last.groupMemoryContext(for: first.id, query: label, shortReply: true)
+        #expect(active.contains(updated.value) && !active.contains(initial.value))
+    }
+
     @Test func memoryAdminCorrectionPreservesScopeLabelAndExpiry() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

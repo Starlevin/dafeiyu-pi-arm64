@@ -253,6 +253,20 @@ class HouseConsoleExtTests(unittest.TestCase):
             self._post(group_path, correction)
         self.assertEqual(conflict.exception.code, 409)
         self.assertEqual(json.load(conflict.exception)["error"], "条目已被更新或到期，请刷新后重试")
+        pause = {"id": correction["id"], "paused": True, "previousPaused": False}
+        with self.assertRaises(urllib.error.HTTPError) as stale_pause:
+            self._post(group_path, pause)
+        self.assertEqual(stale_pause.exception.code, 409)
+        for invalid in (dict(pause, paused=1), dict(pause, value="correction"),
+                        {"id": pause["id"], "paused": True}):
+            with self.assertRaises(urllib.error.HTTPError) as malformed_pause:
+                self._post(group_path, invalid)
+            self.assertEqual(malformed_pause.exception.code, 400)
+        request = urllib.request.Request(self.base + group_path, json.dumps(pause).encode(),
+                                         {"Content-Type": "application/json", "Cookie": self.cookie})
+        with self.assertRaises(urllib.error.HTTPError) as missing_origin:
+            urllib.request.urlopen(request, timeout=4)
+        self.assertEqual(missing_origin.exception.code, 403)
 
         if os.name == "posix":
             runtime.chmod(0o644)

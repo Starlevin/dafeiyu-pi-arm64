@@ -1820,7 +1820,9 @@
       const end = new Date(record.expiresAt * 1000);
       const expiry = Number.isFinite(end.getTime()) ? end.toLocaleString('zh-CN') : '到期时间待确认';
       text.append(node('h4', '', record.label), node('p', '', record.value),
-        node('p', 'memory-meta', [kinds[record.kind], sources[record.source], '到期 ' + expiry].filter(Boolean).join(' · ')));
+        node('p', 'memory-meta', [kinds[record.kind], sources[record.source],
+          record.paused ? '已暂停长期引用' : '', '到期 ' + expiry].filter(Boolean).join(' · ')));
+      const actions = node('div', 'memory-actions');
       const edit = node('button', 'btn btn-quiet btn-sm', '更正');
       edit.type = 'button';
       edit.addEventListener('click', () => {
@@ -1831,7 +1833,17 @@
         $('wechatMemoryEdit').hidden = false;
         $('wechatMemoryValue').focus();
       });
-      item.append(text, edit);
+      actions.append(edit);
+      if (typeof record.paused === 'boolean') {
+        const pause = node('button', 'btn btn-quiet btn-sm', record.paused ? '恢复引用' : '暂停引用');
+        pause.type = 'button';
+        pause.addEventListener('click', () => {
+          if ($('wechatMemoryGroup').value !== scope) return;
+          updateWeChatMemory(scope, { id: record.id, paused: !record.paused, previousPaused: record.paused });
+        });
+        actions.append(pause);
+      }
+      item.append(text, actions);
       mount.append(item);
     }
   }
@@ -1885,40 +1897,49 @@
     }
   }
 
-  async function saveWeChatMemory(event) {
+  function saveWeChatMemory(event) {
     event.preventDefault();
-    if (!memoryEdit || savingMemory) return;
-    const edit = memoryEdit;
+    if (memoryEdit) {
+      updateWeChatMemory(memoryEdit.scope, { id: memoryEdit.id, value: $('wechatMemoryValue').value.trim() });
+    }
+  }
+
+  async function updateWeChatMemory(scope, change) {
+    if (savingMemory || !$('wechatMemory').open || !state.session || !state.session.authenticated) return;
+    const action = typeof change.paused !== 'boolean' ? '更正' : change.paused ? '暂停引用' : '恢复引用';
     const input = $('wechatMemoryValue');
     const status = $('wechatMemoryStatus');
     const requestID = memoryRequest;
     let accepted = false;
     savingMemory = true;
-    const locked = ['wechatMemoryGroup', 'wechatMemoryRefresh', 'wechatMemorySave', 'wechatMemoryCancel'];
-    locked.forEach((id) => { $(id).disabled = true; });
+    const locked = ['wechatMemoryGroup', 'wechatMemoryRefresh', 'wechatMemorySave', 'wechatMemoryCancel'].map($);
+    locked.push(...$('wechatMemoryRows').querySelectorAll('button'));
+    locked.forEach((control) => { control.disabled = true; });
     input.readOnly = true;
     status.textContent = '正在保存并回读…';
     try {
-      const path = memoryRoute + '/' + edit.scope;
-      const saved = await apiPost(path, { id: edit.id, value: input.value.trim() });
+      const path = memoryRoute + '/' + scope;
+      const saved = await apiPost(path, change);
       accepted = true;
       const current = await apiGet(path);
       if (requestID !== memoryRequest) return;
       const entries = arr(current && current.entries);
-      if (!saved.entry || !entries.some((entry) => entry.id === saved.entry.id && entry.value === saved.entry.value)) {
-        throw new Error('更正已提交，回读未确认。请刷新核对。');
+      if (!saved.entry || (typeof change.paused === 'boolean' && saved.entry.paused !== change.paused)
+          || !entries.some((entry) => entry.id === saved.entry.id && entry.value === saved.entry.value
+                            && entry.paused === saved.entry.paused)) {
+        throw new Error(action + '已提交，回读未确认。请刷新核对。');
       }
       stopMemoryEdit();
-      renderWeChatMemory(entries, edit.scope);
-      status.textContent = '更正已保存并回读确认。';
+      renderWeChatMemory(entries, scope);
+      status.textContent = action + '已保存并回读确认。';
     } catch (error) {
       if (requestID !== memoryRequest) return;
       if (error.status === 401) { handleUnauthorized(); return; }
-      status.textContent = accepted ? '更正已提交，回读未确认。请刷新核对。' : error.message;
+      status.textContent = accepted ? action + '已提交，回读未确认。请刷新核对。' : error.message;
     } finally {
       if (requestID === memoryRequest) {
         savingMemory = false;
-        locked.forEach((id) => { $(id).disabled = false; });
+        locked.forEach((control) => { control.disabled = false; });
         input.readOnly = false;
       }
     }

@@ -25,6 +25,14 @@ enum WeChatMemoryAdminError: Error {
     case unavailable, unknownScope, stale, invalid
 }
 
+private struct WeChatRecallPolicy: Codable {
+    static let filename = "recall-policy.json"
+    static let byteLimit = 65_536
+    let version: Int
+    let scope: String
+    let pausedTopics: Set<String>
+}
+
 struct WeChatMemoryEntry: Encodable, Sendable {
     let id: String
     let label: String
@@ -33,8 +41,9 @@ struct WeChatMemoryEntry: Encodable, Sendable {
     let source: String
     let updatedAt: Int64
     let expiresAt: Int64
+    let paused: Bool
 
-    init?(_ item: QQMemoryItem) {
+    init?(_ item: QQMemoryItem, pausedTopics: Set<String>) {
         guard item.subject == "CONVERSATION", item.keywords.count == 1,
               let key = item.keywords.first,
               let split = item.text.indices.first(where: {
@@ -50,6 +59,7 @@ struct WeChatMemoryEntry: Encodable, Sendable {
         // The durable archive stores ISO 8601 timestamps at second precision.
         updatedAt = Int64(item.updatedAt.timeIntervalSince1970.rounded(.down))
         expiresAt = Int64(item.expiresAt.timeIntervalSince1970.rounded(.down))
+        paused = pausedTopics.contains(key)
     }
 }
 
@@ -281,6 +291,7 @@ public actor UnifiedIdempotencyJournal {
         if !shortReply { recoverGroupNotes(for: scope) }
         do {
             guard let archive = try groupArchive(scope, create: false) else { return "" }
+            let paused = try recallPolicy(for: archive).pausedTopics
             if shortReply {
                 let normalized = query.precomposedStringWithCanonicalMapping.lowercased()
                 let now = Date()
@@ -303,13 +314,14 @@ public actor UnifiedIdempotencyJournal {
                     let topics = Set(related.flatMap(\.keywords))
                     guard topics.count == 1 else { return "" }
                 }
+                related.removeAll { !paused.isDisjoint(with: $0.keywords) }
                 guard !related.isEmpty else { return "" }
                 let context = QQMemoryIndex(related).context(topic, subject: "CONVERSATION",
                                                             characters: 220, now: now)
                 return context.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
             }
-            return archive.context(query, subject: "CONVERSATION", characters: 480,
-                                   includeEpisodes: false)
+            let eligible = archive.items.filter { paused.isDisjoint(with: $0.keywords) }
+            return QQMemoryIndex(eligible).context(query, subject: "CONVERSATION", characters: 480)
         } catch {
             print("unified_group_memory_read_failed")
             return ""
@@ -337,14 +349,62 @@ public actor UnifiedIdempotencyJournal {
         return try QQMemoryReliableStore(directory: directory, scope: scope)
     }
 
+    private func recallPolicy(for archive: QQMemoryReliableStore) throws -> WeChatRecallPolicy {
+        let path = archive.directoryURL.appendingPathComponent(WeChatRecallPolicy.filename).path
+        let descriptor = path.withCString { open($0, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) }
+        if descriptor < 0 && errno == ENOENT {
+            return WeChatRecallPolicy(version: 1, scope: archive.scope, pausedTopics: [])
+        }
+        guard descriptor >= 0 else { throw WeChatMemoryAdminError.unavailable }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0, metadata.st_uid == getuid(),
+              metadata.st_mode & mode_t(S_IFMT | 0o777) == mode_t(S_IFREG | 0o600),
+              let bytes = try handle.read(upToCount: WeChatRecallPolicy.byteLimit + 1),
+              bytes.count <= WeChatRecallPolicy.byteLimit,
+              let policy = try? JSONDecoder().decode(WeChatRecallPolicy.self, from: bytes),
+              policy.version == 1, policy.scope == archive.scope,
+              policy.pausedTopics.allSatisfy({ (1...20).contains($0.count) }) else {
+            throw WeChatMemoryAdminError.unavailable
+        }
+        return policy
+    }
+
     func groupMemoryEntries(for scope: String) throws -> [WeChatMemoryEntry] {
         guard storageUsable, fileURL != nil else { throw WeChatMemoryAdminError.unavailable }
         recoverGroupNotes(for: scope)
         guard let archive = try groupArchive(scope, create: false) else { return [] }
+        let paused = try recallPolicy(for: archive).pausedTopics
         let now = Date()
         return archive.items.filter { $0.current(now) }
             .sorted { ($0.updatedAt, $0.id) > ($1.updatedAt, $1.id) }
-            .compactMap(WeChatMemoryEntry.init)
+            .compactMap { WeChatMemoryEntry($0, pausedTopics: paused) }
+    }
+
+    func setGroupMemoryPause(for scope: String, id: UUID, paused: Bool,
+                             previous: Bool) throws -> WeChatMemoryEntry {
+        guard storageUsable, fileURL != nil else { throw WeChatMemoryAdminError.unavailable }
+        let now = Date()
+        recoverGroupNotes(for: scope)
+        guard let archive = try groupArchive(scope, create: false),
+              let item = archive.items.first(where: { UUID(uuidString: $0.id) == id && $0.current(now) }) else {
+            throw WeChatMemoryAdminError.stale
+        }
+        var topics = try recallPolicy(for: archive).pausedTopics
+        guard let entry = WeChatMemoryEntry(item, pausedTopics: topics),
+              let topic = item.keywords.first, entry.paused == previous else {
+            throw WeChatMemoryAdminError.stale
+        }
+        guard entry.paused != paused else { return entry }
+        if paused { topics.insert(topic) } else { topics.remove(topic) }
+        let policy = WeChatRecallPolicy(version: 1, scope: archive.scope, pausedTopics: topics)
+        let bytes = try JSONEncoder().encode(policy)
+        guard bytes.count <= WeChatRecallPolicy.byteLimit,
+              let updated = WeChatMemoryEntry(item, pausedTopics: topics) else {
+            throw WeChatMemoryAdminError.unavailable
+        }
+        try Self.writeAtomically(bytes, to: archive.directoryURL.appendingPathComponent(WeChatRecallPolicy.filename))
+        return updated
     }
 
     func correctGroupMemory(for scope: String, id: UUID, value: String) throws -> WeChatMemoryEntry {
@@ -355,14 +415,17 @@ public actor UnifiedIdempotencyJournal {
               !QQMemoryRedactor.containsSensitive(correction) else { throw WeChatMemoryAdminError.invalid }
         let now = Date()
         guard let archive = try groupArchive(scope, create: false),
-              let item = archive.items.first(where: { UUID(uuidString: $0.id) == id && $0.current(now) }),
-              let entry = WeChatMemoryEntry(item) else { throw WeChatMemoryAdminError.stale }
+              let item = archive.items.first(where: { UUID(uuidString: $0.id) == id && $0.current(now) }) else {
+            throw WeChatMemoryAdminError.stale
+        }
+        let paused = try recallPolicy(for: archive).pausedTopics
+        guard let entry = WeChatMemoryEntry(item, pausedTopics: paused) else { throw WeChatMemoryAdminError.stale }
         guard !QQMemoryRedactor.containsSensitive(entry.label + "：" + correction) else { throw WeChatMemoryAdminError.invalid }
         let eventID = "console:" + UUID().uuidString
         try archive.recordConfirmedGroupNote(id: eventID, label: entry.label, value: correction, kind: entry.kind,
                                              at: now, retainingExpiry: item.expiresAt)
         if let updated = archive.items.first(where: { $0.current(now) && $0.sourceIDs.contains(eventID) }),
-           let result = WeChatMemoryEntry(updated) { return result }
+           let result = WeChatMemoryEntry(updated, pausedTopics: paused) { return result }
         guard correction == entry.value else { throw WeChatMemoryAdminError.unavailable }
         return entry
     }

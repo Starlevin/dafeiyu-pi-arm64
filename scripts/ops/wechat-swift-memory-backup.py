@@ -18,7 +18,7 @@ MANIFEST = "checkpoint.json"
 MAX_BYTES = 16 * 1024 * 1024
 MEMORY_FILE = re.compile(
     r"wechat-group-memory/([0-9a-f]{64})/"
-    r"(?:state\.json(?:\.bak)?|archive\.jsonl|journal/(?:cursor\.json(?:\.bak)?|seg-[0-9]{6}\.log))"
+    r"(?:state\.json(?:\.bak)?|recall-policy\.json|archive\.jsonl|journal/(?:cursor\.json(?:\.bak)?|seg-[0-9]{6}\.log))"
 )
 
 
@@ -74,6 +74,14 @@ def validate_payload(files):
             scope = json.loads(content)
             if not isinstance(scope, dict) or scope.get("v") != 1 or scope.get("scope") != match[1]:
                 raise ValueError("Group memory scope mismatch")
+        elif name.endswith("/recall-policy.json"):
+            policy = json.loads(content)
+            if not isinstance(policy, dict) or policy.get("version") != 1 or policy.get("scope") != match[1]:
+                raise ValueError("Group recall policy scope mismatch")
+            topics = policy.get("pausedTopics")
+            if (len(content) > 65_536 or not isinstance(topics, list)
+                    or any(not isinstance(topic, str) or not topic for topic in topics)):
+                raise ValueError("Invalid group recall policy")
     return {"files": len(files), "journalEntries": len(journal["entries"]),
             "scopes": len({name.split("/")[1] for name in files if name.startswith(GROUPS + "/")})}
 
