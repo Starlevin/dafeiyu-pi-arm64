@@ -36,6 +36,12 @@ private struct QQStored: Codable {
     var artworkLedger: QQArtworkLedger?
     var proactiveSendHistory: [String: [Date]]?
     var proactiveMetrics: [String: QQProactiveDailyStats]?
+    var scopedParticipation: QQScopedParticipation?
+}
+private struct QQScopedParticipation: Codable {
+    let account: String
+    let day: Int
+    var counts: [String: Int]
 }
 struct QQContact: Identifiable {
     var number: String; var name: String; var group: Bool
@@ -158,6 +164,38 @@ struct QQEngineSharedState: Sendable {
         config.effectiveGroupParticipationEnabled || scopedProactiveProfiles[target.key] != nil
     }
     private var proactiveSendHistory: [String: [Date]] = [:]
+    private var scopedParticipation: QQScopedParticipation?
+    private var participationNeedsSave = false
+    private var participationSaveTask: Task<Void, Never>?
+
+    private func scopedParticipationCount(for group: String, at now: Double) -> Int {
+        guard let progress = scopedParticipation,
+              progress.account == config.expectedSelfID,
+              progress.day == ReplyDecisionState.dayKey(for: Int(now)) else { return 0 }
+        return max(0, progress.counts[group] ?? 0)
+    }
+
+    private func updateScopedParticipation(_ count: Int, group: String, at now: Double) {
+        guard count != scopedParticipationCount(for: group, at: now) else { return }
+        let day = ReplyDecisionState.dayKey(for: Int(now))
+        var progress = scopedParticipation
+        if progress?.account != config.expectedSelfID || progress?.day != day {
+            progress = QQScopedParticipation(account: config.expectedSelfID, day: day, counts: [:])
+        }
+        progress?.counts[group] = count > 0 ? count : nil
+        scopedParticipation = progress
+        participationNeedsSave = true
+        guard participationSaveTask == nil else { return }
+        // A following message or model reservation usually saves the number
+        // with other state. Flush the last change when traffic falls quiet.
+        participationSaveTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 750_000_000) } catch { return }
+            guard let self else { return }
+            self.participationSaveTask = nil
+            guard self.participationNeedsSave, self.storageOK, self.runtimeLock >= 0 else { return }
+            do { try self.persist() } catch { self.error = error.localizedDescription }
+        }
+    }
     private(set) var proactiveMetrics: [String: QQProactiveDailyStats] = [:]
     private func countProactive(_ event: QQProactiveDailyStats.Event, groupKey: String) {
         proactiveMetrics[groupKey, default: QQProactiveDailyStats()].add(event)
@@ -363,6 +401,7 @@ struct QQEngineSharedState: Sendable {
                 memoryUsage = state.memoryUsage ?? Usage()
                 botMessageIDs = state.botMessageIDs ?? [:]; ownershipSince = state.ownershipSince ?? ownershipSince
                 proactiveSendHistory = state.proactiveSendHistory ?? [:]
+                scopedParticipation = state.scopedParticipation
                 proactiveMetrics = state.proactiveMetrics ?? [:]
                 recentStickers = state.stickerHistory ?? [:]; lastStickerAt = state.stickerLastSentAt
                 if let books = state.memoryBooks { memoryBooks = books }
@@ -690,7 +729,7 @@ struct QQEngineSharedState: Sendable {
         }
         self.error = error.localizedDescription
         if running { resumeReplyAfterReconnect = true }
-        pause()
+        pause(preserveScopedParticipation: true)
         connected = false
         watchdog?.cancel(); watchdog = nil
         connection.close()
@@ -952,7 +991,7 @@ struct QQEngineSharedState: Sendable {
             error = nil
         } catch { self.error = error.localizedDescription }
     }
-    func pause() {
+    func pause(preserveScopedParticipation: Bool = false) {
         if let sleepPrevention, sleepPrevention.isRunning { sleepPrevention.terminate() }
         sleepPrevention = nil
         deadlineTask?.cancel(); deadlineTask = nil; runDeadline = nil
@@ -964,6 +1003,14 @@ struct QQEngineSharedState: Sendable {
         repliesSinceSticker.removeAll()
         groupMessageCounts.removeAll(); groupRecentMessages.removeAll(); groupRecentInputs.removeAll()
         heldOwnerEvents.removeAll()
+        if !preserveScopedParticipation, scopedParticipation != nil {
+            participationSaveTask?.cancel(); participationSaveTask = nil
+            scopedParticipation = nil
+            participationNeedsSave = false
+            if storageOK && runtimeLock >= 0 {
+                do { try persist() } catch { self.error = error.localizedDescription }
+            }
+        }
     }
     func disconnect(reason: String = "QQ 已断开") {
         // 面板上的主动断开＝用户意图：不再自动重连，也不自动恢复自动回复。
@@ -1104,11 +1151,13 @@ struct QQEngineSharedState: Sendable {
             // Real mentions are independent: never increment or reset proactive progress.
             if !message.mentionsSelf {
                 if groupProfile != nil { countProactive(.ordinary, groupKey: message.key) }
-                let previousCount = groupMessageCounts[message.key, default: 0]
+                let previousCount = groupProfile == nil ? groupMessageCounts[message.key, default: 0]
+                    : scopedParticipationCount(for: message.key, at: now)
                 let count = groupProfile?.advanceParticipationCount(previousCount) ?? (previousCount + 1)
                 let interval = groupProfile?.interval ?? config.effectiveGroupParticipationEvery
                 let reached = count >= interval
                 groupMessageCounts[message.key] = groupProfile == nil && reached ? 0 : count
+                if groupProfile != nil { updateScopedParticipation(count, group: message.key, at: now) }
                 guard reached else { return }
                 if let profile = groupProfile {
                     countProactive(.candidate, groupKey: message.key)
@@ -1144,7 +1193,10 @@ struct QQEngineSharedState: Sendable {
         }
         if message.group && !message.mentionsSelf && !proactive { return } // Memory capture alone never authorizes a reply.
         guard queue.count < Self.queueCapacity else { record(target.id, .skipped, "队列已满，本次触发不补发"); return }
-        if proactive && groupProfile != nil { groupMessageCounts[message.key] = 0 }
+        if proactive && groupProfile != nil {
+            groupMessageCounts[message.key] = 0
+            updateScopedParticipation(0, group: message.key, at: now)
+        }
         let timing = detected.map { QQReplyTiming(detected: $0, group: message.group, proactive: proactive) }
         let work = Work.reply(message, target, proactive, groupContext, timing)
         let referencesBot = message.replyTo.map { reference in
@@ -2309,13 +2361,14 @@ struct QQEngineSharedState: Sendable {
             recentStickers = recentStickers.mapValues { Array($0.filter { Date().timeIntervalSince($0.at) < 7 * 86400 }.suffix(500)) }.filter { !$0.value.isEmpty }
             if recentStickers.count > 60 { recentStickers = Dictionary(uniqueKeysWithValues: recentStickers.sorted { ($0.value.last?.at ?? .distantPast) > ($1.value.last?.at ?? .distantPast) }.prefix(60).map { ($0.key, $0.value) }) }
             proactiveSendHistory = proactiveSendHistory.mapValues { $0.filter { Date().timeIntervalSince($0) < 2 * 86400 } }.filter { !$0.value.isEmpty }
-            let state = QQStored(config: config, usage: usage, memoryUsage: memoryUsage, sends: sends, logs: logs, seen: seen, memories: nil, memoryBooks: memoryBooks, botMessageIDs: botMessageIDs, ownershipSince: ownershipSince, stickerHistory: recentStickers, stickerLastSentAt: lastStickerAt, artworkLedger: artworkLedger, proactiveSendHistory: proactiveSendHistory, proactiveMetrics: proactiveMetrics)
+            let state = QQStored(config: config, usage: usage, memoryUsage: memoryUsage, sends: sends, logs: logs, seen: seen, memories: nil, memoryBooks: memoryBooks, botMessageIDs: botMessageIDs, ownershipSince: ownershipSince, stickerHistory: recentStickers, stickerLastSentAt: lastStickerAt, artworkLedger: artworkLedger, proactiveSendHistory: proactiveSendHistory, proactiveMetrics: proactiveMetrics, scopedParticipation: scopedParticipation)
             // QQ uses authenticated network events and may run while the desktop is locked.
             // User-enabled structured memories and bounded/redacted pending excerpts; never image bytes or credentials.
             let data = try JSONEncoder().encode(state)
             try data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
             persistedData = data
+            participationNeedsSave = false
         } catch {
             storageOK = false; self.error = "QQ 状态保存失败：\(error.localizedDescription)"
             disconnect(reason: "QQ 状态保存失败，已停止"); throw error
