@@ -556,10 +556,22 @@ def keep_short_wal_refresh(queue, target, app, targets, *, competing_activity=Fa
     attempt = queue.empty_refresh_attempt(target) if target is not None else 0
     if not attempt:
         return None
-    if (not (attempt == 2 and competing_activity)
-            and target in targets and app is not None and group_is_open(app, target)):
-        return target
-    queue.cancel_empty_refresh(target)
+    if attempt == 2 and competing_activity:
+        reason = "competing_activity"
+    elif target not in targets:
+        reason = "higher_priority_scope"
+    elif app is None:
+        reason = "window_unavailable"
+    else:
+        # Keeping the window idle cannot send or read a message. Use just
+        # the visible title here. The scan still checks the full open-group
+        # proof immediately before reading its rows.
+        title = chat_title(app, normalize=False)
+        if title != target and norm_title(title) == target:
+            return target
+        reason = "scope_changed"
+    if queue.cancel_empty_refresh(target):
+        log("wal_verified_empty_refresh_cancelled", attempt=attempt, reason=reason)
     return None
 
 
@@ -2839,8 +2851,9 @@ def main():
                 targets = [short_refresh_target]
         verified_recheck_targets = set()
         if verified_rechecks is not None:
+            recheck_now = time.monotonic()
             for target in args.group:
-                if not verified_rechecks.due(target, now=now):
+                if not verified_rechecks.due(target, now=recheck_now):
                     continue
                 if target == short_refresh_target or (app_now is not None and group_is_open(app_now, target)):
                     verified_recheck_targets.add(target)
@@ -2945,15 +2958,21 @@ def main():
                     elif verified_due:
                         # A queued recheck is valid only for the group that is
                         # still independently open now. It never navigates.
+                        attempt = 0
+                        if target == short_refresh_target:
+                            attempt = verified_rechecks.empty_refresh_attempt(target)
+                            if not attempt:
+                                log("wal_verified_empty_refresh_cancelled", reason="window_expired")
+                                continue
                         verified_scope_open = group_is_open(app, target)
                         if not verified_scope_open:
                             if verified_rechecks is not None:
                                 verified_rechecks.cancel_empty_refresh(target)
+                            if attempt:
+                                log("wal_verified_empty_refresh_cancelled", attempt=attempt,
+                                    reason="scope_unverified")
                             continue
-                        if target == short_refresh_target:
-                            attempt = verified_rechecks.empty_refresh_attempt(target)
-                            if not attempt:
-                                continue
+                        if attempt:
                             log("wal_verified_empty_refresh_scan", attempt=attempt)
                     else:
                         verified_scope_open = group_is_open(app, target)

@@ -128,10 +128,10 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
     def test_scheduled_empty_refresh_holds_only_the_open_scope_until_completion(self):
         self.assertTrue(self.schedule())
         app = object()
-        with patch.object(bridge, "group_is_open", return_value=True) as opened:
+        with patch.object(bridge, "chat_title", return_value="授权群(5)") as opened:
             self.assertEqual(bridge.keep_short_wal_refresh(
                 self.queue, "授权群", app, ["授权群", "其他轮询"]), "授权群")
-            opened.assert_called_once_with(app, "授权群")
+            opened.assert_called_once_with(app, normalize=False)
             self.now = 100.65
             self.assertTrue(self.queue.due("授权群"))
             self.queue.completed("授权群")
@@ -143,7 +143,8 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
             with self.subTest(open_group=open_group):
                 self.queue.hint("授权群", now=self.now, source_at=99.9)
                 self.assertTrue(self.schedule())
-                with patch.object(bridge, "group_is_open", return_value=open_group):
+                title = "授权群(5)" if open_group else "其他群(4)"
+                with patch.object(bridge, "chat_title", return_value=title):
                     self.assertIsNone(bridge.keep_short_wal_refresh(
                         self.queue, "授权群", object(), targets))
                 self.assertFalse(self.queue.empty_refresh_pending("授权群"))
@@ -151,7 +152,7 @@ class VerifiedWalEmptyRefreshTests(unittest.TestCase):
 
     def test_competing_sidebar_activity_releases_delayed_hold_before_navigation(self):
         self.assertTrue(self.schedule())
-        with patch.object(bridge, "group_is_open", return_value=True) as opened:
+        with patch.object(bridge, "chat_title", return_value="授权群(5)") as opened:
             self.assertEqual(bridge.keep_short_wal_refresh(
                 self.queue, "授权群", object(), ["授权群"], competing_activity=True), "授权群")
             self.now = 100.66
