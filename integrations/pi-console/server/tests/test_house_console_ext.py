@@ -625,6 +625,11 @@ class HouseConsoleExtTests(unittest.TestCase):
         stamp = int(time.time()) - 10
         fractional_stamp = f"{time.time() - 5:.6f}"
         scope = "1234567890abcdef"
+        oldest_stamp = stamp - 3600
+        log.with_suffix(".log.1").write_text(
+            f"[qq_proactive_funnel] at={oldest_stamp} scope={scope} event=ordinary reason=-\n",
+            encoding="utf-8",
+        )
         log.write_text(
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=ordinary reason=-\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=candidate reason=none\n"
@@ -636,6 +641,7 @@ class HouseConsoleExtTests(unittest.TestCase):
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=score_rejected reason=provider-credential-unavailable\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=score_skipped reason=mode_not_enforce\n"
             f"[qq_proactive_funnel] at={stamp-86400} scope={scope} event=confirmed reason=none\n"
+            f"[qq_proactive_funnel] at={stamp+86400} scope={scope} event=confirmed reason=none\n"
             "raw chat text must never appear in the result\n", encoding="utf-8",
         )
         body = {"group": group, "threshold": 0.75, "freshnessSeconds": 2}
@@ -650,8 +656,11 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(result["qqGroups"][group],
                          {"threshold": 0.75, "freshnessSeconds": 2, "dailyBudget": 60})
         self.assertEqual(result["qqFunnel"]["counts"]["candidate"], 3)
-        self.assertEqual(result["qqFunnel"]["counts"]["ordinary"], 1)
-        self.assertEqual(result["qqFunnel"]["groups"][scope]["ordinary"], 1)
+        self.assertEqual(result["qqFunnel"]["windowSeconds"], 86400)
+        self.assertEqual(result["qqFunnel"]["firstEventAt"], oldest_stamp)
+        self.assertEqual(result["qqFunnel"]["lastEventAt"], float(fractional_stamp))
+        self.assertEqual(result["qqFunnel"]["counts"]["ordinary"], 2)
+        self.assertEqual(result["qqFunnel"]["groups"][scope]["ordinary"], 2)
         self.assertEqual(result["qqFunnel"]["counts"]["confirmed"], 0)
         self.assertEqual(result["qqFunnel"]["scoreAfterRejectReasons"], {"new_mention": 1})
         self.assertEqual(result["qqFunnel"]["counts"]["score_rejected"], 2)

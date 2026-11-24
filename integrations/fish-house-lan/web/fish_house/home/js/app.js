@@ -880,7 +880,17 @@
     if (funnel && funnel.readableLogs) {
       var c = funnel.counts;
       var received = typeof c.ordinary === "number" ? " · 普通群消息 " + c.ordinary : "";
-      panel.appendChild(makeEl("p", "fh-note", "QQ 近 24 小时已采集" + received + " · 候选 " + c.candidate +
+      var scopeLabel = "QQ 留存事件（查询最近 24 小时）";
+      if (Number.isFinite(funnel.firstEventAt) && Number.isFinite(funnel.lastEventAt) &&
+          funnel.firstEventAt > 0 && funnel.lastEventAt >= funnel.firstEventAt) {
+        var dateOptions = { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" };
+        var firstLabel = new Date(funnel.firstEventAt * 1000).toLocaleString("zh-CN", dateOptions);
+        var lastLabel = new Date(funnel.lastEventAt * 1000).toLocaleString("zh-CN", dateOptions);
+        scopeLabel += " · " + firstLabel + (firstLabel === lastLabel ? "" : " 至 " + lastLabel);
+      } else if (funnel.firstEventAt === null && funnel.lastEventAt === null) {
+        scopeLabel += " · 暂无匹配记录";
+      }
+      panel.appendChild(makeEl("p", "fh-note", scopeLabel + received + " · 候选 " + c.candidate +
         " · 前置通过 " + c.gate_passed + " · 评分通过 " + c.score_passed +
         " · 评分拒绝 " + (c.score_rejected || 0) + " · 评分跳过 " + (c.score_skipped || 0) +
         " · 评分后拦截 " + c.score_after_reject + " · 入队 " + c.enqueued +

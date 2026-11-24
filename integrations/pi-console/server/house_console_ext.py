@@ -515,6 +515,8 @@ def _proactive_funnel(root: Path | None) -> dict:
     groups = {}
     readable = 0
     truncated = False
+    first_event_at = None
+    last_event_at = None
     if root:
         for suffix in ("", ".1", ".2", ".3"):
             path = root / "run" / ("qq-bot.log" + suffix)
@@ -537,8 +539,13 @@ def _proactive_funnel(root: Path | None) -> dict:
                 if not match:
                     continue
                 stamp, scope, event, reason = match.groups()
-                if not now - 86400 <= float(stamp) <= now:
+                event_at = float(stamp)
+                if not now - 86400 <= event_at <= now:
                     continue
+                if first_event_at is None or event_at < first_event_at:
+                    first_event_at = event_at
+                if last_event_at is None or event_at > last_event_at:
+                    last_event_at = event_at
                 counts[event] += 1
                 scope_counts = groups.setdefault(scope, dict.fromkeys(PROACTIVE_EVENTS, 0))
                 scope_counts[event] += 1
@@ -548,7 +555,8 @@ def _proactive_funnel(root: Path | None) -> dict:
                     rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
                 elif event == "score_skipped":
                     skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
-    return {"windowSeconds": 86400, "counts": counts, "scoreAfterRejectReasons": reasons,
+    return {"windowSeconds": 86400, "firstEventAt": first_event_at, "lastEventAt": last_event_at,
+            "counts": counts, "scoreAfterRejectReasons": reasons,
             "scoreRejectedReasons": rejection_reasons,
             "scoreSkippedReasons": skipped_reasons,
             "groups": groups, "readableLogs": readable, "truncated": truncated}
