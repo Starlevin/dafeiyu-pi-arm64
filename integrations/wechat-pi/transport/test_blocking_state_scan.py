@@ -77,6 +77,28 @@ def legacy_blocking_state(root):
 
 
 class BlockingStateScanTests(unittest.TestCase):
+    def test_message_viewport_lookup_skips_hidden_pages_and_chats_children(self):
+        sidebar_row = FakeNode("list item", "fixture room")
+        sidebar = FakeNode("list", "Chats", children=(sidebar_row,))
+        hidden = FakeNode("frame", children=(FakeNode("list", "Messages"),), showing=False)
+        messages = FakeNode("list", "Messages")
+        root = FakeNode("application", children=(sidebar, hidden, messages))
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING))
+        with patch.object(bridge, "Atspi", atspi), patch.object(bridge, "_messages_cache", (None, None)):
+            self.assertIs(bridge.messages_list(root), messages)
+            self.assertIs(bridge.messages_list(root), messages)
+        self.assertEqual(sidebar.child_count_calls, 0)
+        self.assertEqual(hidden.child_count_calls, 0)
+        self.assertEqual(root.child_count_calls, 1)
+
+    def test_message_viewport_lookup_falls_back_on_unreported_ancestor_visibility(self):
+        messages = FakeNode("list", "Messages")
+        parent = FakeNode("frame", children=(messages,), showing=False)
+        root = FakeNode("application", children=(parent,))
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING))
+        with patch.object(bridge, "Atspi", atspi), patch.object(bridge, "_messages_cache", (None, None)):
+            self.assertIs(bridge.messages_list(root), messages)
+
     def test_overlay_scan_reuses_roles_and_still_finds_a_visible_search_list(self):
         hidden = FakeNode("list", showing=False, rect=(110, 115, 300, 320))
         regular = FakeNode("list", "Chats")

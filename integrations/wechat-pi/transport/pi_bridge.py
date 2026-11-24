@@ -436,6 +436,13 @@ def messages_list(a):
     cached_app, cached_node = _messages_cache
     if a == cached_app and cached_node is not None and showing(cached_node):
         return cached_node
+    # The sidebar and hidden Qt pages can contain hundreds of accessibles.
+    # Start with the visible tree and skip the contents of known lists.
+    for node, _, node_role in _walk_showing(a, skip_lists=True, include_role=True):
+        if node_role == "list" and nm(node) == "Messages":
+            _messages_cache = (a, node)
+            return node
+    # Some Qt builds expose a visible viewport through a non-showing ancestor.
     for n, _ in walk(a):
         if role(n) == "list" and nm(n) == "Messages" and showing(n):
             _messages_cache = (a, n)
@@ -746,6 +753,11 @@ def group_is_open(app, name):
     # Reject title mismatches before traversing the overlay or sidebar.
     if visible_group_title(app) != name:
         return False
+    return _confirm_open_group(app, name)
+
+
+def _confirm_open_group(app, name):
+    """Complete the proof after the caller observes the current group title."""
     # In the explicitly authorized Bieye group, visible search results can
     # obscure the current room; even a matching title must fail closed.
     if name == "别野" and _bieye_search_overlay_visible(app):
@@ -772,12 +784,29 @@ def open_chat(app, name, *, measure=False):
     click_finished = time.monotonic()
     # Qt can expose the new group immediately or after rendering. Every
     # observation must prove the group, and no retries issue another click.
-    opened, _ = _wait_for_state(lambda: group_is_open(get_app(), name), timeout, .125)
+    first_title_at = None
+    proof_seconds = 0.0
+
+    def observe_group():
+        nonlocal first_title_at, proof_seconds
+        current_app = get_app()
+        if visible_group_title(current_app) != name:
+            return False
+        proof_started = time.monotonic()
+        if first_title_at is None:
+            first_title_at = proof_started
+        verified = _confirm_open_group(current_app, name)
+        proof_seconds += time.monotonic() - proof_started
+        return verified
+
+    opened, _ = _wait_for_state(observe_group, timeout, .125)
     if measure:
         log("group_navigation_timing", opened=opened,
             overlay_ms=int((overlay_checked - started) * 1000),
             sidebar_lookup_ms=int((click_started - overlay_checked) * 1000),
             navigation_click_ms=int((click_finished - click_started) * 1000),
+            title_ready_ms=int((first_title_at - click_finished) * 1000) if first_title_at is not None else None,
+            full_proof_ms=int(proof_seconds * 1000),
             scope_proof_ms=int((time.monotonic() - click_finished) * 1000))
     return opened
 
