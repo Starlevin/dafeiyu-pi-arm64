@@ -1,10 +1,11 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import Testing
 import BotCore
 @testable import WeChatAIBot
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 /// 统一回复核心的确定性夹具测试。
 /// 约束（AGENTS.md）：合成身份、本机夹具、零真实模型、零真实会话、零发送。
@@ -15,13 +16,14 @@ private struct FixtureReplyGenerator: ReplyGenerating {
     let fail: Bool
     var calls: CallCounter
     var recorder: RequestRecorder? = nil
+    var shouldSend = true
 
     func generate(_ request: UnifiedGenerationRequest) async throws -> UnifiedGenerationResult {
         await calls.increment()
         if fail { throw AppFailure.message("synthetic model failure") }
         // 夹具可以断言「实际复用的人格/知识 prompt 被注入」，而不是只看返回值。
         await recorder?.record(request)
-        return UnifiedGenerationResult(text: replyJSON, tokens: 7)
+        return UnifiedGenerationResult(text: replyJSON, tokens: 7, shouldSend: shouldSend)
     }
 }
 
@@ -29,10 +31,20 @@ private actor RequestRecorder {
     private(set) var incomingHistory: [[String]] = []
     private(set) var prompts: [String] = []
     private(set) var systemPrompts: [String] = []
+    private(set) var proactive: [Bool] = []
+    private(set) var publicQuestionFast: [Bool] = []
+    private(set) var publicQuestionContexts: [[String]] = []
+    private(set) var publicQuestionKnowledge: [[String]] = []
+    private(set) var publicQuestionGroupMemory: [String] = []
     func record(_ request: UnifiedGenerationRequest) {
         incomingHistory.append(request.history.map(\.incoming))
         prompts.append(request.userText)
         systemPrompts.append(request.rule.prompt)
+        proactive.append(request.proactive)
+        publicQuestionFast.append(request.publicQuestionFast)
+        publicQuestionContexts.append(request.publicQuestionContext)
+        publicQuestionKnowledge.append(request.publicQuestionKnowledge)
+        publicQuestionGroupMemory.append(request.publicQuestionGroupMemory)
     }
 }
 
@@ -42,31 +54,61 @@ private actor CallCounter {
     func value() -> Int { count }
 }
 
-private final class DirectTraceFixture: URLProtocol, @unchecked Sendable {
+private final class PublicQuestionHTTPFixture: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
-    nonisolated(unsafe) private static var headers: [String] = []
-
-    static func reset() { lock.lock(); headers = []; lock.unlock() }
-    static var traceHeaders: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return headers
-    }
-
+    nonisolated(unsafe) static var requestBodies: [[String: Any]] = []
+    nonisolated(unsafe) static var requestTraceHeaders: [String] = []
+    static func reset() { lock.lock(); requestBodies = []; requestTraceHeaders = []; lock.unlock() }
+    static var bodies: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return requestBodies }
+    static var traceHeaders: [String] { lock.lock(); defer { lock.unlock() }; return requestTraceHeaders }
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func stopLoading() {}
-
     override func startLoading() {
-        Self.lock.lock()
-        Self.headers.append(request.value(forHTTPHeaderField: QQModelTrace.headerName) ?? "")
-        Self.lock.unlock()
-        let body = #"{"choices":[{"message":{"content":"{\"text\":\"合成短回复\",\"emotion\":\"neutral\",\"intensity\":1}"},"finish_reason":"stop"}]}"#
+        let trace = request.value(forHTTPHeaderField: "X-Dafeiyu-Trace-Id") ?? ""
+        Self.lock.lock(); Self.requestTraceHeaders.append(trace); Self.lock.unlock()
+        if let data = request.httpBody, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            Self.lock.lock(); Self.requestBodies.append(object); Self.lock.unlock()
+        }
+        let content = #"{"text":"合成短回复","emotion":"neutral","intensity":1}"#
+        let body = try! JSONSerialization.data(withJSONObject: [
+            "choices": [["message": ["content": content], "finish_reason": "stop"]],
+            "usage": ["total_tokens": 9]
+        ])
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(body.utf8))
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+private struct FixedProactiveScorer: ReplyScoring {
+    let value: Double?
+    var calls: CallCounter
+    func score(_ input: ReplyDecisionInput) async -> Double? {
+        _ = input
+        await calls.increment()
+        return value
+    }
+}
+
+private actor BlockingScoreGate {
+    private(set) var started = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    func block() async {
+        started = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { continuation?.resume(); continuation = nil }
+}
+
+private struct BlockingProactiveScorer: ReplyScoring {
+    let gate: BlockingScoreGate
+    func score(_ input: ReplyDecisionInput) async -> Double? {
+        _ = input
+        await gate.block()
+        return 0.9
     }
 }
 
@@ -112,51 +154,23 @@ private func inbound(_ text: String = "合成消息",
 
 @Suite(.serialized) struct UnifiedCoreTests {
 
-    @Test func directGroupReplyJoinsReviewedRequestsToAuditWithoutRepeatingOnReplay() async throws {
-        DirectTraceFixture.reset()
-        let sessionConfig = URLSessionConfiguration.ephemeral
-        sessionConfig.protocolClasses = [DirectTraceFixture.self]
-        let session = URLSession(configuration: sessionConfig)
-        defer { session.invalidateAndCancel() }
-        let provider = LLMProvider(kind: .custom,
-                                   baseURL: URL(string: "http://127.0.0.1:18090/v1")!,
-                                   modelOverride: "fixture", maxRetries: 0)
-        let core = UnifiedReplyCore(
-            config: makeConfig(requireAt: true),
-            generator: DeepSeekReplyGenerator(client: DeepSeekClient(provider: provider, session: session)),
-            modelKey: "synthetic-key", journal: freshJournal()
-        )
-        let candidate = inbound("测试问句？", msgId: "synthetic-message-id-1")
-        let outcome = await core.handle(candidate)
-        #expect(outcome.reply.action == "reply")
-        #expect(outcome.modelCalled)
-        let expected = UnifiedReplyCore.modelHubTraceID(
-            forIdempotencyKey: "wechat|fixture-account|group|fixture-group|synthetic-message-id-1"
-        )
-        let headers = DirectTraceFixture.traceHeaders
-        #expect(headers == Array(repeating: QQModelTrace.normalized(expected), count: 2))
-        let audit = core.auditSnapshot()
-        #expect(audit.first?.modelTraceID == headers.first)
-        #expect(audit.first?.inboundTraceDigest == "51cfc0d3bc69")
-
-        let replay = await core.handle(candidate)
-        #expect(replay.gate == "durable_replay")
-        #expect(!replay.modelCalled)
-        #expect(DirectTraceFixture.traceHeaders == headers)
-        #expect(core.auditSnapshot().last?.modelTraceID == nil)
-    }
-
-    @Test func olderAuditJSONWithoutOptionalTraceFieldsRemainsDecodable() throws {
-        let old = #"{"at":1,"scope":"scope","reason":"ignored","tokens":0,"durationMs":2,"outcome":"ignore"}"#
-        let entry = try JSONDecoder().decode(UnifiedAuditEntry.self, from: Data(old.utf8))
-        #expect(entry.modelTraceID == nil)
-        #expect(entry.inboundTraceDigest == nil)
-    }
-
     @Test func defaultConfigIsFailClosed() {
         let c = UnifiedCoreConfig.fromEnvironment([:]) // 无 DAFEIYU_UNIFIED_PILOT
         #expect(c.enabled == false)
         #expect(c.allowedChats.isEmpty)
+    }
+
+    @Test func proactiveGroupAllowlistDoesNotDisableRealAtGateGlobally() {
+        let c = UnifiedCoreConfig.fromEnvironment([
+            "DAFEIYU_UNIFIED_PILOT": "1",
+            "DAFEIYU_UNIFIED_ALLOWED_CHATS": "fixture-group,other-group",
+            "DAFEIYU_UNIFIED_ALLOWED_ACCOUNTS": "fixture-account",
+            "DAFEIYU_UNIFIED_PROACTIVE_GROUPS": "[\"fixture-group\"]",
+        ])
+        #expect(c.enabled)
+        #expect(c.proactiveAllowedChats == ["fixture-group"])
+        #expect(c.proactiveExplicitlyEnabled == false)
+        #expect(c.requireRealAt == true)
     }
 
     @Test func disabledCoreNeverCallsModel() async {
@@ -192,6 +206,453 @@ private func inbound(_ text: String = "合成消息",
         let outcome = await core.handle(inbound(atMe: false))
         #expect(outcome.reply.reason == "proactive_not_enabled")
         #expect(await counter.value() == 0)
+    }
+
+    @Test func proactiveDailyScoreBudgetSurvivesCoreStateRecreation() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("unified-budget-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("score-budget.json")
+        let first = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await first.reserveProactive("session-digest", now: 1_800_000_000, dailyLimit: 1) == nil)
+        let restored = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await restored.reserveProactive("session-digest", now: 1_800_000_001, dailyLimit: 1) == "proactive_daily_budget")
+        #expect(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test func corruptProactiveBudgetFailsClosed() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("unified-budget-corrupt-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("score-budget.json")
+        try Data("corrupt".utf8).write(to: url)
+        let restored = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await restored.reserveProactive("session-digest", now: 1_800_000_000, dailyLimit: 60) == "proactive_budget_storage_unavailable")
+    }
+
+    @Test func proactiveCandidateRequiresProofAllowlistAndModelScore() async {
+        var c = makeConfig(requireAt: false)
+        c.proactiveExplicitlyEnabled = true
+        c.proactiveAllowedChats = ["fixture-group"]
+        c.allowedAccounts = ["wx-1"]
+        let modelCalls = CallCounter()
+        let scorerCalls = CallCounter()
+        let requests = RequestRecorder()
+        let scorerFactory: @Sendable ([String], String) -> any ReplyScoring = { _, _ in
+            FixedProactiveScorer(value: 0.70, calls: scorerCalls)
+        }
+        let core = UnifiedReplyCore(config: c,
+                                    generator: FixtureReplyGenerator(replyJSON: validJSON("合成回应"), fail: false, calls: modelCalls, recorder: requests),
+                                    proactiveScorerFactory: scorerFactory, journal: freshJournal())
+        var candidate = inbound("大家怎么看这个问题？", atMe: false, msgId: "candidate", account: "wx-1")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyContext = ["前文", "大家怎么看这个问题？"]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = true // fresh UI proof is required
+        let rejected = await core.handle(candidate)
+        #expect(rejected.gate == "proactive_evidence_rejected")
+        #expect(await scorerCalls.value() == 0)
+
+        candidate.msgId = "candidate-valid"
+        candidate.groupAutoReplyContext = ["前文", "大家怎么看这个问题？"]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        let accepted = await core.handle(candidate)
+        #expect(accepted.reply.action == "reply")
+        #expect(await scorerCalls.value() == 1)
+        #expect(await modelCalls.value() == 1)
+        #expect(await requests.proactive == [true]) // reviewedQQReply runs its participate review
+        let duplicate = await core.handle(candidate)
+        #expect(duplicate.gate == "durable_replay")
+        #expect(await scorerCalls.value() == 1)
+    }
+
+    @Test func publicQuestionFastPathRequiresSettledProofAndMatcherAndSkipsScorer() async {
+        var c = makeConfig(requireAt: false)
+        c.publicQuestionFastEnabled = true
+        c.proactiveAllowedChats = ["fixture-group"]
+        c.allowedAccounts = ["fixture-account"]
+        let modelCalls = CallCounter()
+        let scorerCalls = CallCounter()
+        let recorder = RequestRecorder()
+        let core = UnifiedReplyCore(
+            config: c,
+            generator: FixtureReplyGenerator(replyJSON: validJSON("可以先检查设置。"), fail: false,
+                                             calls: modelCalls, recorder: recorder),
+            identityVConfig: IdentityVConfig(enabled: true, maxFacts: 2),
+            proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: 1, calls: scorerCalls) },
+            journal: freshJournal()
+        )
+        let missingEvidence = await core.handle(inbound("请问大家密码机压好了怎么办？", atMe: false, msgId: "public-q-no-evidence"))
+        #expect(missingEvidence.gate == "public_question_candidate_missing")
+        #expect(await modelCalls.value() == 0)
+        var candidate = inbound("请问大家密码机压好了怎么办？", atMe: false, msgId: "public-q")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyContext = ["前文一", "前文二", "前文三", "请问大家密码机压好了怎么办？"]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        candidate.groupAutoReplyPublicQuestionCooldownSeconds = 300
+        candidate.groupAutoReplyPublicQuestionSettled = false
+
+        let unsettled = await core.handle(candidate)
+        #expect(unsettled.gate == "public_question_not_settled")
+        candidate.msgId = "public-q-unmatched"
+        candidate.groupAutoReplyPublicQuestionSettled = true
+        candidate.text = "今天天气真好"
+        candidate.groupAutoReplyContext[candidate.groupAutoReplyContext.count - 1] = candidate.text
+        let unmatched = await core.handle(candidate)
+        #expect(unmatched.gate == "public_question_not_matched")
+        #expect(await modelCalls.value() == 0)
+        #expect(await scorerCalls.value() == 0)
+
+        candidate.msgId = "public-q"
+        candidate.text = "请问大家密码机压好了怎么办？"
+        candidate.groupAutoReplyContext[candidate.groupAutoReplyContext.count - 1] = candidate.text
+
+        let result = await core.handle(candidate)
+        #expect(result.reply.action == "reply")
+        #expect(result.gate == "replied")
+        #expect(await modelCalls.value() == 1)
+        #expect(await scorerCalls.value() == 0)
+        #expect(await recorder.publicQuestionFast == [true])
+        #expect(await recorder.proactive == [false])
+        #expect(await recorder.publicQuestionContexts == [["前文一", "前文二", "前文三"]])
+        #expect(await recorder.publicQuestionKnowledge.count == 1)
+        #expect(await recorder.publicQuestionKnowledge[0].count >= 1)
+        #expect(await recorder.publicQuestionKnowledge[0].count <= 2)
+        #expect(await recorder.publicQuestionKnowledge[0].contains(where: { $0.contains("密码机") }))
+        candidate.msgId = "public-q-cooldown"
+        let cooled = await core.handle(candidate)
+        #expect(cooled.gate == "proactive_score_cooldown")
+        #expect(await modelCalls.value() == 1)
+
+    }
+
+    @Test func publicQuestionFastEnvironmentSwitchRequiresLiteralOne() {
+        #expect(UnifiedCoreConfig.fromEnvironment(["DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST": "1"]).publicQuestionFastEnabled)
+        #expect(!UnifiedCoreConfig.fromEnvironment(["DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST": "true"]).publicQuestionFastEnabled)
+        #expect(!UnifiedCoreConfig.fromEnvironment([:]).publicQuestionFastEnabled)
+    }
+
+    @Test func publicQuestionRecallsOnlyCurrentMatchingMemoryFromItsOwnGroup() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 20)
+        config.allowedAccounts = ["fixture-account"]
+        config.proactiveAllowedChats = config.allowedChats
+        config.publicQuestionFastEnabled = true
+        config.confirmedWeChatMemoryEnabled = true
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("查到了。"), fail: false,
+                                              calls: CallCounter())
+        let core = UnifiedReplyCore(config: config, generator: generator,
+                                    journal: UnifiedIdempotencyJournal(fileURL: file))
+        let previous = await core.handle(inbound("记住事项：周报发布时间＝周三上午", msgId: "initial"))
+        let previousReceipt = try #require(previous.reply.memoryReceipt)
+        #expect(await core.confirmWeChatMemory(previousReceipt))
+        let updated = await core.handle(inbound("记住事项：周报发布时间＝周五下午", msgId: "updated"))
+        let updatedReceipt = try #require(updated.reply.memoryReceipt)
+        #expect(await core.confirmWeChatMemory(updatedReceipt))
+
+        for (chat, question, expected) in [
+            ("fixture-group", "各位，之前提到的周报发布时间现在是几点？", true),
+            ("fixture-group", "各位，周报表格怎么排版？", false),
+            ("other-group", "各位，之前提到的周报发布时间现在是几点？", false),
+        ] {
+            let recorder = RequestRecorder()
+            let calls = CallCounter()
+            let restarted = UnifiedReplyCore(config: config,
+                generator: FixtureReplyGenerator(replyJSON: validJSON("查到了。"), fail: false,
+                                                 calls: calls, recorder: recorder),
+                journal: UnifiedIdempotencyJournal(fileURL: file))
+            var request = inbound(question, chatId: chat, atMe: false, msgId: UUID().uuidString)
+            request.groupAutoReply = true
+            request.groupAutoReplyContext = [question]
+            request.groupAutoReplyWindowOK = true
+            request.groupAutoReplySuperseded = false
+            request.groupAutoReplyPublicQuestionSettled = true
+            let result = await restarted.handle(request)
+            #expect(result.gate == "replied")
+            #expect(await recorder.publicQuestionFast == [true])
+            #expect(await calls.value() == 1)
+            let note = try #require(await recorder.publicQuestionGroupMemory.first)
+            #expect(note.contains("周五下午") == expected)
+            #expect(!note.contains("周三上午"))
+            #expect(note.isEmpty == !expected)
+        }
+    }
+
+    @Test func publicQuestionEvidenceDecodesSettledFailClosedAndCooldown() throws {
+        let missing = try JSONDecoder().decode(UnifiedInbound.self, from: Data(#"{"chat_id":"g"}"#.utf8))
+        #expect(!missing.groupAutoReplyPublicQuestionSettled)
+        #expect(missing.groupAutoReplyPublicQuestionCooldownSeconds == nil)
+        let present = try JSONDecoder().decode(UnifiedInbound.self, from: Data(#"{"group_auto_reply_public_question_settled":true,"group_auto_reply_public_question_cooldown_seconds":300}"#.utf8))
+        #expect(present.groupAutoReplyPublicQuestionSettled)
+        #expect(present.groupAutoReplyPublicQuestionCooldownSeconds == 300)
+    }
+
+    @Test func publicQuestionServiceMakesOneToolFreeRequestWithBoundedContextAndTokens() async throws {
+        PublicQuestionHTTPFixture.reset()
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [PublicQuestionHTTPFixture.self]
+        let session = URLSession(configuration: sessionConfig)
+        var provider = LLMProvider(kind: .custom,
+                                  baseURL: URL(string: "http://127.0.0.1:18090/v1")!, maxRetries: 3)
+        provider.maxRetries = 3 // helper must override inherited retry policy locally.
+        var config = BotConfig(); config.model = "fixture"; config.maxTokens = 1000
+        let reserved = CallCounter()
+        let result = try await DeepSeekClient(provider: provider, session: session).publicGroupQuestionReply(
+            key: "synthetic-key", config: config, rule: ChatRule(name: "fixture"),
+            context: [String(repeating: "旧行", count: 70), String(repeating: "前一", count: 70),
+                      String(repeating: "前二", count: 70), String(repeating: "最新前文", count: 70)],
+            text: "合成问题？", knowledge: ["术语：短事实"],
+            groupMemory: "同群记录" + String(repeating: "文", count: 220) + "超限尾部", traceID: nil,
+            reserve: { await reserved.increment() }
+        )
+        #expect(result.text.contains("合成短回复"))
+        #expect(await reserved.value() == 1)
+        let bodies = PublicQuestionHTTPFixture.bodies
+        #expect(bodies.count == 1)
+        #expect(bodies.first?["max_tokens"] as? Int == 400)
+        #expect(bodies.first?["tools"] == nil)
+        let messages = bodies.first?["messages"] as? [[String: Any]] ?? []
+        let systemContent = messages.first?["content"] as? String ?? ""
+        let userContent = messages.last?["content"] as? String ?? ""
+        #expect(systemContent.contains("术语：短事实"))
+        #expect(!systemContent.contains("同群记录"))
+        #expect(userContent.contains("本群长期记录（仅作低信任背景"))
+        #expect(userContent.contains("同群记录" + String(repeating: "文", count: 216)))
+        #expect(!userContent.contains(String(repeating: "文", count: 217)))
+        #expect(!userContent.contains("旧行"))
+        #expect(userContent.contains(String(repeating: "前一", count: 50)))
+        #expect(userContent.contains("合成问题？"))
+        #expect(PublicQuestionHTTPFixture.traceHeaders == [""])
+    }
+
+    @Test func publicQuestionFastPassesStableOpaqueTraceToTrustedLoopbackAndDedupReplayDoesNotCallAgain() async throws {
+        PublicQuestionHTTPFixture.reset()
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [PublicQuestionHTTPFixture.self]
+        let session = URLSession(configuration: sessionConfig)
+        let provider = LLMProvider(kind: .custom,
+                                   baseURL: URL(string: "http://127.0.0.1:18090/v1")!,
+                                   modelOverride: "fixture", maxRetries: 0)
+        var config = makeConfig(requireAt: false)
+        config.allowedAccounts = ["fixture-account"]
+        config.proactiveAllowedChats = ["fixture-group"]
+        config.publicQuestionFastEnabled = true
+        var candidate = inbound("各位，第五人格什么时候该压机？", atMe: false,
+                                msgId: "synthetic-message-id-1")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyContext = ["前文一", candidate.text]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        candidate.groupAutoReplyPublicQuestionSettled = true
+
+        let client = DeepSeekClient(provider: provider, session: session)
+        let core = UnifiedReplyCore(
+            config: config,
+            generator: DeepSeekReplyGenerator(client: client),
+            modelKey: "synthetic-key",
+            publicQuestionMatcher: { $0.contains("第五人格") },
+            journal: freshJournal()
+        )
+        let expected = UnifiedReplyCore.modelHubTraceID(
+            forIdempotencyKey: "wechat|fixture-account|group|fixture-group|synthetic-message-id-1"
+        )
+        #expect(expected.uuidString.lowercased() == "c789a865-0df0-8c88-bcbc-55e42e7e85a0")
+        #expect(expected.uuidString.lowercased() != candidate.msgId.lowercased())
+
+        let first = await core.handle(candidate)
+        #expect(first.reply.action == "reply")
+        #expect(first.gate == "replied")
+        #expect(first.modelCalled)
+        let headers = PublicQuestionHTTPFixture.traceHeaders
+        #expect(headers == [QQModelTrace.normalized(expected)])
+        let audit = core.auditSnapshot()
+        #expect(audit.count == 1)
+        #expect(audit[0].modelTraceID == headers.first)
+        #expect(audit[0].inboundTraceDigest == "51cfc0d3bc69")
+        if let header = headers.first {
+            #expect(!header.contains("fixture-account"))
+            #expect(!header.contains("fixture-group"))
+            #expect(!header.contains(candidate.msgId))
+        }
+
+        let replay = await core.handle(candidate)
+        #expect(replay.gate == "durable_replay")
+        #expect(!replay.modelCalled)
+        #expect(PublicQuestionHTTPFixture.traceHeaders == [QQModelTrace.normalized(expected)])
+        #expect(PublicQuestionHTTPFixture.bodies.count == 1)
+        let replayAudit = core.auditSnapshot()
+        #expect(replayAudit.count == 2)
+        #expect(replayAudit[1].modelTraceID == nil)
+        #expect(replayAudit[1].inboundTraceDigest == nil)
+
+        var failedCandidate = candidate
+        failedCandidate.msgId = "synthetic-failed-message-id"
+        let failingCore = UnifiedReplyCore(
+            config: config,
+            generator: FixtureReplyGenerator(replyJSON: "{}", fail: true, calls: CallCounter()),
+            modelKey: "synthetic-key",
+            publicQuestionMatcher: { $0.contains("第五人格") },
+            journal: freshJournal()
+        )
+        let failed = await failingCore.handle(failedCandidate)
+        #expect(failed.gate == "generation_failed")
+        #expect(failed.modelCalled)
+        let failureAudit = failingCore.auditSnapshot()
+        #expect(failureAudit.count == 1)
+        #expect(failureAudit[0].modelTraceID == UnifiedReplyCore.modelHubTraceID(
+            forIdempotencyKey: "wechat|fixture-account|group|fixture-group|synthetic-failed-message-id"
+        ).uuidString.lowercased())
+        #expect(failureAudit[0].inboundTraceDigest == "df96f1bf9c02")
+    }
+
+    @Test func directGroupReplyJoinsReviewedRequestsToAuditWithoutRepeatingOnReplay() async throws {
+        PublicQuestionHTTPFixture.reset()
+        let sessionConfig = URLSessionConfiguration.ephemeral
+        sessionConfig.protocolClasses = [PublicQuestionHTTPFixture.self]
+        let session = URLSession(configuration: sessionConfig)
+        defer { session.invalidateAndCancel() }
+        let provider = LLMProvider(kind: .custom,
+                                   baseURL: URL(string: "http://127.0.0.1:18090/v1")!,
+                                   modelOverride: "fixture", maxRetries: 0)
+        let core = UnifiedReplyCore(
+            config: makeConfig(requireAt: true),
+            generator: DeepSeekReplyGenerator(client: DeepSeekClient(provider: provider, session: session)),
+            modelKey: "synthetic-key", journal: freshJournal()
+        )
+        let candidate = inbound("测试问句？", atMe: true, msgId: "synthetic-message-id-1")
+        let expected = UnifiedReplyCore.modelHubTraceID(
+            forIdempotencyKey: "wechat|fixture-account|group|fixture-group|synthetic-message-id-1"
+        )
+        let outcome = await core.handle(candidate)
+        #expect(outcome.reply.action == "reply")
+        #expect(outcome.modelCalled)
+        let values = PublicQuestionHTTPFixture.traceHeaders
+        #expect(values.count == 2)
+        #expect(values.allSatisfy { $0 == QQModelTrace.normalized(expected) })
+        let audit = core.auditSnapshot()
+        #expect(audit.first?.modelTraceID == values.first)
+        #expect(audit.first?.inboundTraceDigest == "51cfc0d3bc69")
+
+        let replay = await core.handle(candidate)
+        #expect(replay.gate == "durable_replay")
+        #expect(!replay.modelCalled)
+        #expect(PublicQuestionHTTPFixture.traceHeaders == values)
+        #expect(core.auditSnapshot().last?.modelTraceID == nil)
+    }
+
+    @Test func olderAuditJSONWithoutOptionalTraceFieldsRemainsDecodable() throws {
+        let old = #"{"at":1,"scope":"scope","reason":"ignored","tokens":0,"durationMs":2,"outcome":"ignore"}"#
+        let entry = try JSONDecoder().decode(UnifiedAuditEntry.self, from: Data(old.utf8))
+        #expect(entry.modelTraceID == nil)
+        #expect(entry.inboundTraceDigest == nil)
+    }
+
+    @Test func proactiveScoreBelowThresholdAndMissingAllowlistStaySilent() async {
+        var c = makeConfig(requireAt: false)
+        c.proactiveExplicitlyEnabled = true
+        c.proactiveAllowedChats = ["fixture-group"]
+        var noAccountACL = c
+        c.allowedAccounts = ["fixture-account"]
+        let modelCalls = CallCounter()
+        let scorerCalls = CallCounter()
+        let core = UnifiedReplyCore(config: c,
+                                    generator: FixtureReplyGenerator(replyJSON: validJSON("不得生成"), fail: false, calls: modelCalls),
+                                    proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: 0.69, calls: scorerCalls) },
+                                    journal: freshJournal())
+        var candidate = inbound("大家怎么看这个问题？", atMe: false, msgId: "low")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyContext = ["前文", "大家怎么看这个问题？"]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        let emptyAccountACLCore = UnifiedReplyCore(config: noAccountACL,
+                                                   generator: FixtureReplyGenerator(replyJSON: validJSON("不得生成"), fail: false, calls: modelCalls),
+                                                   proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: 1, calls: scorerCalls) },
+                                                   journal: freshJournal())
+        let emptyACL = await emptyAccountACLCore.handle(candidate)
+        #expect(emptyACL.gate == "proactive_evidence_rejected")
+        let low = await core.handle(candidate)
+        #expect(low.reply.action == "ignore")
+        #expect(low.gate == "proactive_below_threshold")
+        #expect(await scorerCalls.value() == 1)
+        #expect(await modelCalls.value() == 0)
+
+        let unavailableCalls = CallCounter()
+        let unavailableCore = UnifiedReplyCore(config: c,
+                                               generator: FixtureReplyGenerator(replyJSON: validJSON("不得生成"), fail: false, calls: modelCalls),
+                                               proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: nil, calls: unavailableCalls) },
+                                               journal: freshJournal())
+        candidate.msgId = "score-unavailable"
+        let unavailable = await unavailableCore.handle(candidate)
+        #expect(unavailable.gate == "proactive_score_unavailable")
+        #expect(await unavailableCalls.value() == 1)
+        #expect(await modelCalls.value() == 0)
+
+        c.proactiveAllowedChats = []
+        let deniedCore = UnifiedReplyCore(config: c,
+                                          generator: FixtureReplyGenerator(replyJSON: validJSON("不得生成"), fail: false, calls: modelCalls),
+                                          proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: 1, calls: scorerCalls) },
+                                          journal: freshJournal())
+        candidate.msgId = "not-allowlisted"
+        let denied = await deniedCore.handle(candidate)
+        #expect(denied.gate == "proactive_evidence_rejected")
+        #expect(await modelCalls.value() == 0)
+    }
+
+    @Test func proactiveParticipationDeclineNeverReturnsReply() async {
+        var c = makeConfig(requireAt: false)
+        c.proactiveAllowedChats = ["fixture-group"]
+        c.allowedAccounts = ["fixture-account"]
+        let modelCalls = CallCounter()
+        let core = UnifiedReplyCore(config: c,
+                                    generator: FixtureReplyGenerator(replyJSON: validJSON("即使文本有效也不得发送"),
+                                                                    fail: false, calls: modelCalls, shouldSend: false),
+                                    proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: 0.9, calls: CallCounter()) },
+                                    journal: freshJournal())
+        var candidate = inbound("大家怎么看这个问题？", atMe: false, msgId: "participate-no")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyContext = ["前文", "大家怎么看这个问题？"]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        let result = await core.handle(candidate)
+        #expect(result.gate == "proactive_participation_declined")
+        #expect(result.reply.action == "ignore")
+        #expect(await modelCalls.value() == 1)
+    }
+
+    @Test func proactiveReservationSerializesSameSessionButNotDirectAt() async {
+        var c = makeConfig(requireAt: true)
+        c.proactiveAllowedChats = ["fixture-group"]
+        c.allowedAccounts = ["fixture-account"]
+        let modelCalls = CallCounter()
+        let gate = BlockingScoreGate()
+        let core = UnifiedReplyCore(config: c,
+                                    generator: FixtureReplyGenerator(replyJSON: validJSON("合成回应"), fail: false, calls: modelCalls),
+                                    proactiveScorerFactory: { _, _ in BlockingProactiveScorer(gate: gate) },
+                                    journal: freshJournal())
+        var candidate = inbound("大家怎么看这个问题？", atMe: false, msgId: "held")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyContext = ["前文", "大家怎么看这个问题？"]
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        let held = Task { await core.handle(candidate) }
+        while !(await gate.started) { await Task.yield() }
+
+        candidate.msgId = "concurrent-proactive"
+        let concurrent = await core.handle(candidate)
+        #expect(concurrent.gate == "proactive_in_flight")
+
+        let direct = Task { await core.handle(inbound("直接 @ 合成", atMe: true, msgId: "direct-at")) }
+        let directResult = await direct.value
+        #expect(directResult.reply.action == "reply")
+        await gate.release()
+        let heldResult = await held.value
+        #expect(heldResult.reply.action == "reply")
+        #expect(await modelCalls.value() == 2)
     }
 
     @Test func happyPathRepliesWithoutMessageBodyInAudit() async {

@@ -2,7 +2,7 @@ import Foundation
 import BotCore
 #if canImport(CryptoKit)
 import CryptoKit
-#else
+#elseif canImport(Crypto)
 import Crypto
 #endif
 
@@ -33,6 +33,12 @@ public struct UnifiedGenerationRequest: Sendable {
     public var userText: String
     public var modelKey: String
     public var currentUserText: String = ""
+    public var proactive: Bool = false
+    public var publicQuestionFast: Bool = false
+    public var publicQuestionContext: [String] = []
+    public var publicQuestionKnowledge: [String] = []
+    public var publicQuestionGroupMemory: String = ""
+    /// Stable opaque correlation ID derived from the pilot's session-scoped idempotency key.
     public var modelTraceID: UUID? = nil
 }
 
@@ -40,6 +46,7 @@ public struct UnifiedGenerationResult: Sendable {
     public var text: String
     public var tokens: Int
     public var sources: [String] = []
+    public var shouldSend: Bool = true
 }
 
 /// 生成器协议。生产实现 `DeepSeekReplyGenerator` 走真实 `DeepSeekClient`；
@@ -59,6 +66,16 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
     }
 
     func generate(_ request: UnifiedGenerationRequest) async throws -> UnifiedGenerationResult {
+        if request.publicQuestionFast {
+            let result = try await client.publicGroupQuestionReply(
+                key: request.modelKey, config: request.config, rule: request.rule,
+                context: request.publicQuestionContext, text: request.currentUserText,
+                knowledge: request.publicQuestionKnowledge,
+                groupMemory: request.publicQuestionGroupMemory,
+                traceID: request.modelTraceID, reserve: {}
+            )
+            return UnifiedGenerationResult(text: result.text, tokens: result.tokens)
+        }
         // 与 QQEngine.drain:1261 完全同一个入口；reserve 在 QQ 侧是额度/epoch 守卫，
         // 这里没有跨轮次发送额度需求，传空闭包即可（试点的额度门禁在 UnifiedCore 内）。
         let socialRequested = QQSocialTools.requested(in: request.currentUserText)
@@ -89,16 +106,18 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
             imageGenerationEnabled: false,
             artworkEnabled: false,
             stickerOptions: [],
-            proactive: false,
+            proactive: request.proactive,
             userText: request.currentUserText,
             toolsMayRun: socialRequested,
             traceID: request.modelTraceID,
             reserve: {}
         )
         if socialRequested && !succeeded {
-            return UnifiedGenerationResult(text: QQSocialTools.unavailableReply, tokens: result.tokens)
+            return UnifiedGenerationResult(text: QQSocialTools.unavailableReply, tokens: result.tokens,
+                                           shouldSend: result.shouldSend)
         }
-        return UnifiedGenerationResult(text: result.text, tokens: result.tokens, sources: result.sources)
+        return UnifiedGenerationResult(text: result.text, tokens: result.tokens, sources: result.sources,
+                                       shouldSend: result.shouldSend)
     }
 }
 
@@ -117,6 +136,10 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
     public var requireRealAt = true
     /// 显式启用的主动接话（关闭时任何非 @ 消息都不回复）。
     public var proactiveExplicitlyEnabled = false
+    /// 独立的主动候选群白名单；必须与总 allowlist 同时命中，默认关闭。
+    public var proactiveAllowedChats: [String] = []
+    /// 独立公开未答问题单轮生成门控；生产只接受显式 `=1`。
+    public var publicQuestionFastEnabled = false
     /// Optional so configurations encoded before this flag remain readable.
     public var confirmedWeChatMemoryEnabled: Bool?
     /// 低频策略：每会话每分钟最多回复条数。
@@ -135,6 +158,7 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
     /// 环境变量开关，与既有 `DAFEIYU_*` 风格一致；任何解析失败都按 fail-closed 处理。
     public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> UnifiedCoreConfig {
         var c = UnifiedCoreConfig()
+        c.publicQuestionFastEnabled = env["DAFEIYU_WECHAT_PUBLIC_QUESTION_FAST"] == "1"
         c.confirmedWeChatMemoryEnabled = env["DAFEIYU_WECHAT_SWIFT_MEMORY"] == "1"
         guard let raw = env["DAFEIYU_UNIFIED_PILOT"]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               ["1", "true", "on", "yes"].contains(raw) else {
@@ -143,6 +167,11 @@ public struct UnifiedCoreConfig: Codable, Equatable, Sendable {
         c.enabled = true
         if let csv = env["DAFEIYU_UNIFIED_ALLOWED_CHATS"] {
             c.allowedChats = csv.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        }
+        if let raw = env["DAFEIYU_UNIFIED_PROACTIVE_GROUPS"],
+           let data = raw.data(using: .utf8),
+           let groups = try? JSONDecoder().decode([String].self, from: data) {
+            c.proactiveAllowedChats = Array(Set(groups.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })).sorted()
         }
         if let csv = env["DAFEIYU_UNIFIED_ALLOWED_ACCOUNTS"] {
             c.allowedAccounts = csv.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -178,7 +207,7 @@ public struct UnifiedCapabilities: Codable, Sendable, Equatable {
 
 /// 每个隔离键一份状态。所有字典的键都是 `UnifiedIdentity` 的 scopeKey / sessionKey，
 /// 不含可逆的明文；审计条目不含原文。
-private actor UnifiedState {
+actor UnifiedState {
     struct ReplyWindow {
         var stamps: [Double] = []
     }
@@ -195,10 +224,56 @@ private actor UnifiedState {
     private var recentBotReplies: [String: [String]] = [:]  // session -> 最近 BOT 回复（防复读）
     private var capacity: Int
     private var generation: UInt64 = 1
+    private var proactiveScores: [String: (day: Int, count: Int, last: Double)] = [:]
+    private struct ProactiveBudgetFile: Codable { var version: Int; var entries: [String: BudgetEntry] }
+    private struct BudgetEntry: Codable { var day: Int; var count: Int; var last: Double }
+    private let proactiveBudgetURL: URL?
+    private var proactiveBudgetUsable = true
 
-    init(capacity: Int) { self.capacity = capacity }
+    init(capacity: Int, proactiveBudgetURL: URL?) {
+        self.capacity = capacity
+        self.proactiveBudgetURL = proactiveBudgetURL
+        if let url = proactiveBudgetURL, FileManager.default.fileExists(atPath: url.path) {
+            do {
+                let decoded = try JSONDecoder().decode(ProactiveBudgetFile.self, from: Data(contentsOf: url))
+                guard decoded.version == 1 else { throw CocoaError(.fileReadCorruptFile) }
+                self.proactiveScores = decoded.entries.mapValues { ($0.day, $0.count, $0.last) }
+            } catch {
+                // A damaged budget must not silently reset the daily allowance.
+                proactiveBudgetUsable = false
+                print("unified_proactive_budget_load_failed")
+            }
+        }
+    }
 
     func currentGeneration() -> UInt64 { generation }
+    func reserveProactive(_ key: String, now: Double, dailyLimit: Int = 60, cooldown: Double = 15) -> String? {
+        guard proactiveBudgetUsable else { return "proactive_budget_storage_unavailable" }
+        let day = ReplyDecisionState.dayKey(for: Int(now))
+        proactiveScores = proactiveScores.filter { $0.value.day == day }
+        guard proactiveScores.count < 5_000 || proactiveScores[key] != nil else { return "proactive_budget_storage_unavailable" }
+        var entry = proactiveScores[key] ?? (day, 0, 0)
+        if entry.day != day { entry = (day, 0, 0) }
+        if entry.count >= dailyLimit { proactiveScores[key] = entry; return "proactive_daily_budget" }
+        if entry.last > 0, now - entry.last < cooldown { proactiveScores[key] = entry; return "proactive_score_cooldown" }
+        entry.count += 1; entry.last = now; proactiveScores[key] = entry
+        guard persistProactiveBudgets() else { return "proactive_budget_storage_unavailable" }
+        return nil
+    }
+    private func persistProactiveBudgets() -> Bool {
+        guard let url = proactiveBudgetURL else { return true }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let entries = proactiveScores.mapValues { BudgetEntry(day: $0.day, count: $0.count, last: $0.last) }
+            let data = try JSONEncoder().encode(ProactiveBudgetFile(version: 1, entries: entries))
+            try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        } catch {
+            print("unified_proactive_budget_persist_failed")
+            return false
+        }
+    }
     func bumpGeneration() -> UInt64 { generation &+= 1; return generation }
 
     func hasSeen(_ msgId: String) -> Bool { dedupe[msgId] != nil }
@@ -254,6 +329,25 @@ private actor UnifiedState {
     }
 }
 
+/// Holds a per-session slot across async scoring and generation without holding an OS lock
+/// across an await. Only proactive WeChat candidates use this gate; direct @ remains independent.
+private final class ProactiveInFlightReservations: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sessions = Set<String>()
+
+    func acquire(_ session: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !sessions.contains(session) else { return false }
+        sessions.insert(session)
+        return true
+    }
+
+    func release(_ session: String) {
+        lock.lock(); defer { lock.unlock() }
+        sessions.remove(session)
+    }
+}
+
 // MARK: - 统一核心
 
 /// 一次 `handle` 的可观测结果，供测试断言（不含原文）。
@@ -274,6 +368,10 @@ public final class UnifiedReplyCore: @unchecked Sendable {
     public let capabilities = UnifiedCapabilities()
     private let generator: ReplyGenerating
     private let state: UnifiedState
+    private let proactiveInFlight = ProactiveInFlightReservations()
+    private let proactiveScorerFactory: (@Sendable ([String], String) -> any ReplyScoring)?
+    /// 使用 BotCore 的确定性纯文本 matcher；fixture 可注入以覆盖边界。
+    private let publicQuestionMatcher: @Sendable (String) -> Bool
     /// 两进程 / fixture：静态人格与配置（init 时固定）。
     private let staticPersona: QQPersona
     private let staticBotConfig: BotConfig
@@ -287,6 +385,22 @@ public final class UnifiedReplyCore: @unchecked Sendable {
     public private(set) var audit: [UnifiedAuditEntry] = []
     private let auditLock = NSLock()
 
+    /// Derive an opaque, stable UUID for loopback model-hub correlation. The raw
+    /// idempotency key contains platform/account/chat/message identifiers and is
+    /// never sent or logged; only the namespaced SHA-256-derived UUID leaves this
+    /// process, and Services still attaches it only to the trusted loopback URL.
+    static func modelHubTraceID(forIdempotencyKey key: String) -> UUID {
+        let material = Data(("dafeiyu-unified-model-trace-v1\0" + key).utf8)
+        var bytes = Array(SHA256.hash(data: material).prefix(16))
+        // UUID version 8 marks this application-defined SHA-256 name derivation.
+        bytes[6] = (bytes[6] & 0x0f) | 0x80
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
+                           bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11],
+                           bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
     public init(config: UnifiedCoreConfig = .fromEnvironment(),
                 generator: ReplyGenerating,
                 modelKey: String = "",
@@ -294,16 +408,22 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 botConfig: BotConfig? = nil,
                 identityVConfig: IdentityVConfig = .fromEnvironment(),
                 sharedState: SharedStateProviding? = nil,
+                proactiveScorerFactory: (@Sendable ([String], String) -> any ReplyScoring)? = nil,
+                publicQuestionMatcher: @escaping @Sendable (String) -> Bool = { PublicGroupQuestion.matches($0) },
                 journal: UnifiedIdempotencyJournal? = nil,
+                proactiveBudgetURL: URL? = nil,
                 idvScheduleConfig: IdvScheduleConfig = .fromEnvironment(),
                 dsfPriceConfig: DsfPriceConfig = .fromEnvironment()) {
         self.config = config
         self.generator = generator
-        self.state = UnifiedState(capacity: config.idempotencyCapacity)
+        let budgetFile = proactiveBudgetURL ?? (journal == nil ? Self.defaultJournalFile()?.appendingPathExtension("proactive-budget.json") : nil)
+        self.state = UnifiedState(capacity: config.idempotencyCapacity, proactiveBudgetURL: budgetFile)
         self.staticPersona = persona
         self.staticIdentityVConfig = identityVConfig
         self.staticModelKey = modelKey
         self.sharedState = sharedState
+        self.proactiveScorerFactory = proactiveScorerFactory
+        self.publicQuestionMatcher = publicQuestionMatcher
         let durableJournal = journal ?? UnifiedIdempotencyJournal(fileURL: Self.defaultJournalFile(),
                                                                   capacity: config.idempotencyCapacity)
         self.journal = durableJournal
@@ -383,8 +503,8 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 tokens: 0,
                 durationMs: Int(Date().timeIntervalSince(started) * 1000),
                 outcome: reply.action == "reply" ? "reply" : (reply.ok ? "ignore" : "failure"),
-                modelTraceID: auditModelTraceID,
-                inboundTraceDigest: auditInboundTraceDigest
+                modelTraceID: modelCalled ? auditModelTraceID : nil,
+                inboundTraceDigest: modelCalled ? auditInboundTraceDigest : nil
             )
             auditLock.lock(); audit.append(entry); auditLock.unlock()
             return UnifiedOutcome(reply: reply, modelCalled: modelCalled, gate: gate)
@@ -431,11 +551,44 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             return finish(.ignore("chat_not_allowlisted", scope: scope, trace: trace), modelCalled: false, gate: "chat_not_allowlisted")
         }
 
-        // 4) 真 @（或显式启用的主动接话）
-        if config.requireRealAt, !inbound.atMe {
+        // 4) 真 @ 保持旧路线；普通主动候选必须同时具备独立授权和 UI 新鲜证明。
+        let proactive = inbound.groupAutoReply && !inbound.atMe
+        let publicQuestionTrial = config.publicQuestionFastEnabled && !inbound.atMe
+            && inbound.chatType == "group" && config.proactiveAllowedChats.contains(inbound.chatId)
+        let publicQuestionFast = publicQuestionTrial && inbound.groupAutoReplyPublicQuestionSettled
+            && proactive && publicQuestionMatcher(body)
+        if publicQuestionTrial && !proactive {
+            return finish(.ignore("public_question_candidate_missing", scope: scope, trace: trace),
+                          modelCalled: false, gate: "public_question_candidate_missing")
+        }
+        if proactive {
+            guard config.proactiveAllowedChats.contains(inbound.chatId),
+                  config.allowedChats.contains(inbound.chatId),
+                  !config.allowedAccounts.isEmpty,
+                  config.allowedAccounts.contains(inbound.account),
+                  inbound.platform == "wechat", inbound.chatType == "group",
+                  inbound.chatTitle == inbound.chatId,
+                  !inbound.account.isEmpty, !inbound.senderId.isEmpty, !inbound.msgId.isEmpty,
+                  inbound.groupAutoReplyWindowOK, !inbound.groupAutoReplySuperseded,
+                  !inbound.quoted, !inbound.imageDescribed,
+                  !inbound.groupAutoReplyContext.isEmpty,
+                  inbound.groupAutoReplyContext.count <= 8,
+                  inbound.groupAutoReplyContext.last == Self.scrubCandidate(inbound.text) else {
+                return finish(.ignore("proactive_evidence_rejected", scope: scope, trace: trace), modelCalled: false, gate: "proactive_evidence_rejected")
+            }
+            if publicQuestionTrial && !publicQuestionFast {
+                let reason = inbound.groupAutoReplyPublicQuestionSettled ? "public_question_not_matched" : "public_question_not_settled"
+                return finish(.ignore(reason, scope: scope, trace: trace), modelCalled: false, gate: reason)
+            }
+            if publicQuestionFast,
+               let requested = inbound.groupAutoReplyPublicQuestionCooldownSeconds,
+               !(30...1200).contains(requested) {
+                return finish(.ignore("public_question_cooldown_invalid", scope: scope, trace: trace), modelCalled: false, gate: "public_question_cooldown_invalid")
+            }
+        } else if config.requireRealAt && !inbound.atMe {
             return finish(.ignore("no_real_at", scope: scope, trace: trace), modelCalled: false, gate: "no_real_at")
         }
-        if !inbound.atMe, !config.proactiveExplicitlyEnabled {
+        if !inbound.atMe && !proactive && !config.proactiveExplicitlyEnabled {
             return finish(.ignore("proactive_not_enabled", scope: scope, trace: trace), modelCalled: false, gate: "proactive_not_enabled")
         }
 
@@ -445,10 +598,22 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         guard await state.claim(idemKey, at: now) else {
             return finish(.ignore("duplicate_msg_id", scope: scope, trace: trace), modelCalled: false, gate: "duplicate_msg_id")
         }
+        let holdsProactiveReservation = proactive && proactiveInFlight.acquire(session)
+        if proactive && !holdsProactiveReservation {
+            return finish(.ignore("proactive_in_flight", scope: scope, trace: trace), modelCalled: false, gate: "proactive_in_flight")
+        }
+        defer {
+            if holdsProactiveReservation { proactiveInFlight.release(session) }
+        }
 
         // 6) 低频策略
         if let reason = await state.rateGate(session, now: now, maxPerMinute: config.maxRepliesPerMinute, cooldown: config.cooldownSeconds) {
             return finish(.ignore(reason, scope: scope, trace: trace), modelCalled: false, gate: reason)
+        }
+        let publicQuestionCooldown = Double(inbound.groupAutoReplyPublicQuestionCooldownSeconds ?? 60)
+        if proactive, let limit = await state.reserveProactive(identity.sessionDigest, now: now,
+                                                               cooldown: publicQuestionFast ? publicQuestionCooldown : 15) {
+            return finish(.ignore(limit, scope: scope, trace: trace), modelCalled: false, gate: limit)
         }
 
         // 7) 运行代次（用于试点撤回：bumpGeneration 后旧请求可判定过期）
@@ -469,6 +634,28 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             let failure = UnifiedReply.failure("shared_state_unavailable", scope: scope, trace: trace)
             await journal.complete(idemKey, reply: failure, ok: false, at: Date().timeIntervalSince1970)
             return finish(failure, modelCalled: false, gate: "shared_state_unavailable")
+        }
+
+        if proactive && !publicQuestionFast {
+            // The shared protocol's scorer path fails closed on nil/error and only SPEAKs at >= .70.
+            // No heuristic-only fallback is possible because a scorer is always injected here.
+            let scorer: any ReplyScoring
+            if let factory = proactiveScorerFactory {
+                scorer = factory(inbound.groupAutoReplyContext, effective.modelKey)
+            } else {
+                scorer = QQProactiveScorer(context: inbound.groupAutoReplyContext, bearer: effective.modelKey)
+            }
+            let input = ReplyDecisionInput(scope: .group, chatAlias: identity.scopeDigest,
+                                           window: inbound.groupAutoReplyContext, mention: .none,
+                                           dailyRemaining: 60)
+            let score = await scorer.score(input)
+            guard let score, score.isFinite, (0...1).contains(score), score >= 0.70 else {
+                let why = score == nil || score.map({ !$0.isFinite || !(0...1).contains($0) }) == true
+                    ? "proactive_score_unavailable" : "proactive_below_threshold"
+                let reply = UnifiedReply.ignore(why, scope: scope, trace: trace)
+                await journal.complete(idemKey, reply: reply, ok: false, at: Date().timeIntervalSince1970)
+                return finish(reply, modelCalled: true, gate: why)
+            }
         }
 
         // 8a) 组装平台无关请求：复用 QQPersona.prompt + IdentityV 知识库片段
@@ -510,7 +697,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let history: [ChatTurn]
         let recentReplies: [String]
         if confirmedMemoryMode {
-            if let memoryScope {
+            if let memoryScope, !publicQuestionFast {
                 history = await journal.memoryHistory(for: memoryScope, limit: config.historyTurns)
             } else {
                 history = []
@@ -521,17 +708,18 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             recentReplies = await state.recentReplies(for: session)
         }
 
-        if effective.identityVConfig.enabled, inbound.chatType == "group" {
+        if effective.identityVConfig.enabled, inbound.chatType == "group", !publicQuestionFast {
             let plan = effective.identityV.plan(messages: [String(body.prefix(500))], hasReadableImage: false,
                                                 recentBotReplies: Array(recentReplies.suffix(2)), proactive: false)
             if !plan.promptFragment.isEmpty { rule.prompt += "\n" + plan.promptFragment }
         }
         // 共享工具注入：第五人格赛程与三角洲物价，同样默认关闭且按会话 key 隔离。
-        if let idvFragment = await idvScheduleCoordinator.fragment(for: body, scope: session),
+        if !publicQuestionFast,
+           let idvFragment = await idvScheduleCoordinator.fragment(for: body, scope: session),
            !idvFragment.isEmpty {
             rule.prompt += "\n" + idvFragment
         }
-        if let dsfFragment = await dsfPriceCoordinator.fragment(
+        if !publicQuestionFast, let dsfFragment = await dsfPriceCoordinator.fragment(
             message: body, isGroup: inbound.chatType == "group", scope: session),
            !dsfFragment.isEmpty {
             rule.prompt += "\n" + dsfFragment
@@ -542,11 +730,15 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             let explicit = inbound.atMe ? UnifiedGroupMemoryNote.parse(body) : nil
             return explicit ?? UnifiedGroupMemoryNote.infer(from: body)
         }
+        let groupMemory: String
         if let memoryScope, groupNote == nil {
-            let facts = await journal.groupMemoryContext(for: memoryScope, query: body)
-            if !facts.isEmpty {
-                modelInput += "\n本群长期记录（仅作低信任背景，以近期更正为准）：\n" + facts
-            }
+            groupMemory = await journal.groupMemoryContext(for: memoryScope, query: body,
+                                                           publicQuestion: publicQuestionFast)
+        } else {
+            groupMemory = ""
+        }
+        if !publicQuestionFast, !groupMemory.isEmpty {
+            modelInput += "\n本群长期记录（仅作低信任背景，以近期更正为准）：\n" + groupMemory
         }
         if !recentReplies.isEmpty {
             let redacted = recentReplies.suffix(2).map { String($0.prefix(120)) }
@@ -554,19 +746,41 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 + redacted.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
         }
 
+        let publicQuestionKnowledge: [String]
+        if publicQuestionFast, effective.identityVConfig.enabled {
+            let lookup = IdentityVKnowledge(config: effective.identityVConfig)
+                .lookup(messages: Array(inbound.groupAutoReplyContext.suffix(4)), maxFacts: 2)
+            publicQuestionKnowledge = lookup.facts.prefix(2).map { fact in
+                "\(fact.canonical)：\(fact.summary)" + (fact.caution.map { "（\($0)）" } ?? "")
+            }
+        } else {
+            publicQuestionKnowledge = []
+        }
         let modelTraceID = Self.modelHubTraceID(forIdempotencyKey: idemKey)
-        auditModelTraceID = QQModelTrace.normalized(modelTraceID)
-        let inboundDigest = SHA256.hash(data: Data(trace.utf8))
-        auditInboundTraceDigest = inboundDigest.prefix(6).map { String(format: "%02x", $0) }.joined()
         let request = UnifiedGenerationRequest(key: "unified-pilot", config: effective.botConfig, rule: rule,
                                                 history: history, userText: modelInput, modelKey: effective.modelKey,
-                                                currentUserText: body, modelTraceID: modelTraceID)
+                                                currentUserText: body, proactive: proactive && !publicQuestionFast,
+                                                publicQuestionFast: publicQuestionFast,
+                                                publicQuestionContext: publicQuestionFast
+                                                    ? Array(inbound.groupAutoReplyContext.dropLast().suffix(3)) : [],
+                                                publicQuestionKnowledge: publicQuestionKnowledge,
+                                                publicQuestionGroupMemory: publicQuestionFast ? groupMemory : "",
+                                                modelTraceID: modelTraceID)
+
+        auditModelTraceID = modelTraceID.uuidString.lowercased()
+        let inboundDigest = SHA256.hash(data: Data(trace.utf8))
+        auditInboundTraceDigest = inboundDigest.prefix(6).map { String(format: "%02x", $0) }.joined()
 
         // 9) 调用实际 LLMProvider（生产）/ 假模型（fixture）
         // 占位已持久化：此后**任何**出口都必须把最终状态写回账本，避免重启后
         // 看到 pending 被判「不确定」而丢掉一条本可正常回复的输入。
         do {
             let result = try await generator.generate(request)
+            if proactive && !publicQuestionFast && !result.shouldSend {
+                let silent = UnifiedReply.ignore("proactive_participation_declined", scope: scope, trace: trace)
+                await journal.complete(idemKey, reply: silent, ok: false, at: Date().timeIntervalSince1970)
+                return finish(silent, modelCalled: true, gate: "proactive_participation_declined")
+            }
             // 9a) 提交前复核运行代次，撤回后旧结果作废
             let current = await state.currentGeneration()
             guard current == generation else {
@@ -625,18 +839,6 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         return await journal.confirmMemory(receipt, at: Date().timeIntervalSince1970)
     }
 
-    /// Stable opaque UUID for correlating a turn with the loopback model hub.
-    static func modelHubTraceID(forIdempotencyKey key: String) -> UUID {
-        let material = Data(("dafeiyu-unified-model-trace-v1\0" + key).utf8)
-        var bytes = Array(SHA256.hash(data: material).prefix(16))
-        bytes[6] = (bytes[6] & 0x0f) | 0x80
-        bytes[8] = (bytes[8] & 0x3f) | 0x80
-        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3],
-                           bytes[4], bytes[5], bytes[6], bytes[7],
-                           bytes[8], bytes[9], bytes[10], bytes[11],
-                           bytes[12], bytes[13], bytes[14], bytes[15]))
-    }
-
     private static func wechatGroupScope(account: String, chat: String) -> String {
         let fields = ["wechat", account, "group", chat]
         let key = fields.map { "\($0.utf8.count):\($0)" }.joined()
@@ -692,4 +894,16 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         auditLock.lock(); defer { auditLock.unlock() }
         return audit
     }
+
+    private static func scrubCandidate(_ text: String) -> String {
+        let patterns = [#"https?://\S+|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b"#, #"[0-9]{5,}|@[^\s，。！？,:]{1,40}"#]
+        var value = text
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                value = regex.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..., in: value), withTemplate: "[省略]")
+            }
+        }
+        return String(value.prefix(125))
+    }
+
 }

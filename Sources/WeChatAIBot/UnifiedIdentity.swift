@@ -59,6 +59,12 @@ public struct UnifiedInbound: Codable, Sendable, Equatable {
     public var quoted: Bool
     /// 入站图片是否已由既有 /api/vision 转成文字描述（Pi 侧无原图出站能力）。
     public var imageDescribed: Bool
+    public var groupAutoReply: Bool
+    public var groupAutoReplyContext: [String]
+    public var groupAutoReplyWindowOK: Bool
+    public var groupAutoReplySuperseded: Bool
+    public var groupAutoReplyPublicQuestionSettled: Bool
+    public var groupAutoReplyPublicQuestionCooldownSeconds: Int?
 
     private enum CodingKeys: String, CodingKey {
         case platform, account
@@ -72,16 +78,30 @@ public struct UnifiedInbound: Codable, Sendable, Equatable {
         case msgId = "msg_id"
         case quoted
         case imageDescribed = "image_described"
+        case groupAutoReply = "group_auto_reply"
+        case groupAutoReplyContext = "group_auto_reply_context"
+        case groupAutoReplyWindowOK = "group_auto_reply_window_ok"
+        case groupAutoReplySuperseded = "group_auto_reply_superseded"
+        case groupAutoReplyPublicQuestionSettled = "group_auto_reply_public_question_settled"
+        case groupAutoReplyPublicQuestionCooldownSeconds = "group_auto_reply_public_question_cooldown_seconds"
     }
 
     public init(platform: String = "wechat", account: String = "", chatType: String = "group",
                 chatId: String = "", chatTitle: String = "", senderName: String = "",
                 senderId: String = "", text: String = "", atMe: Bool = false,
-                msgId: String = "", quoted: Bool = false, imageDescribed: Bool = false) {
+                msgId: String = "", quoted: Bool = false, imageDescribed: Bool = false,
+                groupAutoReply: Bool = false, groupAutoReplyContext: [String] = [],
+                groupAutoReplyWindowOK: Bool = false, groupAutoReplySuperseded: Bool = true,
+                groupAutoReplyPublicQuestionSettled: Bool = false,
+                groupAutoReplyPublicQuestionCooldownSeconds: Int? = nil) {
         self.platform = platform; self.account = account; self.chatType = chatType
         self.chatId = chatId; self.chatTitle = chatTitle; self.senderName = senderName
         self.senderId = senderId; self.text = text; self.atMe = atMe; self.msgId = msgId
         self.quoted = quoted; self.imageDescribed = imageDescribed
+        self.groupAutoReply = groupAutoReply; self.groupAutoReplyContext = groupAutoReplyContext
+        self.groupAutoReplyWindowOK = groupAutoReplyWindowOK; self.groupAutoReplySuperseded = groupAutoReplySuperseded
+        self.groupAutoReplyPublicQuestionSettled = groupAutoReplyPublicQuestionSettled
+        self.groupAutoReplyPublicQuestionCooldownSeconds = groupAutoReplyPublicQuestionCooldownSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -98,6 +118,12 @@ public struct UnifiedInbound: Codable, Sendable, Equatable {
         msgId = (try? c.decode(String.self, forKey: .msgId)) ?? ""
         quoted = (try? c.decode(Bool.self, forKey: .quoted)) ?? false
         imageDescribed = (try? c.decode(Bool.self, forKey: .imageDescribed)) ?? false
+        groupAutoReply = (try? c.decode(Bool.self, forKey: .groupAutoReply)) ?? false
+        groupAutoReplyContext = (try? c.decode([String].self, forKey: .groupAutoReplyContext)) ?? []
+        groupAutoReplyWindowOK = (try? c.decode(Bool.self, forKey: .groupAutoReplyWindowOK)) ?? false
+        groupAutoReplySuperseded = (try? c.decode(Bool.self, forKey: .groupAutoReplySuperseded)) ?? true
+        groupAutoReplyPublicQuestionSettled = (try? c.decode(Bool.self, forKey: .groupAutoReplyPublicQuestionSettled)) ?? false
+        groupAutoReplyPublicQuestionCooldownSeconds = try c.decodeIfPresent(Int.self, forKey: .groupAutoReplyPublicQuestionCooldownSeconds)
     }
 
     public var identity: UnifiedIdentity {
@@ -138,7 +164,7 @@ public struct UnifiedAuditEntry: Codable, Sendable, Equatable {
     public var tokens: Int
     public var durationMs: Int
     public var outcome: String
-    /// Opaque correlation fields exist only for turns that reach generation.
+    /// Optional opaque model-hub correlation fields; absent for old records and no-model gates.
     public var modelTraceID: String? = nil
     public var inboundTraceDigest: String? = nil
 }

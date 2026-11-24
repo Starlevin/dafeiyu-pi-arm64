@@ -275,13 +275,27 @@ public actor UnifiedIdempotencyJournal {
         }
     }
 
-    func groupMemoryContext(for scope: String, query: String) -> String {
+    func groupMemoryContext(for scope: String, query: String, publicQuestion: Bool = false) -> String {
         guard storageUsable else { return "" }
-        recoverGroupNotes(for: scope)
+        if !publicQuestion { recoverGroupNotes(for: scope) }
         do {
-            let archive = try groupArchive(scope, create: false)
-            return archive?.context(query, subject: "CONVERSATION", characters: 480,
-                                    includeEpisodes: false) ?? ""
+            guard let archive = try groupArchive(scope, create: false) else { return "" }
+            if publicQuestion {
+                // Public replies may recall current notes whose full topic appears in the question.
+                let normalized = query.precomposedStringWithCanonicalMapping.lowercased()
+                let now = Date()
+                let related = archive.items.filter { item in
+                    item.current(now) && item.keywords.count == 1 && item.keywords.contains {
+                        $0.count >= 2 && normalized.contains($0)
+                    }
+                }
+                guard !related.isEmpty else { return "" }
+                let context = QQMemoryIndex(related).context(normalized, subject: "CONVERSATION",
+                                                            characters: 220, now: now)
+                return context.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? ""
+            }
+            return archive.context(query, subject: "CONVERSATION", characters: 480,
+                                   includeEpisodes: false)
         } catch {
             print("unified_group_memory_read_failed")
             return ""
