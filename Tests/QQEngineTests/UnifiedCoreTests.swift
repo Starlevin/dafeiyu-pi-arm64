@@ -252,6 +252,26 @@ private func inbound(_ text: String = "合成消息",
         #expect(await restored.reserveProactive("session-digest", now: 1_800_000_000, dailyLimit: 60) == "proactive_budget_storage_unavailable")
     }
 
+    @Test func fullWidthProactiveBudgetsInheritLegacyUsageAndThenStayIndependent() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("score-budget.json")
+        let now = 1_800_000_000.0
+        let legacy = "00000000b773f597"
+        let first = "cf159323b773f597"
+        let second = "da415813b773f597"
+        let old = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await old.reserveProactive(legacy, now: now) == nil)
+
+        let updated = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await updated.reserveProactive(first, now: now + 1, dailyLimit: 2) == "proactive_score_cooldown")
+        #expect(await updated.reserveProactive(first, now: now + 30, dailyLimit: 2) == nil)
+        let restarted = UnifiedState(capacity: 16, proactiveBudgetURL: url)
+        #expect(await restarted.reserveProactive(first, now: now + 60, dailyLimit: 2) == "proactive_daily_budget")
+        #expect(await restarted.reserveProactive(second, now: now + 60, dailyLimit: 2) == nil)
+        #expect(await restarted.reserveProactive(second, now: now + 120, dailyLimit: 2) == "proactive_daily_budget")
+    }
+
     @Test func proactiveCandidateRequiresProofAllowlistAndModelScore() async {
         var c = makeConfig(requireAt: false)
         c.proactiveExplicitlyEnabled = true
@@ -844,7 +864,7 @@ private func inbound(_ text: String = "合成消息",
         #expect(a.sessionKey != b.sessionKey)
         #expect(a.sessionKey != c.sessionKey)
         #expect(a.sessionKey != d.sessionKey)
-        #expect(a.scopeDigest.count == 16)
+        #expect(a.scopeDigest == "cf159323b773f597")
         #expect(a.scopeDigest != b.scopeDigest)
     }
 

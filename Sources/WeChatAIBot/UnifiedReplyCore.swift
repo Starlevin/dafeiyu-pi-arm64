@@ -258,7 +258,11 @@ actor UnifiedState {
         let day = ReplyDecisionState.dayKey(for: Int(now))
         proactiveScores = proactiveScores.filter { $0.value.day == day }
         guard proactiveScores.count < 5_000 || proactiveScores[key] != nil else { return "proactive_budget_storage_unavailable" }
-        var entry = proactiveScores[key] ?? (day, 0, 0)
+        // Older builds formatted the UInt64 with a 32-bit specifier. Copy
+        // the still-current legacy budget when a full-width key first appears.
+        // Keep the old bucket until rollover, since another scope may share it.
+        let legacyKey = "00000000" + key.suffix(8)
+        var entry = proactiveScores[key] ?? proactiveScores[legacyKey] ?? (day, 0, 0)
         if entry.day != day { entry = (day, 0, 0) }
         if entry.count >= dailyLimit { proactiveScores[key] = entry; return "proactive_daily_budget" }
         if entry.last > 0, now - entry.last < cooldown { proactiveScores[key] = entry; return "proactive_score_cooldown" }
@@ -526,7 +530,8 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         //                绝不重新生成、绝不重新发回（发送不明勿盲重试）；
         //     failed   → 上次明确生成失败，同样不重放。
         if let journalEntry = await journal.lookup(idemKey) {
-            if journalEntry.state == "done", let prior = journalEntry.reply {
+            if journalEntry.state == "done", var prior = journalEntry.reply {
+                prior.scope = scope
                 return finish(prior, modelCalled: false, gate: "durable_replay")
             }
             return finish(.ignore("durable_uncertain_or_failed", scope: scope, trace: trace),

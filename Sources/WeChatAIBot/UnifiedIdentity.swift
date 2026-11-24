@@ -38,7 +38,8 @@ public struct UnifiedIdentity: Codable, Equatable, Sendable {
             hash ^= UInt64(byte)
             hash = hash &* 0x100000001b3
         }
-        return String(format: "%016x", hash)
+        let hex = String(hash, radix: 16)
+        return String(repeating: "0", count: 16 - hex.count) + hex
     }
 }
 
