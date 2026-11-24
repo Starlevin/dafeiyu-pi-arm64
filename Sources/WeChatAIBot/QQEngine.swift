@@ -163,6 +163,7 @@ struct QQEngineSharedState: Sendable {
     private func proactiveAllowed(for target: QQTarget) -> Bool {
         config.effectiveGroupParticipationEnabled || scopedProactiveProfiles[target.key] != nil
     }
+    // Charged against group cooldown and budget, including submissions with unknown delivery.
     private var proactiveSendHistory: [String: [Date]] = [:]
     private var scopedParticipation: QQScopedParticipation?
     private var participationNeedsSave = false
@@ -1370,6 +1371,11 @@ struct QQEngineSharedState: Sendable {
             let submissionID = UUID()
             defer { activeGroupSubmissions.removeValue(forKey: submissionID) }
             do {
+                if proactive, let profile = scopedProactiveProfiles[message.key],
+                   !profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) {
+                    record(target.id, .skipped, "主动接话仍在冷却或已达限额，未调用模型")
+                    continue
+                }
                 while sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits, chatCooldown: config.ai.cooldownSeconds) == .cooldown {
                     try await Task.sleep(nanoseconds: 500_000_000); try check(epoch, scope: message.key, target: target)
                 }
@@ -1846,8 +1852,22 @@ struct QQEngineSharedState: Sendable {
                 }
                 if let ticket {
                     sends.finish(ticket, confirmed: false); artworkLedger.finish(ticket, confirmed: false)
-                    record(target.id, .uncertain, "发送结果未知，不重发；已暂停 QQ")
-                    if fence.permits(epoch) { pause() }
+                    if waitingForReceipt, error is OneBotActionTimeout, proactive,
+                       scopedProactiveProfiles[message.key] != nil {
+                        proactiveSendHistory[message.key, default: []].append(Date())
+                        record(target.id, .uncertain, "发送结果未知，不重发，计入本群主动接话冷却和限额")
+                        if fence.permits(epoch), connected {
+                            let response = try? await connection.action("get_login_info", timeout: .seconds(3))
+                            guard fence.permits(epoch), !Task.isCancelled else { continue }
+                            let account = (response?["data"] as? [String: Any]).flatMap { QQPolicy.identifier($0["user_id"]) }
+                            if account != config.expectedSelfID {
+                                handleConnectionLoss(AppFailure.message("QQ 发送超时后账号探测未通过"))
+                            }
+                        }
+                    } else {
+                        record(target.id, .uncertain, "发送结果未知，不重发；已暂停 QQ")
+                        if fence.permits(epoch) { pause() }
+                    }
                 } else if fence.permits(epoch) { record(target.id, .failed, error.localizedDescription) }
                 if let http = error as? HTTPFailure, [401, 402].contains(http.code), fence.permits(epoch) { pause() }
             }

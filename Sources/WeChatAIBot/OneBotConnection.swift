@@ -1,4 +1,8 @@
 import Foundation
+
+struct OneBotActionTimeout: LocalizedError {
+    var errorDescription: String? { "OneBot 响应超时；如已提交发送，结果未知且不重发" }
+}
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -65,7 +69,7 @@ import FoundationNetworking
             } else { continuation.resume(throwing: AppFailure.message("OneBot 操作失败，返回码 \(object["retcode"] as? Int ?? -1)")) }
         } else { event?(object) }
     }
-    func action(_ name: String, params: [String: Any] = [:]) async throws -> [String: Any] {
+    func action(_ name: String, params: [String: Any] = [:], timeout: Duration = .seconds(15)) async throws -> [String: Any] {
         guard let socket else { throw AppFailure.message("QQ 未连接") }
         try Task.checkCancellation()
         let echo = UUID().uuidString
@@ -74,8 +78,8 @@ import FoundationNetworking
             try await withCheckedThrowingContinuation { continuation in
                 pending[echo] = continuation
                 deadlines[echo] = Task { [weak self] in
-                    do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
-                    self?.fail(echo, error: AppFailure.message("OneBot 响应超时；如已提交发送，结果未知且不重发"))
+                    do { try await Task.sleep(for: timeout) } catch { return }
+                    self?.fail(echo, error: OneBotActionTimeout())
                 }
                 let completion: (Error?) -> Void = { [weak self] error in
                     if let error { Task { @MainActor in self?.fail(echo, error: error) } }
