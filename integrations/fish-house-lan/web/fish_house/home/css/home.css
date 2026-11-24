@@ -388,6 +388,21 @@ html, body {
   transition: background 0.2s ease, color 0.2s ease;
 }
 
+a.fh-dock-btn {
+  display: -webkit-flex;
+  display: flex;
+  -webkit-align-items: center;
+  align-items: center;
+  -webkit-justify-content: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+a.fh-dock-btn:focus {
+  outline: 2px solid #164778;
+  outline-offset: 2px;
+}
+
 .fh-dock-btn.active {
   background: #e1f0fe;
   color: #1c5790;

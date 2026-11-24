@@ -122,6 +122,10 @@ function buildFixtures() {
   }
   const html = fs.readFileSync(REPO_INDEX, "utf8");
   fs.writeFileSync(path.join(fixed, "index.html"), html);
+  fs.copyFileSync(path.join(path.dirname(REPO_INDEX), "home.html"), path.join(fixed, "home.html"));
+  const homeCss = path.join("home", "css", "home.css");
+  fs.mkdirSync(path.dirname(path.join(fixed, homeCss)), { recursive: true });
+  fs.copyFileSync(path.join(path.dirname(REPO_INDEX), homeCss), path.join(fixed, homeCss));
   // Derive the pre-fix page from the candidate's parent commit (sensitivity check).
   let ok = false;
   try {
@@ -136,10 +140,18 @@ function buildFixtures() {
 function startServer() {
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
-      const p = path.join(tmpRoot, decodeURIComponent(req.url.split("?")[0]));
+      const requestPath = decodeURIComponent(req.url.split("?")[0]);
+      if (requestPath === "/") {
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end('<main id="console-fixture">Console</main>');
+        return;
+      }
+      const p = path.join(tmpRoot, requestPath);
       fs.readFile(p, (err, data) => {
         if (err) { res.writeHead(404); res.end("nf"); return; }
-        res.writeHead(200, { "Content-Type": p.endsWith(".png") ? "image/png" : "text/html; charset=utf-8" });
+        const contentType = p.endsWith(".png") ? "image/png" :
+          p.endsWith(".css") ? "text/css; charset=utf-8" : "text/html; charset=utf-8";
+        res.writeHead(200, { "Content-Type": contentType });
         res.end(data);
       });
     });
@@ -184,6 +196,37 @@ async function probe(cdp, dir, jsOn, ua, w, h) {
   return JSON.parse(r.result.value);
 }
 
+async function consoleNavigationWithoutScripts(cdp) {
+  const root = "http://127.0.0.1:" + HTTP_PORT;
+  await probe(cdp, "fixed", false, UA_ANDROID, 390, 740);
+  await cdp.call("Page.navigate", { url: root + "/fixed/home.html" });
+  const evaluate = async (expression) => (await cdp.call("Runtime.evaluate", {
+    expression, returnByValue: true
+  })).result.value;
+  let control;
+  for (let i = 0; i < 20 && !control; i++) {
+    control = await evaluate(`(() => {
+      const link = document.querySelector("#fh-dock-console");
+      if (!link || location.pathname !== "/fixed/home.html" || document.readyState !== "complete") return null;
+      const rect = link.getBoundingClientRect();
+      const x = rect.left + rect.width / 2, y = rect.top + rect.height / 2;
+      if (document.elementFromPoint(x, y) !== link) return null;
+      return { x, y, tag: link.tagName, href: link.getAttribute("href") };
+    })()`);
+    if (!control) await sleep(100);
+  }
+  if (!control || control.tag !== "A" || control.href !== "/") return { ok: false, control };
+  await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left",
+    clickCount: 1, x: control.x, y: control.y });
+  await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left",
+    clickCount: 1, x: control.x, y: control.y });
+  for (let i = 0; i < 25; i++) {
+    if (await evaluate('location.pathname === "/" && !!document.querySelector("#console-fixture")')) return { ok: true };
+    await sleep(100);
+  }
+  return { ok: false, control };
+}
+
 (async () => {
   if (!fs.existsSync(REPO_INDEX)) { console.error("MISSING", REPO_INDEX); process.exit(2); }
   try { CHROME = resolveChrome(); }
@@ -217,6 +260,7 @@ async function probe(cdp, dir, jsOn, ua, w, h) {
     const fixedJsOn = await probe(cdp, "fixed", true, UA_ANDROID, 420, 820);
     const prefixJsOff = fx.prefixAvailable ? await probe(cdp, "prefixed", false, UA_ANDROID, 420, 820) : null;
     const fixedPc = await probe(cdp, "fixed", true, UA_PC, 1280, 800);
+    const consoleWithoutScripts = await consoleNavigationWithoutScripts(cdp);
 
     const checks = [
       ["P0 first scene visible with JS BLOCKED (Android portrait)",
@@ -225,6 +269,8 @@ async function probe(cdp, dir, jsOn, ua, w, h) {
        fixedJsOn.firstSceneVisible === true, fixedJsOn],
       ["pre-fix page reproduces blank screen with JS blocked (sensitivity)",
        fx.prefixAvailable ? prefixJsOff.firstSceneVisible === false : null, prefixJsOff],
+      ["house console remains tappable with JavaScript blocked (Android portrait)",
+       consoleWithoutScripts.ok, consoleWithoutScripts],
       ["PC landscape input path preserved",
        fixedPc.activeFrames.some(f => f.indexOf("landscape:") === 0) && fixedPc.firstSceneVisible,
        fixedPc]

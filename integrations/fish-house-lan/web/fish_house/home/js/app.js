@@ -1496,7 +1496,7 @@
     var idx = (THEME_ORDER.indexOf(currentTheme) + 1) % THEME_ORDER.length;
     applyTheme(THEME_ORDER[idx]);
   };
-  $("fh-dock-console").onclick = function () { openDrawer("console"); };
+  $("fh-dock-console").href = consoleHomeUrl();
   $("fh-btn-drawer-top").onclick = function () { openDrawer("console"); };
   $("fh-drawer-close").onclick = closeDrawer;
   $("fh-drawer-mask").onclick = closeDrawer;
