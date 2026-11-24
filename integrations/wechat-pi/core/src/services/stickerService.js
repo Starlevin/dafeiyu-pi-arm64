@@ -6,6 +6,7 @@ const stickers = require('../adapters/stickers');
 const { installPresets } = require('../adapters/stickerPresets');
 const { describeError } = require('../infra/errors');
 const probe = require('../infra/probe');
+const { isMemoryAccount, sessionKey } = require('../memory/sessionKey');
 const ACTIVE = new Set(['queued', 'reserved', 'sending']);
 const TERMINAL = new Set(['confirmed', 'unconfirmed', 'failed', 'cancelled']);
 // status 结果缓存：启动器 2s 拉一次，1.5s 内直接复用上一次扫描结果
@@ -250,7 +251,7 @@ class StickerService {
       this.logger?.info('[sticker] stage=plan result=skip reason=unsupported_target');
       return null;
     }
-    const key = `wechat:${msg.chatId}`;
+    const key = isMemoryAccount(msg.memoryAccount) ? sessionKey(msg) : `wechat:${msg.chatId}`;
     const chatName = msg.chatTitle || msg.chatId;
     // No cooldown after a completed send. An in-flight job remains exclusive until
     // ACK or the 90s expiry; the old 45s bypass could queue two sends for one chat.
@@ -275,8 +276,7 @@ class StickerService {
     const added = this.add(hit, chatName, msg.chatId, key, 'reserved');
     this.logger?.info('[sticker] stage=plan result=reserved job=' + added.id);
     const job = this.jobs.get(added.id);
-    // 会话 key 和聊天记录一致（wechat:u:/wechat:g:），ack 回来才写得到同一段上下文
-    if (job) job.sessionKey = `wechat:${msg.chatType === 'group' ? 'g' : 'u'}:${String(msg.chatId).slice(0, 120)}`;
+    if (job) job.sessionKey = sessionKey({ ...msg, chatId: String(msg.chatId).slice(0, 120) });
     this._note(job, 'queued');
     return { ...added };
   }

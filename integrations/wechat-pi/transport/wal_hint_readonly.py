@@ -5,6 +5,7 @@ No SQL queries, decryption, process-memory access, message bodies or keys.
 This detector only says that a local encrypted database file changed.
 """
 from __future__ import annotations
+import hashlib
 import os
 import re
 import subprocess
@@ -13,6 +14,33 @@ from pathlib import Path
 
 DB_ROLE = re.compile(r"^(?:session|message_[0-9]+|biz_message_[0-9]+)[.]db(?:-wal)?$")
 ROOT = Path.home().resolve()
+
+def active_account_scope(pid, *, proc=Path("/proc"), home=ROOT):
+    """Derive an opaque account scope from one client's open database paths."""
+    if type(pid) is not int or pid <= 0:
+        return None
+    roles = {}
+    try:
+        for descriptor in (proc / str(pid) / "fd").iterdir():
+            try:
+                relative = Path(os.readlink(descriptor)).relative_to(home)
+            except (OSError, ValueError):
+                continue
+            parts = relative.parts
+            if len(parts) < 5 or parts[-5] != "xwechat_files" or parts[-3] != "db_storage":
+                continue
+            account, role, name = parts[-4], parts[-2], parts[-1]
+            if role not in {"session", "message"} or not DB_ROLE.fullmatch(name):
+                continue
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", account):
+                return None
+            roles.setdefault(parts[:-3], set()).add(role)
+    except OSError:
+        return None
+    if len(roles) != 1 or next(iter(roles.values())) != {"session", "message"}:
+        return None
+    account = next(iter(roles))[-1]
+    return hashlib.sha256(("wechat-local-account-v1\0" + account).encode()).hexdigest()
 
 def find_active_wal_files():
     result = set()

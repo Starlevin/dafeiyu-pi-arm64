@@ -211,6 +211,8 @@ class DiaryService {
 
   /** 主人私聊会话。只认 persona.master 的 wxid / 昵称；没配时退回 persona.ownerName。 */
   ownerTarget() {
+    // Scheduled diary work has no account proof from the live chat transport.
+    if (this.config.wechat?.memoryAccountBinding) return null;
     const persona = this.config.persona || {};
     const master = persona.master || {};
     const names = (Array.isArray(master.names) ? master.names : []).map((x) => String(x || '').trim()).filter(Boolean);

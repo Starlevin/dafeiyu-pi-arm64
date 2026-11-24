@@ -25,6 +25,7 @@ const SETTINGS_SHADOW = {
 // 密钥类：接口只报「已设置 / 没配」，留空提交表示「不改」
 const SECRET_PATHS = new Set([
   'llm.apiKey',
+  'wechat.memoryAccountBinding',
   'deepseek.apiKey',
   'vision.apiKey',
   'voice.apiKey',
@@ -196,6 +197,10 @@ function applyConfigPatch(runtime, patch) {
     // 密钥留空 = 不改（界面上看不到已存的 Key，不能一保存就把它清了）
     if (SECRET_PATHS.has(p) && p !== 'admin.spell' && (value === '' || value === null || value === undefined)) continue;
     const next = coerceValue(runtime.config, p, value);
+    if (p === 'wechat.memoryAccountBinding' || (p === 'wechat' && runtime.config.wechat?.memoryAccountBinding)) {
+      if (!Object.is(next, getByPath(runtime.config, p))) errors.push('微信记忆绑定由树莓派桥接管理');
+      continue;
+    }
     const chatRoute = p === 'provider' || p.startsWith('llm.') || p === 'llm'
       || /^deepseek\.(?:provider|apiKey|baseUrl|model|mock)$/.test(p);
     const visionRoute = p === 'vision' || /^vision\.(?:baseUrl|model|apiKey|provider)$/.test(p);

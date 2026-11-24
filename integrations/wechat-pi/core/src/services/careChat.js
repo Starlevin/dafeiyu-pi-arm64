@@ -11,7 +11,8 @@ async function careForChat(runtime, chatId) {
   const name = String(personaCfg.ownerName || '主人');
   const hour = new Date().getHours();
   let recent = [];
-  if (chatId) {
+  // This background request has no bridge-proven account to bind its history.
+  if (chatId && !runtime.config.wechat?.memoryAccountBinding) {
     // 会话 key 可能是私聊（wechat:u:<id>）也可能是群（wechat:g:<id>），两边都试
     for (const key of [`wechat:u:${chatId}`, `wechat:g:${chatId}`, chatId]) {
       try {

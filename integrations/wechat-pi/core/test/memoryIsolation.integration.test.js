@@ -88,6 +88,46 @@ function assertGroupOnly(store, key, ownNeedle, foreignNeedle) {
   assert.equal(messages.some((m) => String(m.text).includes(foreignNeedle)), false, `${key} 不应出现别群消息`);
 }
 
+test('verified accounts isolate the same group, private chat, message ID and old unbound history', async (t) => {
+  const accountA = 'a'.repeat(64), accountB = 'b'.repeat(64);
+  const prompts = [];
+  const { dir, store, gateway } = gatewayFixture(t, {
+    complete: async ({ turns }) => {
+      prompts.push(JSON.stringify(turns));
+      return '收到这次隔离回归的消息。';
+    },
+  });
+  store.ensureSession(KEY_A, { platform: 'wechat', chatType: 'group' });
+  store.appendMessage(KEY_A, { role: 'user', uid: SENDER_ID, text: '无主旧记录夹具' });
+  gateway.bot.config.wechat = { memoryAccountBinding: accountA };
+  const base = inbound(GROUP_A, '甲号群记录夹具');
+  const untrusted = await gateway.handleInbound({ ...base, memory_account: accountA }, { local: true });
+  assert.equal(untrusted.reason, 'memory_account_unverified');
+  const verify = { local: true, trustedLocal: true };
+  for (const [account, type, text] of [[accountA, 'group', '甲号群记录夹具'],
+                                       [accountB, 'group', '乙号群记录夹具'],
+                                       [accountA, 'private', '甲号私聊记录夹具']]) {
+    const reply = await gateway.handleInbound(
+      { ...base, memory_account: account, chat_type: type, text }, verify);
+    assert.equal(reply.action, 'reply');
+  }
+  assert.equal(prompts.length, 3);
+  assert.ok(prompts.every(p => !p.includes('无主旧记录夹具')));
+  assert.ok(!prompts[1].includes('甲号群记录夹具') && !prompts[2].includes('甲号群记录夹具'));
+  store.close();
+  const cold = new Store({ dir });
+  t.after(() => cold.close());
+  const scopeA = `wechat:a:${accountA}:g:${GROUP_A}`;
+  const scopeB = `wechat:a:${accountB}:g:${GROUP_A}`;
+  const privateA = `wechat:a:${accountA}:u:${GROUP_A}`;
+  assertGroupOnly(cold, scopeA, '甲号群记录夹具', '乙号群记录夹具');
+  assertGroupOnly(cold, scopeB, '乙号群记录夹具', '甲号群记录夹具');
+  assertGroupOnly(cold, privateA, '甲号私聊记录夹具', '甲号群记录夹具');
+  assert.equal(cold.isDuplicate(scopeA, MSG_ID), true);
+  assert.equal(cold.isDuplicate(scopeB, MSG_ID), true);
+  assert.equal(cold.messages(KEY_A, 2)[0].text, '无主旧记录夹具');
+});
+
 test('a reply derived from an owner Moments snapshot never enters cold chat memory', async (t) => {
   const ownerId = 'wxid_fixtureowner';
   const key = `wechat:u:${ownerId}`;

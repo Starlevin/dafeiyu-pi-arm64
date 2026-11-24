@@ -16,6 +16,7 @@ const { URL } = require('node:url');
 
 // 只保留微信：抖音桥接早已不适配，代码删掉后不再留一个永远连不上的平台名。
 const PLATFORMS = ['wechat'];
+const { isMemoryAccount } = require('../memory/sessionKey');
 
 function firstDefined(obj, keys) {
   for (const k of keys) {
@@ -177,8 +178,16 @@ class Gateway {
     return [header, query, fromBody].some((v) => String(v || '') === expected);
   }
 
-  async handleInbound(payload, { local = false } = {}) {
+  async handleInbound(payload, { local = false, trustedLocal = false } = {}) {
     const msg = normalizeInbound(payload, this.platform);
+    if (this.platform === 'wechat') {
+      if (trustedLocal && isMemoryAccount(payload?.memory_account)) {
+        msg.memoryAccount = payload.memory_account;
+      }
+      if (this.bot.config?.wechat?.memoryAccountBinding && !msg.memoryAccount) {
+        return { ok: true, action: 'ignore', reason: 'memory_account_unverified' };
+      }
+    }
     // Only the authenticated local WeChat transport may request the explicitly
     // approved group-specific automatic reply mode. Chat text cannot set it.
     // 群范围与 core 共用同一白名单，未配置时默认没有授权群。

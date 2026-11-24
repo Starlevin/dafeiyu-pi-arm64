@@ -78,7 +78,11 @@ module.exports = function register(router) {
     // 本地桥接会带 x-whale-bridge: 1（或 body.local=true）。它靠 HTTP 响应拿回复，
     // 所以「没配 outboundUrl」对它是正常的，不该按「发不出去」报警。
     const isLocalBridge = String(req.headers['x-whale-bridge'] || '') === '1' || Boolean(body && body.local);
-    const result = await gateway.handleInbound(body, { local: isLocalBridge });
+    const expectedToken = gateway.options.inboundToken;
+    const trustedLocal = isLoopbackRequest(req) && req.headers['x-whale-bridge'] === '1'
+      && Boolean(expectedToken) && expectedToken !== 'change-me-wechat'
+      && safeEqual(req.headers['x-bot-token'], expectedToken);
+    const result = await gateway.handleInbound(body, { local: isLocalBridge, trustedLocal });
     return json(res, 200, result);
   });
 };

@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pi_xinput as xi  # noqa: E402
 import pi_vision as pv  # noqa: E402
 import pi_media_reply as pm  # noqa: E402
+from wal_hint_readonly import active_account_scope
 from auto_reply_allowlist import (auto_reply_group_allowed,
                                   configured_auto_reply_groups,
                                   configured_swift_proactive_groups,
@@ -88,6 +89,10 @@ def _proactive_candidate_group_configured(args, target):
 
 
 class _ProactivePolicyDisabled(RuntimeError):
+    pass
+
+
+class _MemoryAccountChanged(RuntimeError):
     pass
 
 class AutoReplyLimiter:
@@ -308,38 +313,53 @@ def capture_media(rect, bounds):
 
 
 # --------------------------------------------------------------------- a11y --
-def get_app():
+def _wechat_client_identity(pid):
     unit = "dafeiyu-wechat-client.service"
-
-    def process_identity(pid):
-        if not isinstance(pid, int) or pid <= 0:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        with open("/proc/%d/cgroup" % pid, "r", encoding="utf-8",
+                  errors="replace") as stream:
+            cgroups = stream.read().splitlines()
+        managed = tuple(sorted(
+            (parts[0], parts[1], parts[2])
+            for line in cgroups
+            if len(parts := line.split(":", 2)) == 3
+            and unit in parts[2].split("/")
+        ))
+        if not managed:
             return None
-        try:
-            with open("/proc/%d/cgroup" % pid, "r", encoding="utf-8",
-                      errors="replace") as stream:
-                cgroups = stream.read().splitlines()
-            managed = tuple(sorted(
-                (parts[0], parts[1], parts[2])
-                for line in cgroups
-                if len(parts := line.split(":", 2)) == 3
-                and unit in parts[2].split("/")
-            ))
-            if not managed:
-                return None
-            with open("/proc/%d/stat" % pid, "r", encoding="utf-8",
-                      errors="replace") as stream:
-                stat = stream.read()
-            close = stat.rfind(")")
-            if close < 0:
-                return None
-            fields = stat[close + 1:].split()
-            # tail begins at field 3 (state); starttime is field 22.
-            if len(fields) <= 19:
-                return None
-            return managed, fields[19]
-        except (OSError, ValueError, TypeError):
+        with open("/proc/%d/stat" % pid, "r", encoding="utf-8",
+                  errors="replace") as stream:
+            stat = stream.read()
+        close = stat.rfind(")")
+        if close < 0:
             return None
+        fields = stat[close + 1:].split()
+        # tail begins at field 3 (state); starttime is field 22.
+        if len(fields) <= 19:
+            return None
+        return managed, fields[19]
+    except (OSError, ValueError, TypeError):
+        return None
 
+
+def client_memory_account(pid):
+    identity = _wechat_client_identity(pid)
+    if identity is None:
+        return None
+    account = active_account_scope(pid)
+    return account if account and _wechat_client_identity(pid) == identity else None
+
+
+def app_memory_account(app):
+    try:
+        return client_memory_account(app.get_process_id())
+    except Exception:
+        return None
+
+
+def get_app():
     def pid_snapshot(desktop, count):
         children, pids = [], []
         try:
@@ -372,7 +392,7 @@ def get_app():
                         same_node = False
                     if same_node and len(set(pids)) == len(pids):
                         pid = pids[index]
-                        identity = process_identity(pid)
+                        identity = _wechat_client_identity(pid)
                         get_app._registry_hint = (
                             (count, index, pids, pid, identity)
                             if identity is not None else None)
@@ -396,7 +416,7 @@ def get_app():
             candidate, pid = children[index], pids[index]
             if (len(set(pids)) == len(pids)
                     and pids == old_order and pid == old_pid):
-                identity = process_identity(pid)
+                identity = _wechat_client_identity(pid)
                 if identity is not None and identity == old_identity:
                     try:
                         if "wechat" in (candidate.get_name() or "").lower():
@@ -1508,7 +1528,7 @@ def core_target(payload: dict):
     `testGroups` 与 Swift 核心 `allowedChats` 一致性：只有显式列入 groups 的测试群
     才可能是 swift；核心侧仍有一道 `chat_not_allowlisted` 白名单，两侧都拒绝漂移。
     """
-    if group_routes is None:
+    if group_routes is None or payload.get("_memory_account_bound") is False:
         return CORE_URL, {}
     if _pilot_force_old(payload):
         return CORE_URL, {}
@@ -1571,6 +1591,10 @@ def ask_core_routed(payload: dict, token: str, timeout: int = 165, path="/webhoo
         return {"ok": False, "error": "settled_candidate_swift_route_unavailable"}
     unified_account = os.environ.get("DAFEIYU_WECHAT_UNIFIED_ACCOUNT")
     account = unified_account or str(payload.get("account") or "")
+    if payload.get("_memory_account_bound") is False:
+        account = ""
+    payload = {key: value for key, value in payload.items()
+               if key not in {"_memory_account_bound", "_memory_account_pid"}}
     if extra:
         routed = {**payload, "account": account} if unified_account else payload
     else:
@@ -2260,7 +2284,10 @@ def _composer_has_text(app):
 
 def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                 public_question_settler=None, public_question_settled_trace=None,
-                *, rows_observed_at=None):
+                *, rows_observed_at=None, memory_account=None):
+    binding = getattr(args, "_memory_account_binding", None)
+    if binding and not memory_account:
+        return False
     is_group = target in args.group
     if is_group:
         private_id = ""
@@ -2367,7 +2394,8 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             photo = None
         if not body and not photo:
             continue
-        trace = stable_message_trace(target, rows, i, account=os.environ.get('DAFEIYU_WECHAT_ACCOUNT', ''))
+        trace = stable_message_trace(target, rows, i,
+                                     account=memory_account or os.environ.get('DAFEIYU_WECHAT_ACCOUNT', ''))
         if image_rect is not None and args.vision:
             # Metadata only: never log captured bytes or chat text.
             log("vision_capture", status="ok" if photo else "failed", trace=trace,
@@ -2380,6 +2408,10 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             record(health, "mention", "accepted" if is_group else "private", trace)
         payload = inbound_payload(body, target, target if is_group else None, private_id=private_id)
         payload["msg_id"] = trace
+        if binding:
+            payload["memory_account"] = memory_account
+            payload["_memory_account_pid"] = app.get_process_id()
+            payload["_memory_account_bound"] = memory_account == binding
         if image_rect is not None:
             payload["photo_present"] = True
         if animated_sticker and photo:
@@ -2482,11 +2514,14 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
             target, is_group, payload, photo, queued_at = item
             auto_ctx = None
         trace = payload["msg_id"]
+        memory_account = payload.get("memory_account")
         generation_started_at = time.monotonic()
         generation_recorded = False
         try:
             if generation_started_at - queued_at > 180:
                 response = {"ok": False, "error": "queue_expired"}
+            elif memory_account and client_memory_account(payload.get("_memory_account_pid")) != memory_account:
+                response = {"ok": True, "action": "ignore", "reason": "memory_account_changed"}
             else:
                 demo = approved_media_command(target, payload, media_dir)
                 if demo is not None:
@@ -2519,6 +2554,8 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
         response["_bridge_ready_at"] = generation_done_at
         response["_bridge_queued_at"] = queued_at
         response["_auto_ctx"] = auto_ctx
+        if memory_account:
+            response["_bridge_memory_account"] = memory_account
         replies.put((target, is_group, response, trace))
         if ready_signal is not None:
             ready_signal.set()
@@ -2527,7 +2564,7 @@ def generate_replies(jobs, replies, token, health=None, media_dir="", ready_sign
         jobs.task_done()
 
 
-def dispatch_sticker(target, candidate, args, health, parent_trace, *, proactive=False):
+def dispatch_sticker(target, candidate, args, health, parent_trace, *, proactive=False, memory_account=None):
     """One optional verified image reply, Bieye pilot only.
 
     Sticker and text use separate health/submit traces. No automatic retries,
@@ -2560,6 +2597,8 @@ def dispatch_sticker(target, candidate, args, health, parent_trace, *, proactive
     reserved = False
     def reserve():
         nonlocal reserved
+        if memory_account and app_memory_account(get_app()) != memory_account:
+            raise pst.StickerError("memory_account_changed")
         if proactive and not _proactive_group_enabled(args, target):
             raise pst.StickerError("auto_policy_disabled")
         if health is not None and not health.reserve_submit(sticker_trace):
@@ -2638,6 +2677,11 @@ def deliver_ready(replies, args, health=None):
         if app is None:
             record(health, "submit", "client_unavailable", trace, failed=True)
             continue
+        memory_account = response.get("_bridge_memory_account")
+        if getattr(args, "_memory_account_binding", None) and (
+                not memory_account or app_memory_account(app) != memory_account):
+            record(health, "submit", "memory_account_changed", trace)
+            continue
         blocked = blocking_state(app)
         guard_done_at = time.monotonic()
         if blocked:
@@ -2696,7 +2740,8 @@ def deliver_ready(replies, args, health=None):
                 continue
         if sticker_only:
             sticker_status = dispatch_sticker(
-                target, response["sticker"], args, health, trace, proactive=auto_ctx is not None)
+                target, response["sticker"], args, health, trace, proactive=auto_ctx is not None,
+                memory_account=memory_account)
             ok_sticker = sticker_status == "visible_outgoing"
             record(health, "submit",
                    sticker_status if ok_sticker else "sticker_" + sticker_status,
@@ -2711,6 +2756,8 @@ def deliver_ready(replies, args, health=None):
             # prevent sending, not merely produce a warning.
             if auto_ctx is not None and not _proactive_group_enabled(args, target):
                 raise _ProactivePolicyDisabled()
+            if memory_account and app_memory_account(get_app()) != memory_account:
+                raise _MemoryAccountChanged()
             if health is not None and not health.reserve_submit(trace):
                 raise RuntimeError("submit_ledger_unavailable_or_duplicate")
             submitted = True
@@ -2729,9 +2776,14 @@ def deliver_ready(replies, args, health=None):
         except _ProactivePolicyDisabled:
             record(health, "submit", "auto_policy_disabled", trace)
             continue
+        except _MemoryAccountChanged:
+            record(health, "submit", "memory_account_changed", trace)
+            continue
         except Exception:
             status = "send_exception"
         send_done_at = time.monotonic()
+        if status == "visible_outgoing" and memory_account and app_memory_account(get_app()) != memory_account:
+            status = "unconfirmed:memory_account_changed"
         confirmed = status == "visible_outgoing"
         # Additive trace-only fields for a fair QQ/WeChat comparison. The
         # existing pickup/guard/navigation/send fields keep their exact names
@@ -2761,7 +2813,8 @@ def deliver_ready(replies, args, health=None):
             confirm_swift_memory(response["_swift_memory_receipt"], trace)
         if confirmed and media is None and isinstance(response.get("sticker"), dict):
             dispatch_sticker(
-                target, response["sticker"], args, health, trace, proactive=auto_ctx is not None)
+                target, response["sticker"], args, health, trace, proactive=auto_ctx is not None,
+                memory_account=memory_account)
 
 
 # ------------------------------------------------------------ bridge heartbeat --
@@ -2867,7 +2920,13 @@ def main():
             parser.error("private_chats module unavailable")
         args._private_watcher = None
     with open(args.token_file, encoding="utf-8") as cfg:
-        token = json.load(cfg)["gateway"]["wechat"]["inboundToken"]
+        config = json.load(cfg)
+    token = config["gateway"]["wechat"]["inboundToken"]
+    args._memory_account_binding = config.get("wechat", {}).get("memoryAccountBinding")
+    if args._memory_account_binding is not None and (
+            not isinstance(args._memory_account_binding, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", args._memory_account_binding)):
+        parser.error("invalid WeChat memory account binding")
     # Roll out gallery-backed sticker images only in the previously approved
     # Bieye test group. No other group or private message gets sticker sends.
     args._sticker_enabled = bool(
@@ -2881,6 +2940,7 @@ def main():
     if args._sticker_enabled:
         print("wechat_sticker_bridge_enabled_bieye_only", flush=True)
     snapshots = {}
+    memory_accounts = {}
     last_sidebar = {}
     last_scanned = {}
     args._private_verified = None
@@ -3183,6 +3243,9 @@ def main():
                         if not verified_scope_open and not open_chat(
                                 app, target, measure=target in changed_targets):
                             continue
+                memory_account = app_memory_account(app) if args._memory_account_binding else None
+                if args._memory_account_binding and not memory_account:
+                    continue
                 read_started = time.monotonic()
                 bounds, rows = read_messages(app)
                 rows_observed_at = time.monotonic()
@@ -3190,6 +3253,14 @@ def main():
                     if pending_settle is not None and settle_due:
                         public_question_settler.cancel(target)
                     continue
+                if memory_account and app_memory_account(app) != memory_account:
+                    continue
+                if memory_account and memory_accounts.get(target) != memory_account:
+                    memory_accounts[target] = memory_account
+                    snapshots.pop(target, None)
+                    if public_question_settler is not None:
+                        public_question_settler.cancel(target)
+                    pending_settle = None
                 if not args.dry_run and time.monotonic() >= next_heartbeat:
                     next_heartbeat = time.monotonic() + 20
                     # 心跳由独立线程发送；这里只刷新它携带的现场值。
@@ -3226,7 +3297,7 @@ def main():
                     def trace_at(index):
                         return stable_message_trace(
                             target, rows, index,
-                            account=os.environ.get("DAFEIYU_WECHAT_ACCOUNT", ""))
+                            account=memory_account or os.environ.get("DAFEIYU_WECHAT_ACCOUNT", ""))
                     latest_matches = latest_candidate_matches(
                         rows, due_trace, trace_at,
                         lambda text: eligible_auto_text(text)
@@ -3237,7 +3308,7 @@ def main():
                             app, rows, latest_index, bounds, target, args, jobs, health,
                             public_question_settler=public_question_settler,
                             public_question_settled_trace=due_trace,
-                            rows_observed_at=rows_observed_at)
+                            rows_observed_at=rows_observed_at, memory_account=memory_account)
                     else:
                         log("public_question_settle", result="candidate_changed")
                         if appended:
@@ -3245,7 +3316,7 @@ def main():
                                 app, rows, len(rows) - len(appended), bounds,
                                 target, args, jobs, health,
                                 public_question_settler=public_question_settler,
-                                rows_observed_at=rows_observed_at)
+                                rows_observed_at=rows_observed_at, memory_account=memory_account)
                     if pending_settle is not None:
                         log("public_question_settle", result="checked", queued=bool(accepted),
                             priority=settle_priority,
@@ -3256,7 +3327,7 @@ def main():
                         app, rows, len(rows) - len(appended), bounds, target,
                         args, jobs, health,
                         public_question_settler=public_question_settler,
-                        rows_observed_at=rows_observed_at)
+                        rows_observed_at=rows_observed_at, memory_account=memory_account)
                 if not is_priv and target in changed_targets and appended:
                     log("sidebar_ingress_timing", deferred_wal=deferred_wal_hint is not None,
                         sidebar_read_ms=int((now - sidebar_started) * 1000), wal_scope_ms=wal_scope_ms,

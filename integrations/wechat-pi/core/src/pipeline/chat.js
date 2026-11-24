@@ -45,6 +45,7 @@ const stickers = require('../adapters/stickers');
 const voiceReply = require('../core/voiceReply');
 const envInfo = require('../services/envInfo');
 const { LIMITS } = require('../memory/constants');
+const { isMemoryAccount, sessionKey: memorySessionKey } = require('../memory/sessionKey');
 const tokenCalibration = require('../memory/calibration');
 const budgetPricing = require('../services/budget');
 const SEPARATE_REPLY_RE = /(?:^|[，。！？\s])(?:请|麻烦|能不能|可以|记得)?\s*你?\s*(?:要|给我)?\s*(?:分[条段开](?:来)?(?:发(?:送)?|回(?:复)?|说)|(?:一条一条|一句一句)地?[发回]|每(?:条|句|段)(?:话)?单独[发回]|分(?:成)?[两二三四五六七八九十\d]+[条段](?:气泡|发|回)?)(?:一下)?(?=$|[\s，。！？?!吧嘛哦啊,])/;
@@ -232,8 +233,7 @@ class Bot {
   }
 
   sessionKey(msg) {
-    const type = msg.chatType === 'group' ? 'g' : 'u';
-    return `${msg.platform}:${type}:${msg.chatId}`;
+    return memorySessionKey(msg);
   }
 
   /**
@@ -366,6 +366,7 @@ class Bot {
       platform: String(msg.platform || 'web').slice(0, 20),
       chatId: String(msg.chatId ?? 'default').slice(0, 120),
       chatType: msg.chatType === 'group' ? 'group' : 'private',
+      memoryAccount: isMemoryAccount(msg.memoryAccount) ? msg.memoryAccount : '',
       senderId: String(msg.senderId ?? 'anonymous').slice(0, 100),
       senderName: String(msg.senderName ?? '群友').slice(0, 60),
       text: String(msg.text ?? '').slice(0, 2000),
@@ -463,6 +464,9 @@ class Bot {
 
   async _decide(rawMsg) {
     const msg = this.normalize(rawMsg);
+    if (msg.platform === 'wechat' && this.config.wechat?.memoryAccountBinding && !msg.memoryAccount) {
+      return { action: 'ignore', reason: 'memory_account_unverified', msg };
+    }
     // normalize() 只保留固定字段，桥接状态（gateway 挂在消息上的 {online,uia,ffmpeg}）会丢；
     // 这里补回来，供本轮状态里那句「桥接在线 / 离线」用。
     if (rawMsg && rawMsg.bridgeStatus && typeof rawMsg.bridgeStatus === 'object') {
@@ -1064,6 +1068,7 @@ class Bot {
     const tail = [promptParts.tail, turnState.bridgeLine, separateHint].filter(Boolean).join('\n');
     // 主人问起朋友圈时，先尝试补一次最新读取；读不到就用旧快照，并在上下文里说明。
     const canReadMoments = this.moments && msg.platform === 'wechat' && msg.chatType === 'private'
+      && (!this.config.wechat?.memoryAccountBinding || msg.memoryAccount === this.config.wechat.memoryAccountBinding)
       && momentsIntent(clean.text) && isVerifiedOwner(this.config, msg);
     if (canReadMoments && typeof this.moments.ensureFresh === 'function') {
       try {

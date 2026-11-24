@@ -171,6 +171,7 @@ function createRuntime({ root = path.resolve(__dirname, '..'), env = process.env
     logger: child('reminder'),
     // 「刚聊过先跳过」规则要看会话最后一条消息的时间
     lastActiveAt: (wxid) => {
+      if (config.wechat?.memoryAccountBinding) return 0;
       const keys = [`wechat:u:${wxid}`, `wechat:g:${wxid}`];
       let last = 0;
       for (const key of keys) {
