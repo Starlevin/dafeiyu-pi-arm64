@@ -58,7 +58,7 @@ public struct QQScopedProactiveProfile: Sendable {
         switch mode { case .quiet: return 10; case .natural: return 3; case .active: return 3 }
     }
     public var evaluationProbability: Double {
-        switch mode { case .quiet: return 0.15; case .natural: return 1; case .active: return 0.35 }
+        switch mode { case .quiet: return 0.15; case .natural, .active: return 1 }
     }
     public var cooldown: TimeInterval {
         switch mode { case .quiet: return 1200; case .natural: return 480; case .active: return 240 }

@@ -71,7 +71,7 @@ struct QQScopedProactiveProfileTests {
         }
     }
     @Test func probabilitiesAndPresetIntervals() {
-        for (mode, interval, probability, max) in [("quiet", 10, 0.15, 3), ("natural", 3, 1.0, 30), ("active", 3, 0.35, 15)] {
+        for (mode, interval, probability, max) in [("quiet", 10, 0.15, 3), ("natural", 3, 1.0, 30), ("active", 3, 1.0, 15)] {
             let profile = QQScopedProactiveProfile.fromEnvironment(["DAFEIYU_PROACTIVE_GROUP_ID": "961666830", "DAFEIYU_PROACTIVE_MODE": mode])!
             #expect(profile.interval == interval)
             #expect(profile.dailyLimit == max)
@@ -80,6 +80,14 @@ struct QQScopedProactiveProfileTests {
             #expect(!profile.shouldEvaluate(messageCount: interval, roll: probability))
             #expect(!profile.shouldEvaluate(messageCount: interval, roll: -1))
         }
+    }
+
+    @Test func activeModeStillRespectsCooldownDailyLimitAndQuietHours() {
+        let profile = QQScopedProactiveProfile(groupKey: "group:10001", mode: .active)
+        #expect(!profile.canSpeak(at: clock(7, 59), confirmed: []))
+        #expect(!profile.canSpeak(at: clock(10, 3), confirmed: [clock(10)]))
+        #expect(profile.canSpeak(at: clock(10, 4), confirmed: [clock(10)]))
+        #expect(!profile.canSpeak(at: clock(23), confirmed: (0..<15).map { clock(9, $0) }))
     }
 
     @Test func quietHoursCooldownAndPersistentDailyBudget() {
