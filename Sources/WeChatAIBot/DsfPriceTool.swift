@@ -123,7 +123,7 @@ enum DsfPriceTool {
                         names = snapshot.itemNames
                     } catch {
                         guard await budget.take(scope, day: today) else { return nil }
-                        return PublicGameQuestionData(Prompt.unavailable(reason: DsfPriceTool.reason(error)))
+                        return DsfPriceTool.unavailableGameData(reason: DsfPriceTool.reason(error))
                     }
                 }
                 guard let planned = DsfPricePlanner.plan(message: message, isGroup: isGroup, names: names) else {
@@ -136,25 +136,32 @@ enum DsfPriceTool {
 
             if request.itemID.hasPrefix("AMBIGUOUS:") {
                 let ids = request.itemID.dropFirst("AMBIGUOUS:".count).split(separator: ",").map(String.init)
-                return PublicGameQuestionData(Prompt.ambiguous(candidateIDs: ids))
+                return PublicGameQuestionData(
+                    Prompt.ambiguous(candidateIDs: ids),
+                    unavailableReply: "这个名字对应多件物品，给个物品 ID 才能查准。")
             }
 
             do {
                 let snapshot = try await getOrFetchSnapshot(now: now)
                 names = snapshot.itemNames
                 try DsfPriceTool.verifyFreshness(snapshot, maxAgeMinutes: config.maxAgeMinutes, now: now)
+                let status = snapshot.availability[request.itemID]?.status
+                let hasPrice = snapshot.prices[request.itemID] != nil
+                    && (status == nil || status == "available")
                 return PublicGameQuestionData(
                     DsfPriceTool.promptFragment(request: request, snapshot: snapshot,
                                                 now: now, maxAgeMinutes: config.maxAgeMinutes),
-                    source: DsfPriceTool.sourceNote(fetchedAt: snapshot.fetchedAt, expired: false))
+                    source: DsfPriceTool.sourceNote(fetchedAt: snapshot.fetchedAt, expired: false),
+                    unavailableReply: hasPrice ? nil : "这份快照里没有这件物品可核实的报价。")
             } catch let stale as StaleError {
                 return PublicGameQuestionData(
                     Prompt.stale(capturedAt: stale.capturedAt, ageMinutes: Int(stale.ageSeconds / 60),
                                  limitMinutes: config.maxAgeMinutes, capturedFrom: stale.capturedFrom,
                                  capturedTo: stale.capturedTo, captureStale: stale.captureStale),
-                    source: DsfPriceTool.sourceNote(fetchedAt: stale.capturedAt, expired: true))
+                    source: DsfPriceTool.sourceNote(fetchedAt: stale.capturedAt, expired: true),
+                    unavailableReply: "这份三角洲行情已经过期，暂时查不到现价。")
             } catch {
-                return PublicGameQuestionData(Prompt.unavailable(reason: DsfPriceTool.reason(error)))
+                return DsfPriceTool.unavailableGameData(reason: DsfPriceTool.reason(error))
             }
         }
 
@@ -169,6 +176,11 @@ enum DsfPriceTool {
             cached = (snapshot, now)
             return snapshot
         }
+    }
+
+    static func unavailableGameData(reason: String) -> PublicGameQuestionData {
+        PublicGameQuestionData(Prompt.unavailable(reason: reason),
+                               unavailableReply: "这次没查到三角洲行情（\(reason)）。")
     }
 
     private static func sourceNote(fetchedAt: String, expired: Bool) -> String? {

@@ -815,7 +815,6 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                                                 publicQuestionGroupMemory: singleTurn ? groupMemory : "",
                                                 modelTraceID: modelTraceID)
 
-        auditModelTraceID = modelTraceID.uuidString.lowercased()
         let inboundDigest = SHA256.hash(data: Data(trace.utf8))
         auditInboundTraceDigest = inboundDigest.prefix(6).map { String(format: "%02x", $0) }.joined()
 
@@ -827,8 +826,16 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             await journal.complete(idemKey, reply: stale, ok: false, at: Date().timeIntervalSince1970)
             return finish(stale, modelCalled: false, gate: "generation_stale")
         }
+        var modelCalled = false
         do {
-            let result = try await generator.generate(request)
+            let result: UnifiedGenerationResult
+            if let local = try publicQuestionGameData?.localResult() {
+                result = UnifiedGenerationResult(text: local.text, tokens: local.tokens, sources: local.sources)
+            } else {
+                auditModelTraceID = modelTraceID.uuidString.lowercased()
+                modelCalled = true
+                result = try await generator.generate(request)
+            }
             if proactive && !publicQuestionFast && !result.shouldSend {
                 let invalidDecision = result.proactiveSkipReason == .invalidModelDecision
                 let reason = invalidDecision ? "model_output_rejected" : "proactive_participation_declined"
@@ -836,27 +843,27 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                     ? UnifiedReply.failure(reason, scope: scope, trace: trace)
                     : UnifiedReply.ignore(reason, scope: scope, trace: trace)
                 await journal.complete(idemKey, reply: noReply, ok: false, at: Date().timeIntervalSince1970)
-                return finish(noReply, modelCalled: true, gate: reason)
+                return finish(noReply, modelCalled: modelCalled, gate: reason)
             }
             // 9a) 提交前复核运行代次，撤回后旧结果作废
             let current = await state.currentGeneration()
             guard current == generation else {
                 let stale = UnifiedReply.ignore("generation_stale", scope: scope, trace: trace)
                 await journal.complete(idemKey, reply: stale, ok: false, at: Date().timeIntervalSince1970)
-                return finish(stale, modelCalled: true, gate: "generation_stale")
+                return finish(stale, modelCalled: modelCalled, gate: "generation_stale")
             }
             // 9b) 用 QQPersona.decode 做同一套输出校验/越权兜底
             let decoded = effective.persona.decode(result.text, input: body)
             guard !decoded.isFallback else {
                 let rejected = UnifiedReply.failure("model_output_rejected", scope: scope, trace: trace)
                 await journal.complete(idemKey, reply: rejected, ok: false, at: Date().timeIntervalSince1970)
-                return finish(rejected, modelCalled: true, gate: "model_output_rejected")
+                return finish(rejected, modelCalled: modelCalled, gate: "model_output_rejected")
             }
             let replyText = decoded.text + (result.sources.isEmpty ? "" : "\n来源：\n" + result.sources.joined(separator: "\n"))
             guard !replyText.isEmpty else {
                 let empty = UnifiedReply.failure("empty_reply", scope: scope, trace: trace)
                 await journal.complete(idemKey, reply: empty, ok: false, at: Date().timeIntervalSince1970)
-                return finish(empty, modelCalled: true, gate: "empty_reply")
+                return finish(empty, modelCalled: modelCalled, gate: "empty_reply")
             }
             // 9c) 低频记账 + 隔离历史 + 幂等缓存（先落账再返回结果，保证"不重复发送"）
             var reply = UnifiedReply.answer(replyText, scope: scope, trace: trace)
@@ -868,7 +875,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                                           reply: replyText, limit: config.historyTurns)
             }
             let memory = memoryScope.flatMap { digest in
-                result.sources.isEmpty
+                modelCalled && result.sources.isEmpty
                     ? UnifiedJournalMemory(sessionDigest: digest, incoming: QQMemoryRedactor.redact(incoming),
                                            groupNote: groupNote) : nil
             }
@@ -878,13 +885,13 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             let stored = await journal.complete(idemKey, reply: reply, ok: true, at: completedAt, memory: memory)
             if !stored { reply.memoryReceipt = nil }
             await state.cache(idemKey, reply, scopeDigest: scope)
-            return finish(reply, modelCalled: true, gate: "replied")
+            return finish(reply, modelCalled: modelCalled, gate: "replied")
         } catch {
             // 生成失败：不重试（发送不明勿盲重试），也不缓存，让上层只记一次离散错误。
             // 账本记 failed：重启后不再为同一 id 重新调模型。
             let failed = UnifiedReply.failure("generation_failed", scope: scope, trace: trace)
             await journal.complete(idemKey, reply: failed, ok: false, at: Date().timeIntervalSince1970)
-            return finish(failed, modelCalled: true, gate: "generation_failed")
+            return finish(failed, modelCalled: modelCalled, gate: "generation_failed")
         }
     }
 

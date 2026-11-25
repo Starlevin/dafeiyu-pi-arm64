@@ -1715,6 +1715,13 @@ private func inbound(_ text: String = "合成消息",
             #expect(text.components(separatedBy: "\n来源：\n").count == (group == "schedule" || group == "price" ? 2 : 1))
             #expect(GameDataHTTPFixture.requests.count == dataCount)
             let calls = PublicQuestionHTTPFixture.bodies
+            if group == "unavailable" {
+                #expect(text.contains(expected))
+                #expect(!result.modelCalled)
+                #expect(calls.isEmpty)
+                continue
+            }
+            #expect(result.modelCalled)
             #expect(calls.count == 1)
             let call = try #require(calls.first)
             #expect(call["tools"] == nil)
@@ -1727,6 +1734,38 @@ private func inbound(_ text: String = "合成消息",
             }
             #expect(system.contains("只读游戏资料") == (!ordinary && group != "unrelated"))
         }
+
+        let expired = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-7_200))
+        let staleMarket = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 2, "priceVersion": expired, "currency": "gameCurrency",
+            "source": ["fetchedAt": expired, "capturedFrom": expired, "capturedTo": expired],
+            "prices": ["13020000167": 76543],
+        ])
+        GameDataHTTPFixture.reset(responses: [
+            DsfPriceTool.marketURL: staleMarket, DsfPriceTool.itemsURL: names,
+        ])
+        PublicQuestionHTTPFixture.reset(content: validJSON("合成错误现价 76543"))
+        let staleCore = UnifiedReplyCore(config: config, generator: generator, modelKey: "synthetic-key",
+                                        journal: freshJournal(), idvScheduleConfig: idv,
+                                        dsfPriceConfig: DsfPriceConfig(enabled: true), gameDataSession: dataSession)
+        let priceQuestion = "三角洲老式钢盔多少钱？"
+        var candidate = inbound(priceQuestion, chatId: "price", atMe: false, msgId: "stale-price")
+        candidate.groupAutoReply = true
+        candidate.groupAutoReplyWindowOK = true
+        candidate.groupAutoReplySuperseded = false
+        candidate.groupAutoReplyPublicQuestionSettled = true
+        candidate.groupAutoReplyPublicQuestionCooldownSeconds = 30
+        candidate.groupAutoReplyContext = ["老式钢盔最近价格波动很大", priceQuestion]
+        let staleOutcome = await staleCore.handle(candidate)
+        #expect(staleOutcome.reply.action == "reply")
+        #expect(!staleOutcome.modelCalled)
+        #expect(staleOutcome.reply.memoryReceipt == nil)
+        let reply = try #require(staleOutcome.reply.reply)
+        #expect(reply.contains("行情已经过期"))
+        #expect(reply.contains("上游抓取时间："))
+        #expect(!reply.contains("76543"))
+        #expect(PublicQuestionHTTPFixture.bodies.isEmpty)
+        #expect(GameDataHTTPFixture.requests.count == 2)
     }
 
     @Test func cachedScheduleRetainsTheFirstFetchTimeAcrossGroups() async throws {

@@ -2147,16 +2147,20 @@ struct QQEngineSharedState: Sendable {
                             record(target.id, .skipped, "公开问句取数后已失效")
                             continue
                         }
-                        timing?.modelStart = ContinuousClock.now
-                        waitingForModel = true
-                        result = try await modelClient.publicGroupQuestionReply(
-                            key: key, config: config.ai, rule: rule,
-                            context: publicQuestionPriorContext(from: groupContext.eventsText()), text: message.text,
-                            knowledge: publicQuestionKnowledge, gameData: gameData, traceID: traceID,
-                            reserve: { [weak self] in
-                                guard let self else { throw CancellationError() }
-                                try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
-                            })
+                        if let local = try gameData?.localResult() {
+                            result = local
+                        } else {
+                            timing?.modelStart = ContinuousClock.now
+                            waitingForModel = true
+                            result = try await modelClient.publicGroupQuestionReply(
+                                key: key, config: config.ai, rule: rule,
+                                context: publicQuestionPriorContext(from: groupContext.eventsText()), text: message.text,
+                                knowledge: publicQuestionKnowledge, gameData: gameData, traceID: traceID,
+                                reserve: { [weak self] in
+                                    guard let self else { throw CancellationError() }
+                                    try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
+                                })
+                        }
                     } else {
                         timing?.modelStart = ContinuousClock.now
                         waitingForModel = true

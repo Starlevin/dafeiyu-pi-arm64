@@ -1,13 +1,28 @@
+import Foundation
 import BotCore
 
-/// Prompt facts and the source line produced by the data adapter, not by the model.
+/// The adapter supplies verified facts or a fixed reply when it cannot verify them.
 public struct PublicGameQuestionData: Sendable {
     let prompt: String
     let source: String?
+    private let unavailableReply: String?
 
-    init(_ prompt: String, source: String? = nil) {
+    init(_ prompt: String, source: String? = nil, unavailableReply: String? = nil) {
         self.prompt = prompt
         self.source = source
+        self.unavailableReply = unavailableReply
+    }
+
+    func localResult() throws -> ModelResult? {
+        guard let unavailableReply else { return nil }
+        struct ReplyEnvelope: Encodable {
+            let text: String
+            let emotion = "neutral"
+            let intensity = 0
+        }
+        let encoded = try JSONEncoder().encode(ReplyEnvelope(text: unavailableReply))
+        return ModelResult(text: String(decoding: encoded, as: UTF8.self), tokens: 0,
+                           seconds: 0, sources: source.map { [$0] } ?? [])
     }
 
     static func lookup(_ text: String, scope: String, schedule: IdvScheduleTool.Coordinator,
@@ -18,7 +33,7 @@ public struct PublicGameQuestionData: Sendable {
         }
         if DsfPricePlanner.intent(text) == .price {
             return await prices.gameData(message: text, isGroup: true, scope: scope)
-                ?? Self(DsfPriceTool.Prompt.unavailable(reason: "本轮没有可核实的物品报价"))
+                ?? DsfPriceTool.unavailableGameData(reason: "没有可核实的物品报价")
         }
         return nil
     }
