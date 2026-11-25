@@ -1313,7 +1313,7 @@ def _tx_observe(target, text_composer=None):
         node, rect = composer(app, view)
         if node is None:
             return {"ok": False, "reason": "composer_missing", "app_ok": True}
-        if text_composer and (node != text_composer["node"] or rect != text_composer["rect"]):
+        if text_composer and node != text_composer["node"]:
             return {"ok": False, "reason": "composer_replaced", "app_ok": True}
         reader = node.get_text_iface()
         editor = node.get_editable_text_iface()
@@ -1321,6 +1321,15 @@ def _tx_observe(target, text_composer=None):
         char_count = reader.get_character_count() if reader is not None else None
         if draft is None or char_count is None:
             return {"ok": False, "reason": "composer_unreadable", "app_ok": True}
+        if text_composer and rect != text_composer["rect"]:
+            x, y, width, height = rect
+            old_x, old_y, old_width, old_height = text_composer["rect"]
+            # Qt may grow the same editor upward when our reply wraps.
+            grew_upward = (x == old_x and width == old_width
+                           and y + height == old_y + old_height
+                           and 0 < height - old_height <= 120)
+            if not grew_upward or not char_count or draft != text_composer.get("owned_draft"):
+                return {"ok": False, "reason": "composer_layout_changed", "app_ok": True}
         blocked = blocking_state(app)
         if blocked:
             return {"ok": False, "reason": "blocking_state:" + blocked, "app_ok": True}
@@ -1330,10 +1339,13 @@ def _tx_observe(target, text_composer=None):
         if text_composer is not None:
             if fp is None:
                 return {"ok": False, "reason": "composer_unreadable", "app_ok": True}
-            # Qt can change the name when focus or draft changes. The original
-            # accessible object and rectangle were already checked above.
-            fp = (fp[0], fp[2])
-            if not text_composer:
+            # Qt can also rename the same editor on focus or draft changes.
+            if text_composer:
+                if fp[0] != text_composer["fp"][0]:
+                    return {"ok": False, "reason": "composer_replaced", "app_ok": True}
+                fp = text_composer["fp"]
+            else:
+                fp = (fp[0], rect)
                 text_composer.update(app=app, node=node, rect=rect, reader=reader, editor=editor, fp=fp)
         return {
             "ok": True,
@@ -1798,6 +1810,7 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
     stage_started = time.monotonic()
     ready_to_return = False
     try:
+        original["owned_draft"] = text
         editor.set_text_contents(text)
         # Opt-in: replace ONLY the blind 0.25s after set_text_contents with a
         # bounded wait for the same draft state the very next line validates.

@@ -91,6 +91,48 @@ class ComposerProofTests(unittest.TestCase):
             updated = bridge._tx_observe("测试群", root)
         self.assertEqual(updated["reason"], "composer_replaced")
 
+    def test_only_owned_draft_can_grow_the_same_composer_upward(self):
+        app, message_list = object(), object()
+        original_rect = (200, 520, 600, 100)
+        wrapped_rect = (200, 490, 600, 130)
+        current_rect = original_rect
+        draft = ""
+        reader = SimpleNamespace(get_character_count=lambda: len(draft))
+        node = SimpleNamespace(get_text_iface=lambda: reader, get_editable_text_iface=lambda: object())
+        root = {}
+        atspi = SimpleNamespace(Text=SimpleNamespace(get_text=lambda *_: draft))
+        owned = "本轮长回复\n第二行"
+        with patch.multiple(bridge, Atspi=atspi, get_app=Mock(return_value=app),
+                            messages_list=Mock(return_value=message_list), ext=Mock(return_value=original_rect),
+                            _tx_header_info=Mock(return_value={"raw_title": "测试群(5)", "showing_target": 1}),
+                            _tx_chats_info=Mock(return_value=(1, ["测试群"], 1)),
+                            composer=lambda *_: (node, current_rect),
+                            _tx_composer_fp=lambda _: ("text", draft, current_rect),
+                            blocking_state=Mock(return_value=None)):
+            guard = tx_guard.TxGuard("测试群", lambda: bridge._tx_observe("测试群", root),
+                                     samples=2)
+            self.assertTrue(guard.before_send().allow)
+            current_rect = wrapped_rect
+            draft = owned
+            self.assertEqual(guard.before_return(owned).reason, "composer_layout_changed")
+            root["owned_draft"] = owned
+            self.assertTrue(guard.before_return(owned).allow)
+            self.assertTrue(guard.clear_proof(owned, root["fp"]).allow)
+
+            draft = "用户自己的草稿"
+            self.assertFalse(guard.before_return(owned).allow)
+            self.assertFalse(guard.clear_proof(owned, root["fp"]).allow)
+            draft = owned
+            for current_rect in ((201, 490, 600, 130), (200, 490, 601, 130),
+                                 (200, 491, 600, 130), (200, 399, 600, 221)):
+                with self.subTest(rect=current_rect):
+                    self.assertFalse(guard.before_return(owned).allow)
+                    self.assertFalse(guard.clear_proof(owned, root["fp"]).allow)
+            current_rect = wrapped_rect
+            bridge._tx_chats_info.return_value = (1, ["另一个群"], 0)
+            self.assertFalse(guard.before_return(owned).allow)
+            self.assertFalse(guard.clear_proof(owned, root["fp"]).allow)
+
 
 if __name__ == "__main__":
     unittest.main()
