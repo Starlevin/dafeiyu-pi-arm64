@@ -447,6 +447,26 @@ def _read_wechat_activity(cfg: dict) -> tuple[dict, list[str], list[str]]:
         return {}, [], []
 
 
+def _check_previous_proactive_values(body: dict, current: dict) -> tuple[int, dict] | None:
+    if "expected" not in body:  # Existing clients can still send their original incremental requests.
+        return None
+    expected = body["expected"]
+    if not isinstance(expected, dict) or set(expected) != set(current):
+        return 400, {"error": "原值须与本次修改项一一对应"}
+    for key, before in expected.items():
+        if key == "threshold":
+            valid = type(before) in (int, float) and 0 <= before <= 1
+        elif key == ORDINARY_REPLY_KEY:
+            valid = type(before) is bool
+        else:
+            valid = _validate_cooldown(before)[0]
+        if not valid:
+            return 400, {"error": "本次提交的设置原值无效"}
+    if expected != current:
+        return 409, {"error": "这项设置已被修改。请核对最新值后再保存。", "conflict": "stale_edit"}
+    return None
+
+
 def _update_wechat_activity(cfg: dict, body: dict, wechat_adapter) -> tuple[int, dict]:
     group = body.get("group")
     if not isinstance(group, str) or not group.strip():
@@ -479,6 +499,21 @@ def _update_wechat_activity(cfg: dict, body: dict, wechat_adapter) -> tuple[int,
             runtime = _wechat_proactive_pj(wechat_adapter._get("/api/settings"))
             if group not in _wechat_enabled_groups(runtime):
                 return 409, {"error": "微信运行配置与桥白名单不一致"}
+
+            if "expected" in body:
+                for document in (saved, runtime):
+                    before = {}
+                    if COOLDOWN_KEY in body:
+                        before[COOLDOWN_KEY] = _wechat_cooldown_map(document, [group]).get(
+                            group, PUBLIC_QUESTION_COOLDOWN_DEFAULT)
+                    if ORDINARY_REPLY_KEY in body:
+                        paused = _wechat_paused_groups(document)
+                        if paused is None:
+                            return 409, {"error": "微信运行配置或桥配置回读不一致"}
+                        before[ORDINARY_REPLY_KEY] = group not in paused
+                    conflict = _check_previous_proactive_values(body, before)
+                    if conflict is not None:
+                        return conflict
 
             result = wechat_adapter._post("/api/settings", {"group": patch})
             if not isinstance(result, dict) or result.get("ok") is False:
@@ -659,6 +694,18 @@ def _update_proactive_config(cfg: dict, body: dict,
             if group not in groups:
                 return 404, {"error": "该群没有已登记的主动发言策略"}
             if platform == "qq":
+                current = groups[group]
+                before = {}
+                if cooldown_given:
+                    before[COOLDOWN_KEY] = current.get(COOLDOWN_KEY, PUBLIC_QUESTION_COOLDOWN_DEFAULT)
+                if ordinary_given:
+                    before[ORDINARY_REPLY_KEY] = _ordinary_reply_state(current)[0]
+                if threshold_given:
+                    configured = current.get("threshold")
+                    before["threshold"] = configured if type(configured) in (int, float) else 0.70
+                conflict = _check_previous_proactive_values(body, before)
+                if conflict is not None:
+                    return conflict
                 # Write only supplied keys; never replace the row or mutate the
                 # legacy public-question switch when ordinary chat is toggled.
                 if cooldown_given:

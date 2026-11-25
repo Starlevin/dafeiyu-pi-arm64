@@ -879,6 +879,27 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(legacy["enabled"], False)
         self.assertEqual(legacy["source"], "default")
 
+    def test_qq_stale_edit_cannot_overwrite_another_window(self):
+        group = "group:111"
+        path = self._write_qq_cfg({group: {"mode": "enforce", "threshold": 0.45,
+                                          "ordinaryReplyEnabled": True, "dailyBudget": 35}})
+        request = {"platform": "qq", "group": group, "threshold": 0.62, "expected": {"threshold": 0.45}}
+        self.assertEqual(self._post("/api/proactive/config", request)[0], 200)
+        saved = path.read_bytes()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/api/proactive/config", {**request, "threshold": 0.70})
+        self.assertEqual(caught.exception.code, 409)
+        self.assertEqual(json.load(caught.exception)["conflict"], "stale_edit")
+        self.assertEqual(path.read_bytes(), saved)
+        status, _ = self._post("/api/proactive/config", {
+            "platform": "qq", "group": group, "ordinaryReplyEnabled": False,
+            "expected": {"ordinaryReplyEnabled": True},
+        })
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(path.read_bytes())[group], {
+            "mode": "enforce", "threshold": 0.62, "ordinaryReplyEnabled": False, "dailyBudget": 35,
+        })
+
     def test_qq_policy_readback_requires_matching_live_revision(self):
         group = "group:111"
         path = self._write_qq_cfg({group: {"mode": "enforce", "threshold": 0.45,
@@ -952,6 +973,26 @@ class HouseConsoleExtTests(unittest.TestCase):
         })
         self.assertEqual(result["wechatEnabledGroups"], ["试点群A", "试点群B"])
         self.assertTrue(result["wechatJudgeEnabled"])
+
+    def test_wechat_stale_edit_does_not_call_the_core_writer(self):
+        adapter = self._install_wechat_settings_adapter()
+        change = {"platform": "wechat", "group": "试点群A", "publicQuestionCooldownSeconds": 90,
+                  "expected": {"publicQuestionCooldownSeconds": 60}}
+        self.assertEqual(self._post("/api/proactive/config", change)[0], 200)
+        before = self.wx_config.read_bytes()
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/api/proactive/config", {**change, "publicQuestionCooldownSeconds": 120})
+        self.assertEqual(caught.exception.code, 409)
+        self.assertEqual(json.load(caught.exception)["conflict"], "stale_edit")
+        self.assertEqual(self.wx_config.read_bytes(), before)
+        self.assertEqual(len(adapter.posts), 1)
+        self.assertEqual(self._post("/api/proactive/config", {
+            "platform": "wechat", "group": "试点群A", "ordinaryReplyEnabled": False,
+            "expected": {"ordinaryReplyEnabled": True},
+        })[0], 200)
+        pj = self._wx_doc()["group"]["proactiveJudge"]
+        self.assertEqual(pj["publicQuestionCooldowns"], {"试点群A": 90})
+        self.assertEqual(pj["pausedGroups"], ["试点群A"])
 
     def test_wechat_paused_group_remains_selectable_and_can_be_restored(self):
         self._install_wechat_settings_adapter()

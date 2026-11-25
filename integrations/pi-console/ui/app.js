@@ -687,8 +687,10 @@
       const threshold = document.createElement('input');
       threshold.type = 'number'; threshold.className = 'input compact';
       threshold.min = '0.30'; threshold.max = '0.95'; threshold.step = '0.01';
-      threshold.value = (typeof row.threshold === 'number' && Number.isFinite(row.threshold))
-        ? row.threshold.toFixed(2) : '0.70';
+      const originalThreshold = typeof row.threshold === 'number' && Number.isFinite(row.threshold)
+        ? row.threshold : 0.70;
+      const displayedThreshold = originalThreshold.toFixed(2);
+      threshold.value = displayedThreshold;
       threshold.setAttribute('aria-label', id + ' 普通聊天阈值');
       enable(threshold, editable);
       line.appendChild(threshold);
@@ -696,19 +698,29 @@
       save.type = 'button';
       enable(save, editable);
       save.addEventListener('click', () => {
+        if (state.busy || state.proactiveStale) return;
         const enabled = toggle.checked;
         const value = Number(threshold.value);
-        if (!Number.isFinite(value) || value < 0.30 || value > 0.95) {
+        const changedThreshold = value !== Number(displayedThreshold);
+        if (changedThreshold && (!Number.isFinite(value) || value < 0.30 || value > 0.95)) {
           $('qqOrdinaryStatus').textContent = '阈值须在 0.30 到 0.95 之间。'; return;
         }
+        const changes = {};
+        const expected = {};
+        if (enabled !== effective) {
+          changes.ordinaryReplyEnabled = enabled;
+          expected.ordinaryReplyEnabled = effective;
+        }
+        if (changedThreshold) {
+          changes.threshold = value;
+          expected.threshold = originalThreshold;
+        }
+        const keys = Object.keys(changes);
+        if (!keys.length) return;
+        const matches = (values) => values && keys.every((key) => values[key] === changes[key]);
         run('正在保存 QQ 普通聊天设置…', async () => {
-          const result = await apiPost('/api/proactive/config', {
-            platform: 'qq', group: id, ordinaryReplyEnabled: enabled,
-            threshold: value,
-          });
-          const observed = result && result.observed;
-          if (!result || result.verification !== 'persisted' || result.group !== id
-              || !observed || observed.ordinaryReplyEnabled !== enabled || observed.threshold !== value) {
+          const result = await apiPost('/api/proactive/config', { platform: 'qq', group: id, ...changes, expected });
+          if (!result || result.verification !== 'persisted' || result.group !== id || !matches(result.observed)) {
             throw new Error('保存后的磁盘值未确认。');
           }
           const loaded = await loadQQOrdinaryConfig();
@@ -716,15 +728,16 @@
           const live = loaded && loaded.qqRuntime;
           const liveRow = live && live.verification === 'applied' && (live.groups || {})[id];
           const status = $('qqOrdinaryStatus');
-          if (!saved || saved.ordinaryReplyEnabled !== enabled || saved.threshold !== value) {
+          if (!matches(saved)) {
             status.textContent = id + ' 已写入，页面回读未确认。';
-          } else if (!liveRow || liveRow.threshold !== value || liveRow.ordinary !== enabled) {
+          } else if (!liveRow || !matches({ threshold: liveRow.threshold, ordinaryReplyEnabled: liveRow.ordinary })) {
             status.textContent = id + ' 已保存，核心生效未确认。';
           } else {
             status.textContent = id + (live.running ? ' 已保存，核心生效已确认。' : ' 已保存，核心已读入。');
           }
-        }).catch((e) => {
+        }).catch(async (e) => {
           if (e.status === 401) { handleUnauthorized(); return; }
+          if (e.status === 409) await loadQQOrdinaryConfig();
           $('qqOrdinaryStatus').textContent = e.message;
         });
       });
@@ -774,10 +787,17 @@
         const value = Number(input.value);
         const active = toggle.checked;
         if (!Number.isInteger(value) || value < 30 || value > 1200 || state.busy || state.proactiveStale) return;
-        const patch = { platform: 'wechat', group: name };
-        if (value !== originalCooldown) patch.publicQuestionCooldownSeconds = value;
-        if (active !== enabled.has(name)) patch.ordinaryReplyEnabled = active;
-        if (Object.keys(patch).length === 2) return;
+        const expected = {};
+        const patch = { platform: 'wechat', group: name, expected };
+        if (value !== originalCooldown) {
+          patch.publicQuestionCooldownSeconds = value;
+          expected.publicQuestionCooldownSeconds = originalCooldown;
+        }
+        if (active !== enabled.has(name)) {
+          patch.ordinaryReplyEnabled = active;
+          expected.ordinaryReplyEnabled = enabled.has(name);
+        }
+        if (!Object.keys(expected).length) return;
         run('正在保存微信群接话设置…', async () => {
           const result = await apiPost('/api/proactive/config', patch);
           if (result.verification !== 'persisted' || result.group !== name ||
@@ -788,13 +808,17 @@
           const loaded = await loadQQOrdinaryConfig();
           const current = loaded && (loaded.publicQuestionCooldowns || {}).wechat;
           if (!loaded || !arr(loaded.wechatAuthorizedGroups).includes(name) ||
-              arr(loaded.wechatEnabledGroups).includes(name) !== active ||
+              ('ordinaryReplyEnabled' in patch && arr(loaded.wechatEnabledGroups).includes(name) !== active) ||
               ('publicQuestionCooldownSeconds' in patch && (!current || current[name] !== value))) {
             status.textContent = '已写入，页面回读未确认。';
             return;
           }
-          status.textContent = active ? '已确认自动接话开启。' : '已确认自动接话关闭。';
-        }).catch((error) => { status.textContent = error.message; });
+          status.textContent = '已保存并核对本次修改。';
+        }).catch(async (error) => {
+          if (error.status === 401) { handleUnauthorized(); return; }
+          if (error.status === 409) await loadQQOrdinaryConfig();
+          status.textContent = error.message;
+        });
       });
       host.appendChild(row);
     });
