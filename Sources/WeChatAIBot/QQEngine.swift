@@ -1089,10 +1089,19 @@ struct QQEngineSharedState: Sendable {
             }
         }
         seen[message.dedupKey] = now
-        do { try persist() } catch { self.error = error.localizedDescription; return }
+        func saveInbound() -> Bool {
+            do {
+                try persist()
+                return true
+            } catch {
+                self.error = error.localizedDescription
+                return false
+            }
+        }
         guard config.ai.inWorkHours() else { record(target.id, .skipped, "时段外，不计数或补发"); return }
         // Explicit slash commands are independent invitations, before memory/model/count processing.
         if let command = QQPersonaCommand.parse(message.text) {
+            guard saveInbound() else { return }
             guard let segments = object["message"] as? [[String: Any]],
                   segments.allSatisfy({ ["text", "at"].contains($0["type"] as? String ?? "") }),
                   !message.mentionedUsers.contains(where: { $0 != config.expectedSelfID }) else {
@@ -1105,6 +1114,7 @@ struct QQEngineSharedState: Sendable {
            let segments = object["message"] as? [[String: Any]],
            segments.allSatisfy({ ["text", "at"].contains($0["type"] as? String ?? "") }),
            !message.mentionedUsers.contains(where: { $0 != config.expectedSelfID }) {
+            guard saveInbound() else { return }
             guard queue.count < Self.queueCapacity else { record(target.id, .skipped, "插画队列已满"); return }
             queue.append(.artwork(command, target, nil)); startQueue(); return
         }
@@ -1131,8 +1141,13 @@ struct QQEngineSharedState: Sendable {
                 memoryStatus = "记忆队列已达硬上限 \(QQMemoryBook.pendingHardLimit) 条：新片段拒绝入队，已显式记录，不删除旧片段"
                 record(target.id, .failed, "记忆片段未入队（队列已满，非发送失败）")
             }
-            do { try persist() } catch { return }
+            // Store user history and the inbound ID in one snapshot. The reliable
+            // journal ingests idempotently before this checkpoint. Nothing is
+            // queued for model or send until the snapshot is durable.
+            guard saveInbound() else { return }
             scheduleMemoryLearning()
+        } else {
+            guard saveInbound() else { return }
         }
         var groupContext: QQGroupContext?
         if message.group {
