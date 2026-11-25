@@ -38,7 +38,11 @@ def _proactive_groups(document):
     if not isinstance(groups, list) or any(not isinstance(item, str) or not item.strip()
                                            for item in groups):
         return None
-    return frozenset(groups)
+    paused = proactive.get("pausedGroups", [])
+    if not isinstance(paused, list) or any(not isinstance(name, str) or not name.strip()
+                                           for name in paused):
+        return None
+    return frozenset(groups).difference(paused)
 
 
 def _public_question_cooldowns(document):

@@ -53,6 +53,14 @@ const FIELDS = {
   'group.silentMinutes': { type: 'int', min: 1, max: 10080 },
   'group.engagedMinutes': { type: 'int', min: 1, max: 1440 },
   'group.masterAlwaysReply': { type: 'bool' },
+  'group.proactiveJudge.enabled': { type: 'bool' },
+  'group.proactiveJudge.groups': { type: 'stringArray' },
+  'group.proactiveJudge.pausedGroups': { type: 'stringArray' },
+  // 公开提问自动闲聊的按群冷却秒数：键 = 已授权群名，值 = 30~1200 的整数。
+  // 只校验形状；「键必须在 groups 里」由设置服务负责（它需要读到当前名单）。
+  'group.proactiveJudge.publicQuestionCooldowns': {
+    type: 'objectMap', valueType: 'int', min: 30, max: 1200,
+  },
 
   // ---- 表情包 ----
   // 只控制“这一轮要不要在尾部提醒她带一张”，不按概率替模型选图；0 = 只靠模型自觉。
@@ -148,6 +156,14 @@ function describe(expected) {
       return '字符串';
     case 'enum':
       return `以下之一：${(expected.values || []).join(' / ')}`;
+    case 'stringArray':
+      return '字符串数组';
+    case 'objectMap': {
+      const inner = describe({ type: expected.valueType || 'int', min: expected.min, max: expected.max });
+      return `对象（键为非空字符串，值为${inner}）`;
+    }
+    case 'enum':
+      return `以下之一：${(expected.values || []).join(' / ')}`;
     default:
       return expected.type;
   }
@@ -188,6 +204,25 @@ function checkValue(value, spec) {
     if (typeof value !== 'string') return `应该是字符串，实际是 ${JSON.stringify(value)}`;
     if (spec.pattern && !spec.pattern.test(value)) return '请填写 24 小时制时间 HH:mm（如 23:00）';
     if (spec.maxLen && value.length > spec.maxLen) return `太长（最多 ${spec.maxLen} 个字符）`;
+    return null;
+  }
+  if (spec.type === 'stringArray') {
+    if (!Array.isArray(value)) return `应该是 ${describe(spec)}，实际是 ${JSON.stringify(value)}`;
+    if (value.some((item) => typeof item !== 'string' || !item.trim())) {
+      return '每个群名都必须是非空字符串';
+    }
+    return null;
+  }
+  if (spec.type === 'objectMap') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return `应该是 ${describe(spec)}，实际是 ${JSON.stringify(value)}`;
+    }
+    for (const [key, item] of Object.entries(value)) {
+      if (!key || !key.trim()) return '群名必须是非空字符串';
+      const inner = { type: spec.valueType || 'int', min: spec.min, max: spec.max };
+      const message = checkValue(item, inner);
+      if (message) return `群「${key}」的秒数${message}`;
+    }
     return null;
   }
   return null;

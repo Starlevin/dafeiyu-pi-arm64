@@ -227,9 +227,12 @@ class Bot {
    */
   groupAutoReplyGroups() {
     const cfg = (this.config && this.config.group && this.config.group.proactiveJudge) || {};
-    const list = Array.isArray(cfg.groups) ? cfg.groups : null;
-    if (!list || !list.length) return [];
-    return list.map((x) => String(x));
+    const paused = cfg.pausedGroups === undefined ? [] : cfg.pausedGroups;
+    if (!Array.isArray(paused) || paused.some((name) => typeof name !== 'string' || !name.trim())) {
+      return [];
+    }
+    const groups = Array.isArray(cfg.groups) ? cfg.groups : [];
+    return groups.map((group) => String(group)).filter((group) => !paused.includes(group));
   }
 
   sessionKey(msg) {

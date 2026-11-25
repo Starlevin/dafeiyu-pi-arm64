@@ -12,7 +12,7 @@
 <link rel="stylesheet" href="content.css">
 <link rel="stylesheet" href="admin-tools.css">
 <!-- 阻塞式外部脚本：首帧前同步定好主题，避免浅色闪一下；不使用 inline script，兼容 CSP -->
-<script src="app.js?v=workspace-17"></script>
+<script src="app.js?v=workspace-18"></script>
 <script src="usage.js" defer></script>
 <script src="content.js" defer></script>
 <script src="social.js" defer></script>
@@ -147,6 +147,11 @@
         <summary class="card-title">QQ 普通聊天评分</summary>
         <div id="qqOrdinaryRows"></div>
         <p class="card-note" id="qqOrdinaryStatus" role="status" aria-live="polite"></p>
+      </details>
+      <details class="card memory-panel" id="wechatActivity">
+        <summary class="card-title">微信群自动接话</summary>
+        <div id="wechatActivityRows"></div>
+        <p class="card-note" id="wechatActivityStatus" role="status" aria-live="polite"></p>
       </details>
       <div class="table-wrap">
         <table class="data-table">

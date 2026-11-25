@@ -6,8 +6,26 @@ const { applyConfigPatch } = require('../infra/configPatch');
 const vision = require('../adapters/vision');
 const { statusPayload } = require('./status');
 
+// 公开提问自动闲聊：默认间隔与合法范围，和 pi-console 后端 + configSchema 保持一致。
+const PUBLIC_QUESTION_COOLDOWN_DEFAULT = 60;
+const PUBLIC_QUESTION_COOLDOWN_MIN = 30;
+const PUBLIC_QUESTION_COOLDOWN_MAX = 1200;
+
+/** 只把「非空字符串键 + 30~1200 整数」的项抄进新对象，不引用外部输入。 */
+function toCooldownMap(value) {
+  const out = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  for (const [key, seconds] of Object.entries(value)) {
+    if (typeof key !== 'string' || !key.trim()) continue;
+    if (!Number.isInteger(seconds) || seconds < PUBLIC_QUESTION_COOLDOWN_MIN || seconds > PUBLIC_QUESTION_COOLDOWN_MAX) continue;
+    out[key] = seconds;
+  }
+  return out;
+}
+
 function getSettings(runtime) {
   const { config, llm } = runtime;
+  const { pausedGroups = [] } = config.group.proactiveJudge || {};
   const rt = resolveRuntime(config);
   const saved = loadSettings(config);
   const providers = {};
@@ -48,6 +66,13 @@ function getSettings(runtime) {
       freeChat: config.group.freeChat,
       freeChatChance: config.group.freeChatChance,
       cooldownSec: config.group.cooldownSec,
+      proactiveJudge: {
+        enabled: config.group.proactiveJudge?.enabled === true,
+        groups: Array.isArray(config.group.proactiveJudge?.groups) ? [...config.group.proactiveJudge.groups] : [],
+        pausedGroups,
+        publicQuestionCooldowns: toCooldownMap(config.group.proactiveJudge?.publicQuestionCooldowns),
+        publicQuestionCooldownDefault: PUBLIC_QUESTION_COOLDOWN_DEFAULT,
+      },
     },
     configFile: config.paths.configFile,
     dataDir: config.paths.dataDir,
@@ -282,6 +307,52 @@ async function applySettings(runtime, body) {
   // 思考 token 计入 max_tokens，开着会明显变慢、变贵，所以默认关。
   if (typeof body.thinking === 'boolean') patch.thinking = body.thinking;
   if (body.group && typeof body.group === 'object') {
+    const cooldownWrite = Object.hasOwn(body.group, 'publicQuestionCooldowns');
+    const enabledWrite = Object.hasOwn(body.group, 'proactiveGroupEnabled');
+    if (cooldownWrite || enabledWrite) {
+      const judge = config.group.proactiveJudge;
+      if (judge?.enabled !== true) throw new Error('主动搭话总开关没开');
+      const groups = Array.isArray(judge.groups) ? judge.groups : [];
+      const proactivePatch = {};
+      if (cooldownWrite) {
+        const map = body.group.publicQuestionCooldowns;
+        if (!map || typeof map !== 'object' || Array.isArray(map)) {
+          throw new Error('公开提问间隔要写成「群名: 秒数」的对象');
+        }
+        for (const [groupName, seconds] of Object.entries(map)) {
+          if (!groupName.trim() || !groups.includes(groupName)) {
+            throw new Error('该群不在主动搭话白名单里');
+          }
+          if (!Number.isInteger(seconds) ||
+              seconds < PUBLIC_QUESTION_COOLDOWN_MIN || seconds > PUBLIC_QUESTION_COOLDOWN_MAX) {
+            throw new Error('公开提问间隔要填 ' + PUBLIC_QUESTION_COOLDOWN_MIN + '~' +
+              PUBLIC_QUESTION_COOLDOWN_MAX + ' 的整数秒');
+          }
+        }
+        proactivePatch['group.proactiveJudge.publicQuestionCooldowns'] = {
+          ...toCooldownMap(judge.publicQuestionCooldowns), ...map,
+        };
+      }
+      if (enabledWrite) {
+        const map = body.group.proactiveGroupEnabled;
+        const existing = judge.pausedGroups === undefined ? [] : judge.pausedGroups;
+        if (!map || typeof map !== 'object' || Array.isArray(map) ||
+            !Array.isArray(existing) || existing.some((name) => typeof name !== 'string' || !name.trim())) {
+          throw new Error('群接话开关配置格式无效');
+        }
+        const paused = new Set(existing);
+        for (const [groupName, enabled] of Object.entries(map)) {
+          if (!groupName.trim() || !groups.includes(groupName)) {
+            throw new Error('该群不在主动搭话白名单里');
+          }
+          if (typeof enabled !== 'boolean') throw new Error('群接话开关须为布尔值');
+          if (enabled) paused.delete(groupName);
+          else paused.add(groupName);
+        }
+        proactivePatch['group.proactiveJudge.pausedGroups'] = [...paused];
+      }
+      applyConfigPatch(runtime, proactivePatch);
+    }
     // 以前只改内存里的 config.group，没落盘 —— 重启就变回旧值（用户看到「设置无效」）。
     // 统一走 config.json，和启动器设置页写的是同一份数据。
     const groupPatch = {};

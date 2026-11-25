@@ -772,9 +772,18 @@ class HouseConsoleExtTests(unittest.TestCase):
                 inner.posts.append((path, body))
                 if path != "/api/settings":
                     return {"ok": False}
-                patch = body["group"]["publicQuestionCooldowns"]
+                patch = body["group"]
                 judge = inner.runtime["group"]["proactiveJudge"]
-                judge.setdefault("publicQuestionCooldowns", {}).update(patch)
+                if "publicQuestionCooldowns" in patch:
+                    judge.setdefault("publicQuestionCooldowns", {}).update(patch["publicQuestionCooldowns"])
+                if "proactiveGroupEnabled" in patch:
+                    paused = set(judge.get("pausedGroups", []))
+                    for group, enabled in patch["proactiveGroupEnabled"].items():
+                        if enabled:
+                            paused.discard(group)
+                        else:
+                            paused.add(group)
+                    judge["pausedGroups"] = sorted(paused)
                 if file_write:
                     self.wx_config.write_text(
                         json.dumps(inner.runtime, ensure_ascii=False), encoding="utf-8")
@@ -938,6 +947,35 @@ class HouseConsoleExtTests(unittest.TestCase):
         })
         self.assertEqual(result["wechatEnabledGroups"], ["试点群A", "试点群B"])
         self.assertTrue(result["wechatJudgeEnabled"])
+
+    def test_wechat_paused_group_remains_selectable_and_can_be_restored(self):
+        self._install_wechat_settings_adapter()
+        body = {"platform": "wechat", "group": "试点群A", "ordinaryReplyEnabled": False,
+                "publicQuestionCooldownSeconds": 75}
+        status, result = self._post("/api/proactive/config", body)
+        self.assertEqual(status, 200)
+        self.assertIs(result["ordinaryReplyEnabled"], False)
+        self.assertEqual(result["runtimeObserved"], 75)
+        current = json.loads(self._get("/api/proactive/config")[1])
+        self.assertEqual(current["wechatAuthorizedGroups"], ["试点群A", "试点群B"])
+        self.assertEqual(current["wechatEnabledGroups"], ["试点群B"])
+        self.assertEqual(self._wx_doc()["group"]["proactiveJudge"]["pausedGroups"], ["试点群A"])
+        del body["publicQuestionCooldownSeconds"]
+        body["ordinaryReplyEnabled"] = True
+        self.assertIs(self._post("/api/proactive/config", body)[1]["ordinaryReplyEnabled"], True)
+        current = json.loads(self._get("/api/proactive/config")[1])
+        self.assertEqual(current["wechatEnabledGroups"], ["试点群A", "试点群B"])
+        self.assertEqual(current["publicQuestionCooldowns"]["wechat"]["试点群A"], 75)
+
+    def test_wechat_group_toggle_requires_strict_boolean_and_authorized_group(self):
+        adapter = self._install_wechat_settings_adapter()
+        for group, enabled in (("试点群A", "false"), ("未授权群", True)):
+            with self.subTest(group=group, enabled=enabled), self.assertRaises(urllib.error.HTTPError) as ctx:
+                self._post("/api/proactive/config", {
+                    "platform": "wechat", "group": group, "ordinaryReplyEnabled": enabled,
+                })
+            self.assertEqual(ctx.exception.code, 400)
+        self.assertEqual(adapter.posts, [])
 
     def test_wechat_save_fails_closed_when_node_runtime_readback_is_unavailable(self):
         adapter = self._install_wechat_settings_adapter(runtime_readback=False)

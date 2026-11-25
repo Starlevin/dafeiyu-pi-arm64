@@ -629,17 +629,23 @@
       if (read !== state.proactiveRead) return null;
       if (!raw || raw.ok !== true) throw new Error('策略响应无效');
       state.proactive = raw;
-      if (state.proactiveStale && $('qqOrdinaryStatus')) $('qqOrdinaryStatus').textContent = '';
+      if (state.proactiveStale) {
+        $('qqOrdinaryStatus').textContent = '';
+        $('wechatActivityStatus').textContent = '';
+      }
       state.proactiveStale = false;
       renderQQOrdinaryConfig();
+      renderWeChatActivity();
       return raw;
     } catch (e) {
       if (read !== state.proactiveRead) return null;
       state.proactiveStale = true;
       if (e.status === 401) { handleUnauthorized(); return null; }
       renderQQOrdinaryConfig();
-      const status = $('qqOrdinaryStatus');
-      if (status) status.textContent = '读取失败，当前显示上次读取的设置。';
+      renderWeChatActivity();
+      for (const id of ['qqOrdinaryStatus', 'wechatActivityStatus']) {
+        $(id).textContent = '读取失败，当前显示上次读取的设置。';
+      }
       return null;
     }
   }
@@ -724,6 +730,73 @@
       });
       line.appendChild(save);
       host.appendChild(line);
+    });
+  }
+
+  function renderWeChatActivity() {
+    const host = $('wechatActivityRows');
+    const status = $('wechatActivityStatus');
+    const data = state.proactive || {};
+    const enabled = new Set(arr(data.wechatEnabledGroups));
+    const groups = data.wechatAuthorizedGroups || [...enabled];
+    clear(host);
+    if (!groups.length) {
+      host.appendChild(node('p', 'card-note', '暂无已授权的微信群。'));
+      return;
+    }
+    const cooldowns = (data.publicQuestionCooldowns || {}).wechat || {};
+    groups.forEach((name) => {
+      const row = node('form', 'memory-toolbar');
+      const field = node('label', 'field');
+      field.appendChild(node('span', 'cell-name', name + ' · 冷却秒数'));
+      const input = document.createElement('input');
+      input.className = 'input compact';
+      input.type = 'number';
+      input.min = '30'; input.max = '1200'; input.step = '1'; input.required = true;
+      const originalCooldown = cooldowns[name] || data.publicQuestionCooldownDefault || 60;
+      input.value = String(originalCooldown);
+      input.disabled = state.proactiveStale;
+      field.appendChild(input);
+
+      const toggleField = node('label', 'switch');
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox';
+      toggle.checked = enabled.has(name);
+      toggle.disabled = state.proactiveStale;
+      toggle.setAttribute('aria-label', name + ' 自动接话');
+      toggleField.append(toggle, node('span', 'track'), node('span', 'state', '自动接话'));
+      const save = node('button', 'btn btn-primary btn-sm', '保存');
+      save.type = 'submit';
+      save.disabled = state.proactiveStale;
+      row.append(field, toggleField, save);
+      row.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const value = Number(input.value);
+        const active = toggle.checked;
+        if (!Number.isInteger(value) || value < 30 || value > 1200 || state.busy || state.proactiveStale) return;
+        const patch = { platform: 'wechat', group: name };
+        if (value !== originalCooldown) patch.publicQuestionCooldownSeconds = value;
+        if (active !== enabled.has(name)) patch.ordinaryReplyEnabled = active;
+        if (Object.keys(patch).length === 2) return;
+        run('正在保存微信群接话设置…', async () => {
+          const result = await apiPost('/api/proactive/config', patch);
+          if (result.verification !== 'persisted' || result.group !== name ||
+              ('publicQuestionCooldownSeconds' in patch && result.runtimeObserved !== value) ||
+              ('ordinaryReplyEnabled' in patch && result.ordinaryReplyEnabled !== active)) {
+            throw new Error('保存后未确认运行值');
+          }
+          const loaded = await loadQQOrdinaryConfig();
+          const current = loaded && (loaded.publicQuestionCooldowns || {}).wechat;
+          if (!loaded || !arr(loaded.wechatAuthorizedGroups).includes(name) ||
+              arr(loaded.wechatEnabledGroups).includes(name) !== active ||
+              ('publicQuestionCooldownSeconds' in patch && (!current || current[name] !== value))) {
+            status.textContent = '已写入，页面回读未确认。';
+            return;
+          }
+          status.textContent = active ? '已确认自动接话开启。' : '已确认自动接话关闭。';
+        }).catch((error) => { status.textContent = error.message; });
+      });
+      host.appendChild(row);
     });
   }
 

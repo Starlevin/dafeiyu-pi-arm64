@@ -428,22 +428,44 @@ def _wechat_cooldown_map(pj: dict | None, enabled_groups: list[str]) -> dict:
     return result
 
 
-def _read_wechat_cooldown_state(cfg: dict) -> tuple[dict, bool, list[str]]:
-    """Best-effort local read. Always returns empty state when the file is unusable."""
+def _wechat_paused_groups(pj: dict | None) -> set[str] | None:
+    raw = pj.get("pausedGroups", []) if isinstance(pj, dict) else None
+    if not isinstance(raw, list) or any(not isinstance(name, str) or not name.strip()
+                                        for name in raw):
+        return None
+    return set(raw)
+
+
+def _read_wechat_activity(cfg: dict) -> tuple[dict, list[str], list[str]]:
     try:
-        document = _read_wechat_config(_wechat_config_path(cfg))
-        pj = _wechat_proactive_pj(document)
+        pj = _wechat_proactive_pj(_read_wechat_config(_wechat_config_path(cfg)))
         groups = _wechat_enabled_groups(pj)
-        return _wechat_cooldown_map(pj, groups), bool(groups), groups
+        paused = _wechat_paused_groups(pj)
+        enabled = [name for name in groups if name not in paused] if paused is not None else []
+        return _wechat_cooldown_map(pj, groups), groups, enabled
     except (OSError, ValueError, UnicodeDecodeError):
-        return {}, False, []
+        return {}, [], []
 
 
-def _update_wechat_cooldown(cfg: dict, group, seconds: int,
-                            wechat_adapter=None) -> tuple[int, dict]:
-    """Write through Node's settings API and verify runtime plus bridge config."""
+def _update_wechat_activity(cfg: dict, body: dict, wechat_adapter) -> tuple[int, dict]:
+    group = body.get("group")
     if not isinstance(group, str) or not group.strip():
         return 400, {"error": "请提供有效的微信群名"}
+    patch = {}
+    if COOLDOWN_KEY in body:
+        value = body[COOLDOWN_KEY]
+        valid, message = _validate_cooldown(value)
+        if not valid:
+            return 400, {"error": message}
+        patch[COOLDOWN_MAP_KEY] = {group: value}
+    if ORDINARY_REPLY_KEY in body:
+        value = body[ORDINARY_REPLY_KEY]
+        if type(value) is not bool:
+            return 400, {"error": "微信群接话开关须为布尔值"}
+        patch["proactiveGroupEnabled"] = {group: value}
+    if not patch:
+        return 400, {"error": "请提供微信群接话设置"}
+
     path = _wechat_config_path(cfg)
     if path is None:
         return 404, {"error": "微信核心配置文件不可用"}
@@ -451,61 +473,43 @@ def _update_wechat_cooldown(cfg: dict, group, seconds: int,
         return 503, {"error": "微信核心设置写入通道不可用"}
     try:
         with PROACTIVE_CONFIG_LOCK:
-            bridge_before = _read_wechat_config(path)
-            bridge_judge = _wechat_proactive_pj(bridge_before)
-            bridge_groups = _wechat_enabled_groups(bridge_judge)
-            if not bridge_groups:
-                return 400, {"error": "微信主动辨别未启用或未配置有效群"}
-            if group not in bridge_groups:
-                # Fail closed: never expand the bridge's explicit allowlist.
+            saved = _wechat_proactive_pj(_read_wechat_config(path))
+            if group not in _wechat_enabled_groups(saved):
                 return 400, {"error": "该群不在微信主动辨别白名单内"}
-            # Require the runtime's exact enabled-group authorization to agree
-            # with the bridge authority before asking Node to perform the write.
-            runtime_before = wechat_adapter._get("/api/settings")
-            runtime_group = (runtime_before.get("group") or {}) if isinstance(runtime_before, dict) else {}
-            runtime_judge = runtime_group.get("proactiveJudge") if isinstance(runtime_group, dict) else None
-            runtime_groups = _wechat_enabled_groups(runtime_judge)
-            if not runtime_groups or group not in runtime_groups:
+            runtime = _wechat_proactive_pj(wechat_adapter._get("/api/settings"))
+            if group not in _wechat_enabled_groups(runtime):
                 return 409, {"error": "微信运行配置与桥白名单不一致"}
 
-            write_result = wechat_adapter._post("/api/settings", {
-                "group": {COOLDOWN_MAP_KEY: {group: seconds}},
-            })
-            if not isinstance(write_result, dict) or write_result.get("ok") is False:
+            result = wechat_adapter._post("/api/settings", {"group": patch})
+            if not isinstance(result, dict) or result.get("ok") is False:
                 return 503, {"error": "微信核心设置接口未确认写入"}
 
-            # Verify the effective Node runtime value and the exact config file
-            # consumed by the bridge; neither view alone is sufficient.
-            runtime_after = wechat_adapter._get("/api/settings")
-            after_group = (runtime_after.get("group") or {}) if isinstance(runtime_after, dict) else {}
-            after_judge = after_group.get("proactiveJudge") if isinstance(after_group, dict) else None
-            runtime_groups_after = _wechat_enabled_groups(after_judge)
-            runtime_map = (after_judge.get(COOLDOWN_MAP_KEY)
-                           if isinstance(after_judge, dict) else None)
-            runtime_observed = (runtime_map.get(group)
-                                if isinstance(runtime_map, dict) else None)
-            observed_doc = _read_wechat_config(path)
-            observed_pj = _wechat_proactive_pj(observed_doc)
-            observed_groups = _wechat_enabled_groups(observed_pj)
-            bridge_observed = _wechat_cooldown_map(observed_pj, observed_groups).get(group)
-            if (group not in runtime_groups_after or group not in observed_groups
-                    or runtime_observed != seconds or bridge_observed != seconds):
-                return 409, {"error": "微信运行配置或桥配置回读不一致"}
-        return 200, {
-            "ok": True,
-            "verification": "persisted",
-            "platform": "wechat",
-            "group": group,
-            "observed": bridge_observed,
-            "runtimeObserved": runtime_observed,
-        }
+            runtime = _wechat_proactive_pj(wechat_adapter._get("/api/settings"))
+            saved = _wechat_proactive_pj(_read_wechat_config(path))
+            runtime_groups = _wechat_enabled_groups(runtime)
+            saved_groups = _wechat_enabled_groups(saved)
+            if group not in runtime_groups or group not in saved_groups:
+                return 409, {"error": "微信运行配置与桥白名单不一致"}
+            observed = {}
+            if COOLDOWN_KEY in body:
+                seconds = body[COOLDOWN_KEY]
+                if (_wechat_cooldown_map(runtime, runtime_groups).get(group) != seconds
+                        or _wechat_cooldown_map(saved, saved_groups).get(group) != seconds):
+                    return 409, {"error": "微信运行配置或桥配置回读不一致"}
+                observed.update(observed=seconds, runtimeObserved=seconds)
+            if ORDINARY_REPLY_KEY in body:
+                enabled = body[ORDINARY_REPLY_KEY]
+                for paused in (_wechat_paused_groups(runtime), _wechat_paused_groups(saved)):
+                    if paused is None or (group not in paused) != enabled:
+                        return 409, {"error": "微信运行配置或桥配置回读不一致"}
+                observed["ordinaryReplyEnabled"] = enabled
+        return 200, {"ok": True, "verification": "persisted", "platform": "wechat",
+                     "group": group, **observed}
     except FileNotFoundError:
         return 404, {"error": "微信核心配置文件不可用"}
     except (OSError, ValueError, UnicodeDecodeError):
         return 503, {"error": "微信核心配置读取或写入失败"}
     except Exception:
-        # Adapter failures (including loopback HTTP errors) are deliberately
-        # generic here; never fall back to a competing direct file writer.
         return 503, {"error": "微信核心设置接口不可用"}
 
 
@@ -603,11 +607,7 @@ def _update_proactive_config(cfg: dict, body: dict,
     platform = body.get("platform")
     platform = str(platform).strip().lower() if isinstance(platform, str) else ""
     if platform == "wechat":
-        valid, message = _validate_cooldown(body.get(COOLDOWN_KEY, None))
-        if not valid:
-            return 400, {"error": message}
-        return _update_wechat_cooldown(
-            cfg, body.get("group"), body[COOLDOWN_KEY], wechat_adapter)
+        return _update_wechat_activity(cfg, body, wechat_adapter)
     if platform not in ("", "qq"):
         return 400, {"error": "不支持的平台"}
 
@@ -719,7 +719,8 @@ def _build_proactive_config(cfg: dict, qq_adapter=None) -> dict:
     # Derive WeChat state exclusively from the local authoritative config.json:
     # offline fixtures need no network, and this is the same file the WeChat
     # bridge reads. Never trust a secondary HTTP view over the authoritative file.
-    wx_cooldowns, wx_enabled, wx_groups = _read_wechat_cooldown_state(cfg)
+    wx_cooldowns, wx_groups, wx_enabled_groups = _read_wechat_activity(cfg)
+    wx_enabled = bool(wx_enabled_groups)
     qq_cooldowns = {}
     qq_ordinary = {}
     qq_revision = ""
@@ -740,8 +741,9 @@ def _build_proactive_config(cfg: dict, qq_adapter=None) -> dict:
         "ok": True,
         "judgeMode": "QQ:enforce-v2 / WeChat:" + ("enabled" if wx_enabled else "gate-off"),
         "wechatJudgeEnabled": wx_enabled,
-        "wechatAllowlistCount": len(wx_groups),
-        "wechatEnabledGroups": wx_groups,
+        "wechatAllowlistCount": len(wx_enabled_groups),
+        "wechatAuthorizedGroups": wx_groups,
+        "wechatEnabledGroups": wx_enabled_groups,
         "qqConfigState": config_state,
         "qqGroups": groups,
         "qqRuntime": _qq_proactive_runtime(qq_adapter, qq_revision),

@@ -271,6 +271,15 @@ const DEFAULT_CONFIG = {
     silentMinutes: 10,
     maxRepliesPerMinute: 15,
     muteDefaultMinutes: 30,
+    proactiveJudge: {
+      enabled: false,
+      groups: [],
+      // 公开提问自动闲聊的按群冷却秒数（群名 → 30~1200 整数）。默认空表；
+      // 空表必须有这个键：configPatch 的 coerceValue 按现有值的类型决定怎么转，
+      // 缺键会把整个对象 String() 成 "[object Object]" 写坏 config.json。
+      pausedGroups: [],
+      publicQuestionCooldowns: {},
+    },
   },
   // 记忆参数以 src/memory/constants.js 为准（写死的那些不改）；
   // 唯一可调的是「对话预算」：config.json 的 memory.dialogueBudget，默认 5,500。

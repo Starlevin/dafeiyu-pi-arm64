@@ -588,6 +588,19 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertIs(result, refused)
         request.assert_called_once()
 
+    def test_paused_group_blocks_ordinary_entry_and_delivery_but_allows_native_mention(self):
+        self.configure(True)
+        self.assertFalse(self.ingest(direct=False).empty())
+        policy = json.loads(self.path.read_text(encoding="utf-8"))
+        policy["group"]["proactiveJudge"]["pausedGroups"] = [GROUP]
+        self.path.write_text(json.dumps(policy), encoding="utf-8")
+        self.assertTrue(self.ingest(direct=False).empty())
+        self.assertTrue(self.ingest(direct=True).get_nowait()[2]["at_me"])
+        send = Mock()
+        app = self.deliver({"target": GROUP}, send)
+        app.assert_not_called()
+        send.assert_not_called()
+
     def test_turning_off_after_generation_drops_reply_before_the_gui(self):
         self.configure(False)
         send = Mock()
