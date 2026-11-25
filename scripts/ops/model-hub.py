@@ -28,6 +28,12 @@ PRIVATE = ROOT / 'secrets/model-hub'
 ORIGIN = 'http://127.0.0.1:18090'
 GROUP_CHAT_ROUTE_SECONDS = 22.0
 GROUP_CHAT_PRIMARY_SECONDS = 12.0
+QQ_ORDINARY_REPLY_TOKENS = 160
+QQ_SCORED_ORDINARY_PROMPT = (
+    '针对当前群聊内容自然接一句，简短贴题，不复述，不把群友的经历或邀请说成自己的。'
+    '只输出 text、emotion、intensity 三字段的 JSON。'
+)
+QQ_FAST_REPLY_PROMPT = '只输出最终 JSON，不展示推理过程。'
 WORKBUDDY_BACKUP_SECONDS = 30.0
 WECHAT_SHORT_ROUTE_SECONDS = 15.0
 WECHAT_SHORT_PRIMARY_SECONDS = 9.0
@@ -888,11 +894,23 @@ def complete(body):
     except Exception:
         pass
     budget = body.get('max_tokens')
-    fast_group_route = (
+    bounded_workbuddy_chat = (
         bool(backup and backup.get('protocol') == 'chat' and not backup.get('warm'))
-        and _is_local_workbuddy(profile)
-        and strict_mode and not body.get('tools') and type(budget) is int and 0 < budget
-        and ((is_proactive and budget <= 160)
+        and _is_local_workbuddy(profile) and strict_mode
+        and not body.get('tools') and type(budget) is int and 0 < budget
+    )
+    # QQ has already scored this request and does not send [QQ_PARTICIPATION].
+    # Match its short single-pass prompt, never user content or the review path.
+    short_qq_reply = (
+        bounded_workbuddy_chat and not is_proactive
+        and QQ_SCORED_ORDINARY_PROMPT in sys_text and QQ_FAST_REPLY_PROMPT in sys_text
+        and all(isinstance(item, dict) and isinstance(item.get('content'), str)
+                for item in body.get('messages') or [])
+    )
+    if short_qq_reply:
+        body = {**body, 'max_tokens': min(budget, QQ_ORDINARY_REPLY_TOKENS)}
+    fast_group_route = (
+        bounded_workbuddy_chat and (short_qq_reply or (is_proactive and budget <= 160)
              or ('本轮是群内公开且暂未得到回答的问题' in sys_text and budget <= 400
                  and all(key in sys_text.lower() for key in ('text', 'emotion', 'intensity'))))
     )
@@ -908,7 +926,7 @@ def complete(body):
         route_deadline = started + route_seconds
         primary_deadline = min(route_deadline, started + primary_seconds)
     primary = profile
-    if short_wechat_reply and profile.get('reasoning') == 'high':
+    if short_qq_reply or (short_wechat_reply and profile.get('reasoning') == 'high'):
         # Reserve the short participation budget for visible text and JSON.
         primary = dict(profile, reasoning='none')
     # The participation instructions mention sticker_id even when no candidates were sent.

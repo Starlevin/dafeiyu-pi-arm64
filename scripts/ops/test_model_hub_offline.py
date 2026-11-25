@@ -165,6 +165,67 @@ def test_short_wechat_reply_has_its_own_budget(hub):
     print('wechat_short_deadline_scope: PASS')
 
 
+def test_scored_qq_ordinary_reply_has_a_bounded_route_without_participation(hub):
+    primary = {'id': 'workbuddy-deepseek', 'name': 'primary', 'protocol': 'chat',
+               'base_url': hub.GATEWAY_URL, 'fallback_to': 'sensenova-6.8-flash-lite',
+               'reasoning': 'high'}
+    backup = {'id': 'sensenova-6.8-flash-lite', 'name': 'backup', 'protocol': 'chat'}
+    ordinary = ('针对当前群聊内容自然接一句，简短贴题，不复述，不把群友的经历或邀请说成自己的。'
+                '只输出 text、emotion、intensity 三字段的 JSON。')
+    fast = '只输出最终 JSON，不展示推理过程。'
+    reply = {'choices': [{'message': {'content': '{"text":"海边有风，走起来更舒服。",'
+                                                  '"emotion":"neutral","intensity":0}'}}]}
+    hub.profiles = lambda: [primary, backup]
+    hub.time = types.SimpleNamespace(monotonic=lambda: 100.0, time=lambda: 100.0,
+                                     strftime=lambda *_: 'fixture')
+    hub._workbuddy_model_state = lambda _: (None, 0)
+    hub.cooldown_until = lambda _: 0
+    hub.set_cooldown = lambda *_: None
+    hub.clear_cooldown = lambda *_: None
+    routes = []
+    hub.route_log = routes.append
+    for shape in ('qq_ordinary', 'smaller_limit', 'direct', 'user_text', 'review', 'tool', 'image'):
+        calls = []
+
+        def invoke(profile, request, _deadline=None):
+            calls.append((profile['id'], request['max_tokens'], _deadline, profile.get('reasoning')))
+            if profile['id'] == primary['id']:
+                raise hub.Fallbackable('timeout')
+            return reply
+
+        hub._invoke = invoke
+        short = shape in ('qq_ordinary', 'smaller_limit')
+        system = '回复用 text emotion intensity'
+        user = '周末海边散步挺舒服的'
+        if shape in ('qq_ordinary', 'smaller_limit', 'review', 'tool', 'image'):
+            system += '\n' + ordinary
+        if shape != 'review':
+            system += '\n' + fast
+        if shape == 'user_text':
+            user += ordinary
+        if shape == 'image':
+            user = [{'type': 'text', 'text': user},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,QQ=='}}]
+        size = 96 if shape == 'smaller_limit' else 500
+        request = {'model': primary['id'], 'max_tokens': size, 'response_format': {'type': 'json_object'},
+                   'messages': [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]}
+        if shape == 'tool':
+            request['tools'] = [{'type': 'function'}]
+        answer = json.loads(hub.complete(request)['choices'][0]['message']['content'])
+        assert answer['text'] and 'participate' not in answer, (shape, answer)
+        assert request['max_tokens'] == size
+        if short:
+            expected = [(primary['id'], min(size, 160), 112.0, 'none'),
+                        (backup['id'], min(size, 160), 122.0, None)]
+            assert routes[-1]['reason'] == 'group_primary_timeout'
+        else:
+            expected = [(primary['id'], size, None, 'high'),
+                        (backup['id'], size, 130.0, None)]
+            assert routes[-1]['reason'] == 'timeout'
+        assert calls == expected, (shape, calls)
+    print('qq_ordinary_fast_route: PASS')
+
+
 def test_workbuddy_account_error_is_scoped(hub):
     payload = json.dumps({'error': {'type': 'no_available_account', 'message': 'fixture private detail'}})
     parsed = hub._upstream_error(types.SimpleNamespace(status_code=503, content=payload.encode()))
@@ -336,6 +397,7 @@ def main():
     test_workbuddy_account_snapshot_routes(load())
     test_short_wechat_reserves_budget_for_the_visible_reply(load())
     test_short_wechat_reply_has_its_own_budget(load())
+    test_scored_qq_ordinary_reply_has_a_bounded_route_without_participation(load())
     test_cooldown_disk_errors_preserve_model_results(load())
     print('ALL MODEL-HUB OFFLINE TESTS PASS')
 

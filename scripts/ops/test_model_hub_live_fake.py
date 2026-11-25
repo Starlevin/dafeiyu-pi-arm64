@@ -23,6 +23,7 @@ HUB_PATH = Path(os.environ.get(
     "HUB_PATH", str(Path(__file__).resolve().with_name("model-hub.py"))))
 AVAILABLE = ["fake-family-auto", "fake-family-2"]
 POSTED_MODELS = []
+QQ_ORDINARY_REQUESTS = []
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -47,6 +48,17 @@ class Upstream(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         POSTED_MODELS.append(body.get("model"))
+        if body.get("model") in ("fixture-qq-slow", "fixture-qq-backup"):
+            QQ_ORDINARY_REQUESTS.append((body["model"], body.get("max_tokens"),
+                                         body.get("reasoning_effort")))
+            if body["model"] == "fixture-qq-slow":
+                time.sleep(1.5)
+            try:
+                content = json.dumps({"text": "海边的风很舒服。", "emotion": "neutral", "intensity": 0})
+                self._send(200, {"choices": [{"message": {"content": content}}]})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         if body.get("model") == "fixture-workbuddy-unavailable":
             self._send(503, {"error": {"code": "fixture_unavailable"}})
             return
@@ -170,6 +182,29 @@ def main():
         assert hub._test_routes[-1]["reason"] == "backup_timeout"
         assert hub._test_routes[-1]["actual"] == ""
         print("WORKBUDDY_BACKUP_DEADLINE_HTTP_PASS elapsed_ms=%d" % round(elapsed * 1000))
+
+        hub.clear_cooldown(selected["id"])
+        selected.update(model="fixture-qq-slow", reasoning="high")
+        fallback["model"] = "fixture-qq-backup"
+        hub.GROUP_CHAT_PRIMARY_SECONDS = .25
+        hub.GROUP_CHAT_ROUTE_SECONDS = .95
+        ordinary = ('针对当前群聊内容自然接一句，简短贴题，不复述，不把群友的经历或邀请说成自己的。'
+                    '只输出 text、emotion、intensity 三字段的 JSON。\n只输出最终 JSON，不展示推理过程。')
+        request = {"model": selected["id"], "max_tokens": 500,
+                   "response_format": {"type": "json_object"},
+                   "messages": [{"role": "system", "content": ordinary},
+                                {"role": "user", "content": "晚上海边散步挺舒服的"}]}
+        started = time.monotonic()
+        result = hub.complete(request)
+        elapsed = time.monotonic() - started
+        assert .14 <= elapsed < .95, elapsed
+        assert QQ_ORDINARY_REQUESTS == [("fixture-qq-slow", 160, "none"),
+                                       ("fixture-qq-backup", 160, None)], QQ_ORDINARY_REQUESTS
+        assert json.loads(result["choices"][0]["message"]["content"])["text"] == "海边的风很舒服。"
+        assert hub._test_routes[-1]["reason"] == "group_primary_timeout"
+        assert hub._test_routes[-1]["actual"] == fallback["id"]
+        assert hub.cooldown_until(selected["id"]) == 0
+        print("QQ_ORDINARY_SLOW_WORKBUDDY_HTTP_FALLBACK_PASS elapsed_ms=%d" % round(elapsed * 1000))
     finally:
         server.shutdown()
         server.server_close()
