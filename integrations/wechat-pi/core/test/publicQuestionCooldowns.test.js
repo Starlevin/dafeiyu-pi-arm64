@@ -8,6 +8,7 @@ const { test } = require('node:test');
 const { loadConfig } = require('../src/infra/config');
 const { Bot } = require('../src/pipeline/chat');
 const { getSettings, applySettings } = require('../src/services/settings');
+const { saveConfigPatch, watchConfigFile } = require('../src/infra/configPatch');
 
 const GROUPS = ['试点群A', '试点群B'];
 
@@ -170,5 +171,49 @@ test('invalid toggle rejects the entire combined write', async (t) => {
       proactiveGroupEnabled: toggles, publicQuestionCooldowns: { [GROUPS[0]]: 90 },
     } }));
     assert.equal(fs.readFileSync(configFile, 'utf8'), before);
+  }
+});
+
+
+test('failure during config replacement preserves file, permissions and live settings', async (t) => {
+  const { root, runtime, configFile } = fixture(t);
+  if (process.platform !== 'win32') fs.chmodSync(configFile, 0o600);
+  const original = fs.readFileSync(configFile, 'utf8');
+  const rename = fs.renameSync;
+  const mock = t.mock.method(fs, 'renameSync', (from, to) => {
+    if (to !== configFile) return rename(from, to);
+    assert.equal(fs.readFileSync(configFile, 'utf8'), original);
+    assert.deepEqual(readConfig(from).group.proactiveJudge.pausedGroups, [GROUPS[0]]);
+    throw Object.assign(new Error('fixture: no space before replace'), { code: 'ENOSPC' });
+  });
+  const patch = { group: { proactiveGroupEnabled: { [GROUPS[0]]: false } } };
+  await assert.rejects(applySettings(runtime, patch), { code: 'ENOSPC' });
+  assert.throws(() => saveConfigPatch(runtime.config, {
+    'group.proactiveJudge.pausedGroups': [GROUPS[0]],
+  }), { code: 'ENOSPC' });
+  assert.equal(fs.readFileSync(configFile, 'utf8'), original);
+  assert.deepEqual(runtime.config.group.proactiveJudge.pausedGroups, []);
+  assert.equal(fs.readdirSync(root).some((name) => name.startsWith('.config-')), false);
+  mock.mock.restore();
+  await applySettings(runtime, patch);
+  assert.deepEqual(readConfig(configFile).group.proactiveJudge.pausedGroups, [GROUPS[0]]);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(configFile).mode & 0o777, 0o600);
+});
+
+test('watcher reloads successive replacements of the config path', async (t) => {
+  const { runtime, configFile } = fixture(t);
+  watchConfigFile(runtime);
+  t.after(() => runtime.stopConfigWatch?.());
+  for (const paused of [[GROUPS[0]], [GROUPS[1]]]) {
+    const next = readConfig(configFile);
+    next.group.proactiveJudge.pausedGroups = paused;
+    const temporary = configFile + '.replacement';
+    fs.writeFileSync(temporary, JSON.stringify(next));
+    fs.renameSync(temporary, configFile);
+    const cutoff = Date.now() + 3000;
+    while (runtime.config.group.proactiveJudge.pausedGroups[0] !== paused[0] && Date.now() < cutoff) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(runtime.config.group.proactiveJudge.pausedGroups, paused);
   }
 });

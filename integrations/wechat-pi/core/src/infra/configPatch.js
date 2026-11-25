@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 const { loadConfig, DEFAULT_CONFIG, isModelHubEndpoint, MANAGED_MODEL_MESSAGE } = require('./config');
 const configSchema = require('./configSchema');
@@ -169,6 +170,27 @@ function flattenPatch(patch, prefix = '', out = {}) {
   return out;
 }
 
+function writeConfigAtomic(file, document) {
+  const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
+  const directory = path.dirname(target);
+  fs.mkdirSync(directory, { recursive: true });
+  const mode = (fs.statSync(target, { throwIfNoEntry: false })?.mode ?? 0o600) & 0o777;
+  const temporary = path.join(directory, '.config-' + randomUUID() + '.tmp');
+  const descriptor = fs.openSync(temporary, 'wx', 0o600);
+  try {
+    try {
+      fs.writeFileSync(descriptor, JSON.stringify(document, null, 2) + '\n', 'utf8');
+      fs.fchmodSync(descriptor, mode);
+      fs.fsyncSync(descriptor);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    fs.renameSync(temporary, target);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
 /** 把接口提交的 { "persona.name": "新名字" } 写进 config.json 并立刻生效 */
 function applyConfigPatch(runtime, patch) {
   if (!isPlainObject(patch)) throw new Error('patch 要是 { 字段名: 新值 } 这样的对象');
@@ -226,8 +248,7 @@ function applyConfigPatch(runtime, patch) {
   }
   if (!changed.length) return { changed, cleared: [] };
   for (const [p, next] of pending) setByPath(raw, p, next);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + '\n', 'utf8');
+  writeConfigAtomic(file, raw);
   const cleared = clearSettingsShadow(runtime, changed);
   reloadRuntimeConfig(runtime);
   runtime.stickerService?.reconcile();
@@ -279,7 +300,10 @@ function watchConfigFile(runtime) {
   const file = runtime.config.paths.configFile;
   let timer = null;
   try {
-    const watcher = fs.watch(file, () => {
+    const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
+    // The file inode can change on each save. Watch its directory instead.
+    const watcher = fs.watch(path.dirname(target), (_event, name) => {
+      if (name && name !== path.basename(file) && name !== path.basename(target)) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
@@ -288,7 +312,7 @@ function watchConfigFile(runtime) {
           JSON.parse(raw); // 先确认是合法 JSON，写坏了就别覆盖内存里的好配置
           reloadRuntimeConfig(runtime);
           runtime.stickerService?.reconcile();
-                  if (runtime.llm && typeof runtime.llm.reload === 'function') runtime.llm.reload();
+          if (runtime.llm && typeof runtime.llm.reload === 'function') runtime.llm.reload();
           runtime.logger.info('config.json 已重新加载（改动已生效，不用重启）');
         } catch (err) {
           runtime.logger.warn(`config.json 改了但没读成功，先按老配置跑：${err && err.message}`);
@@ -347,13 +371,10 @@ function saveConfigPatch(config, patch) {
       );
     }
   }
-  for (const [dotted, next] of pending) {
-    setByPath(raw, dotted, next);
-    // 立刻改内存里的那份（bot / llm 拿的都是同一个 config 引用）
-    setByPath(config, dotted, next);
-  }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(raw, null, 2) + '\n', 'utf8');
+  for (const [dotted, next] of pending) setByPath(raw, dotted, next);
+  writeConfigAtomic(file, raw);
+  // 只有已保存的设置才影响内存中的机器人。
+  for (const [dotted, next] of pending) setByPath(config, dotted, next);
   return pending.map(([dotted]) => dotted);
 }
 
