@@ -630,6 +630,57 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                 else:
                     delay.assert_called_once_with(0.14)
 
+    def test_delayed_direction_uses_fresh_rows_without_charging_an_unproven_candidate(self):
+        bounds = (0, 0, 500, 500)
+        app = object()
+        body = "这里是刚出现的同话题普通发言"
+        rows = [("前面还在聊同一个话题", (0, 360, 500, 55)), (body, (0, 475, 500, 55))]
+        shifted = [(rows[0][0], (0, 300, 500, 55)), (body, (0, 365, 500, 55))]
+        for side in ("incoming", "outgoing", None):
+            with self.subTest(side=side):
+                self.configure(True)
+                jobs = Queue()
+                settler = bridge.PublicQuestionSettleQueue(delay=1.5)
+                self.args.auto_limiter = Mock(take=Mock(return_value=True))
+                clock = Mock(return_value=123.0)
+                with patch.multiple(
+                    bridge, get_app=Mock(return_value=app), chat_title=Mock(return_value=GROUP),
+                    app_memory_account=Mock(return_value="fixture-account"),
+                    read_messages=Mock(return_value=(bounds, shifted)),
+                    avatar_side=Mock(return_value=None), _composer_has_text=Mock(return_value=False),
+                    core_target=Mock(return_value=("http://127.0.0.1:41143", {"x-unified-token": "test"})),
+                ), patch.object(bridge.time, "sleep"), patch.object(bridge.time, "monotonic", clock):
+                    self.assertFalse(bridge.handle_rows(
+                        app, rows, 1, bounds, GROUP, self.args, jobs,
+                        public_question_settler=settler, memory_account="fixture-account"))
+                    self.assertTrue(jobs.empty())
+                    self.args.auto_limiter.take.assert_not_called()
+
+                    self.assertIsNone(settler.due_trace(GROUP, 124.0))
+                    trace = settler.due_trace(GROUP, 124.5)
+                    self.assertIsNotNone(trace)
+                    trace_at = lambda i: bridge.stable_message_trace(
+                        GROUP, shifted, i, account="fixture-account")
+                    self.assertTrue(bridge.latest_candidate_matches(
+                        shifted, trace, trace_at, bridge.eligible_auto_text))
+                    newer = shifted + [("来了另一条新的普通消息", (0, 430, 500, 55))]
+                    self.assertFalse(bridge.latest_candidate_matches(
+                        newer, trace, lambda i: bridge.stable_message_trace(
+                            GROUP, newer, i, account="fixture-account"), bridge.eligible_auto_text))
+                    settler.cancel(GROUP)
+                    clock.return_value = 124.5
+                    bridge.avatar_side.return_value = (side, 5) if side else None
+                    accepted = bridge.handle_rows(
+                        app, shifted, 1, bounds, GROUP, self.args, jobs, public_question_settler=settler,
+                        public_question_settled_trace=trace, memory_account="fixture-account")
+                    self.assertEqual(accepted, side == "incoming")
+                    self.assertFalse(settler.has_pending)
+                    if side == "incoming":
+                        self.assertEqual(jobs.get_nowait()[2]["msg_id"], trace)
+                    else:
+                        self.assertTrue(jobs.empty())
+                    self.args.auto_limiter.take.assert_not_called()
+
     def test_disabled_ordinary_messages_do_not_enter_queue_but_native_mentions_do(self):
         self.configure(False)
         self.assertTrue(self.ingest(direct=False).empty())

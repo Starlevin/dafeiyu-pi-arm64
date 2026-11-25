@@ -2452,6 +2452,20 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             side_cache[rkey] = side[0] if side else None
         if not side or side[0] != "incoming" or chat_title(app) != target:
             if not side and is_group:
+                # Scrolling can move the new row during the fast avatar retry.
+                # Reuse the quiet-window check with its fresh viewport and text
+                # identity. Never reserve a reply until direction is proven.
+                if (auto_candidate and not quoted and not media and i + 1 == len(rows)
+                        and rect is not None and public_question_settler is not None
+                        and public_question_settled_trace is None and app is not None
+                        and get_app() == app and chat_title(app) == target
+                        and (not memory_account or app_memory_account(app) == memory_account)):
+                    trace = stable_message_trace(
+                        target, rows, i,
+                        account=memory_account or os.environ.get("DAFEIYU_WECHAT_ACCOUNT", ""))
+                    public_question_settler.stage(target, trace, time.monotonic())
+                    log("public_question_settle", result="direction_pending")
+                    continue
                 record(health, "received", "group", trace)
                 record(health, "mention", "direction_unverified", trace, failed=True)
             continue
