@@ -128,6 +128,11 @@
   var liveFrame = null;
   var liveRetireTimer = 0;
   var liveStill = null;
+  var pendingLiveStill = null;
+  var failedStillSource = "";
+  var liveVideoUnavailable = false;
+  var motionPreference = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+  var dataConnection = navigator.connection;
   var adaptiveEco = false;
 
   // ---- Boot Core Modules ----
@@ -334,16 +339,47 @@
     var chrome = /Chrome\/(\d+)/i.exec(ua);
     return prefPerf === "eco" || adaptiveEco || !window.EventSource ||
       (android && Number(android[1]) <= 9) || (chrome && Number(chrome[1]) <= 66) ||
-      (navigator.connection && navigator.connection.saveData) ||
-      (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) ||
+      (dataConnection && dataConnection.saveData) || (motionPreference && motionPreference.matches) ||
       (packLoader.isH264Supported && !packLoader.isH264Supported());
+  }
+
+  function prepareLiveStill(layer) {
+    var src = window.innerHeight > window.innerWidth
+      ? "./home/assets/rooms/fallback-whale-android.png"
+      : "./home/assets/rooms/fallback-whale-pc.png";
+    if (failedStillSource !== src) failedStillSource = "";
+    if ((liveStill && liveStill.getAttribute("src") === src) || failedStillSource === src) {
+      pendingLiveStill = null;
+      return;
+    }
+    if (pendingLiveStill && pendingLiveStill.getAttribute("src") === src) return;
+
+    var next = makeEl("img", "fh-live-static");
+    next.alt = "";
+    pendingLiveStill = next;
+    next.addEventListener("load", function () {
+      if (pendingLiveStill !== next) return;
+      pendingLiveStill = null;
+      layer.appendChild(next);
+      if (liveStill) layer.removeChild(liveStill);
+      liveStill = next;
+      renderer.pause();
+      syncStageFallback();
+    });
+    next.addEventListener("error", function () {
+      if (pendingLiveStill !== next) return;
+      pendingLiveStill = null;
+      failedStillSource = src;
+      syncStageFallback();
+    });
+    next.src = src;
   }
 
   function syncLiveScene() {
     var layer = $("fh-live-layer");
     if (!layer) return;
     var videoSelected = currentTheme === "video" && currentForm === "adult";
-    var still = videoSelected && lightweightVideo();
+    var still = videoSelected && (lightweightVideo() || liveVideoUnavailable);
     var consoleCover = drawerOpen && document.body.classList.contains("console-home");
     var visible = !document.hidden && !consoleCover;
     var useFrame = videoSelected && !still && visible;
@@ -372,17 +408,12 @@
       liveRetireTimer = 0;
       liveFrame.classList.remove("retiring");
     }
-    if (!still && liveStill) {
+    var frameReady = useFrame && liveFrame && liveFrame.classList.contains("ready");
+    if (still && visible) prepareLiveStill(layer);
+    else pendingLiveStill = null;
+    if ((!videoSelected || frameReady) && liveStill) {
       layer.removeChild(liveStill);
       liveStill = null;
-    } else if (still && !liveStill) {
-      liveStill = makeEl("img", "fh-live-static");
-      liveStill.alt = "";
-      liveStill.addEventListener("load", syncStageFallback);
-      liveStill.src = window.innerHeight > window.innerWidth
-        ? "./home/assets/rooms/fallback-whale-android.png"
-        : "./home/assets/rooms/fallback-whale-pc.png";
-      layer.appendChild(liveStill);
     }
     if (useFrame && !liveFrame) {
       var frame = makeEl("iframe", "fh-live-frame");
@@ -396,11 +427,12 @@
         if (liveFrame === frame && !frame.classList.contains("ready")) {
           layer.removeChild(frame);
           liveFrame = null;
-          syncStageFallback();
+          liveVideoUnavailable = true;
+          syncLiveScene();
         }
       }, 15000);
     }
-    if (!visible || still || (useFrame && liveFrame.classList.contains("ready"))) {
+    if (!visible || liveStill || frameReady) {
       renderer.pause();
     } else {
       renderer.resume();
@@ -413,12 +445,13 @@
         event.source !== liveFrame.contentWindow || !event.data ||
         event.data.type !== "dafeiyu-live-ready") return;
     liveFrame.classList.add("ready");
-    if (!liveRetireTimer) renderer.pause();
-    syncStageFallback();
+    if (!liveRetireTimer) syncLiveScene();
   });
 
   function applyTheme(nextTheme) {
     if (THEME_ORDER.indexOf(nextTheme) < 0) nextTheme = "day";
+    liveVideoUnavailable = false;
+    failedStillSource = "";
     currentTheme = nextTheme;
     savePref(PREF_KEYS.theme, currentTheme);
     renderer.setTheme(currentTheme === "video" ? "day" : currentTheme);
@@ -1717,8 +1750,21 @@
     syncLiveScene();
     if (!document.hidden) eventAdapter.pollOnce();
   });
+  if (motionPreference && motionPreference.addEventListener) {
+    motionPreference.addEventListener("change", syncLiveScene);
+  } else if (motionPreference && motionPreference.addListener) {
+    motionPreference.addListener(syncLiveScene);
+  }
+  if (dataConnection && dataConnection.addEventListener) {
+    dataConnection.addEventListener("change", syncLiveScene);
+  }
 
   window.addEventListener("online", function () {
+    if (liveVideoUnavailable || failedStillSource) {
+      liveVideoUnavailable = false;
+      failedStillSource = "";
+      syncLiveScene();
+    }
     eventAdapter.retryNow();
     showToast("网络已恢复，正在同步最新状态", 2000);
   });
@@ -1728,11 +1774,13 @@
 
   window.addEventListener("resize", function () {
     renderer.resize();
+    syncLiveScene();
     syncViewportChrome();
   });
   window.addEventListener("orientationchange", function () {
     setTimeout(function () {
       renderer.resize();
+      syncLiveScene();
       syncViewportChrome();
     }, 180);
   });
