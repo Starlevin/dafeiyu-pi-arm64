@@ -597,6 +597,39 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                 else:
                     confirm.assert_not_called()
 
+    def test_confirmed_memory_is_queued_without_waiting_for_swift(self):
+        self.configure(True)
+        self.args._swift_memory_receipts = Queue(maxsize=1)
+        receipt = str(uuid.uuid4())
+
+        def send(_target, _reply, reserve, **_):
+            reserve()
+            return "visible_outgoing"
+
+        with patch.object(bridge, "confirm_swift_memory") as confirm:
+            self.deliver(None, send, _swift_memory_receipt=receipt)
+        confirm.assert_not_called()
+        self.assertEqual(self.args._swift_memory_receipts.get_nowait(), (receipt, "fixture-trace"))
+
+    def test_swift_confirmation_retries_transient_errors_only(self):
+        receipt = str(uuid.uuid4())
+        trace = "a" * 64
+        route = SimpleNamespace(swift_pilot_url=lambda: ("http://127.0.0.1:41143", "fixture"))
+        for results, requests, expected in (
+            ([{"error": "TimeoutError"}, {"ok": True}], 2, "stored"),
+            ([{"error": "core_connection_refused"}, {"error": "http_503"}, {"ok": True}], 3, "stored"),
+            ([{"error": "http_404"}, {"ok": True}], 1, "unavailable"),
+            ([{"error": "http_403"}, {"ok": True}], 1, "unavailable"),
+        ):
+            with self.subTest(results=results), patch.object(bridge, "group_routes", route), \
+                    patch.object(bridge, "_ask_core_once", side_effect=results) as post, \
+                    patch.object(bridge.time, "sleep"), patch.object(bridge, "log") as log:
+                bridge.confirm_swift_memory(receipt, trace)
+                self.assertEqual(post.call_count, requests)
+                self.assertTrue(all(call.args[1:3] == ("/api/memory/confirmed", {"receipt": receipt})
+                                    for call in post.call_args_list))
+                log.assert_called_once_with("swift_memory", trace=trace, status=expected)
+
     def test_compatibility_persona_uses_swift_scope_and_reloads_on_next_message(self):
         path = self.path.with_name("unified-wechat-group-personas.json")
         scope = "ba5094ec427ac8a09855653d71fe55d54c865d585396f3f016b28257e06604db"

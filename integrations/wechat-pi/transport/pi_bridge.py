@@ -8,7 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 import re
 import stat
 import sys
@@ -1661,14 +1661,37 @@ def confirm_compat_memory(receipt, account, trace, token):
 
 
 def confirm_swift_memory(receipt, trace):
-    endpoint = group_routes.swift_pilot_url() if group_routes is not None else None
-    if endpoint is None:
-        log("swift_memory", trace=trace, status="unavailable")
-        return
-    url, token = endpoint
-    result = _ask_core_once(url, "/api/memory/confirmed", {"receipt": receipt}, "", 0.5,
-                            {"x-unified-token": token})
-    log("swift_memory", trace=trace, status="stored" if result.get("ok") else "unavailable")
+    # Only the idempotent memory acknowledgement is retried. The chat send
+    # and its outbound trace reservation have already finished.
+    retryable = {"TimeoutError", "ConnectionResetError", "ConnectionAbortedError",
+                 "BrokenPipeError", "RemoteDisconnected", "core_connection_refused",
+                 "http_500", "http_502", "http_503", "http_504"}
+    for delay in (0, 0.2, 0.6):
+        if delay:
+            time.sleep(delay)
+        endpoint = group_routes.swift_pilot_url() if group_routes is not None else None
+        if endpoint is None:
+            continue
+        url, token = endpoint
+        result = _ask_core_once(url, "/api/memory/confirmed", {"receipt": receipt}, "", 0.5,
+                                {"x-unified-token": token})
+        if result.get("ok") is True:
+            log("swift_memory", trace=trace, status="stored")
+            return
+        if result.get("error") not in retryable:
+            break
+    log("swift_memory", trace=trace, status="unavailable")
+
+
+def process_swift_memory_receipts(receipts):
+    while True:
+        receipt, trace = receipts.get()
+        try:
+            confirm_swift_memory(receipt, trace)
+        except Exception:
+            log("swift_memory", trace=trace, status="unavailable")
+        finally:
+            receipts.task_done()
 
 
 # --------------------------------------------------- opt-in state-based UI wait --
@@ -2854,7 +2877,15 @@ def deliver_ready(replies, args, health=None, *, token=""):
                success=confirmed, failed=not confirmed, unknown=submitted and not confirmed)
         if confirmed and submitted and media is None:
             if response.get("_swift_memory_receipt"):
-                confirm_swift_memory(response["_swift_memory_receipt"], trace)
+                receipt = response["_swift_memory_receipt"]
+                receipts = getattr(args, "_swift_memory_receipts", None)
+                if receipts is None:
+                    confirm_swift_memory(receipt, trace)
+                else:
+                    try:
+                        receipts.put_nowait((receipt, trace))
+                    except Full:
+                        log("swift_memory", trace=trace, status="queue_full")
             elif memory_account and token and response.get("_compat_memory_receipt"):
                 confirm_compat_memory(response["_compat_memory_receipt"], memory_account, trace, token)
         if confirmed and media is None and isinstance(response.get("sticker"), dict):
@@ -3001,6 +3032,9 @@ def main():
         sweep = WalSweepQueue(time.monotonic)
         print("wal_sweep_enabled", flush=True)
     if not args.dry_run:
+        args._swift_memory_receipts = Queue(maxsize=16)
+        Thread(target=process_swift_memory_receipts, args=(args._swift_memory_receipts,),
+               name="swift-memory-receipts", daemon=True).start()
         Thread(target=generate_replies, args=(jobs, replies, token, health,
                                              args.media_dir, ready_signal, wake_signal), daemon=True).start()
     wal_wake = None
