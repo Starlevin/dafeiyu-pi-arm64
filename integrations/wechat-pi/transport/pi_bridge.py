@@ -2375,7 +2375,8 @@ def _composer_has_text(app):
         return False
 
 
-def _retry_direct_mention_side(app, rows, index, bounds, target, memory_account):
+def _retry_group_message_side(app, rows, index, bounds, target, memory_account, *,
+                              require_latest=False):
     """Retry a transient avatar paint only while the original view is still proven."""
     try:
         if chat_title(app) != target:
@@ -2387,6 +2388,8 @@ def _retry_direct_mention_side(app, rows, index, bounds, target, memory_account)
             return None
         current_bounds, current_rows = read_messages(app)
         if current_bounds != bounds or len(current_rows) < len(rows) or current_rows[:len(rows)] != rows:
+            return None
+        if require_latest and index + 1 != len(current_rows):
             return None
         side = avatar_side(rows[index][1], bounds)
         if not side or chat_title(app) != target:
@@ -2442,10 +2445,11 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                 record(health, "mention", "no_direct_mention", trace)
             continue
         side = avatar_side(rect, bounds)
-        if (side is None and is_group and not auto_candidate
-                and app is not None and not direction_retried):
+        if (side is None and is_group and app is not None and not direction_retried
+                and (not auto_candidate or i + 1 == len(rows))):
             direction_retried = True
-            side = _retry_direct_mention_side(app, rows, i, bounds, target, memory_account)
+            side = _retry_group_message_side(app, rows, i, bounds, target, memory_account,
+                                             require_latest=auto_candidate)
         if rect is not None:
             rkey = tuple(rect) if isinstance(rect, (list, tuple)) else rect
             side_cache[rkey] = side[0] if side else None

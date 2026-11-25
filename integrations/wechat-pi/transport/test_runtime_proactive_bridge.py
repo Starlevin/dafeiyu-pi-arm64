@@ -553,15 +553,15 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                     bridge.dispatch_sticker.assert_not_called()
                     bridge.send_reply.assert_not_called()
 
-    def test_direct_mention_retries_transient_avatar_without_reprocessing_ordinary_rows(self):
+    def test_direct_mention_retries_transient_avatar(self):
         self.configure(True)
         bounds = (0, 0, 500, 500)
         app = object()
         direct = (f"@大肥鱼{bridge.MENTION_TOKEN}测试复读", (0, 200, 500, 55))
-        for case in ("incoming", "outgoing", "changed", "other_account", "other_app", "ordinary"):
+        for case in ("incoming", "outgoing", "changed", "other_account", "other_app"):
             with self.subTest(case=case):
                 jobs = Queue()
-                row = ("语音里有个同话题的普通接话机会", direct[1]) if case == "ordinary" else direct
+                row = direct
                 view = [row] if case != "changed" else [("changed fixture", row[1])]
                 side = ("outgoing", 5) if case == "outgoing" else ("incoming", 5)
                 account = "other-account" if case == "other_account" else "fixture-account"
@@ -578,10 +578,57 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                         self.assertEqual(bridge.avatar_side.call_count, 2)
                     else:
                         self.assertTrue(jobs.empty())
-                    if case == "ordinary":
-                        delay.assert_not_called()
-                    else:
-                        delay.assert_called_once_with(0.14)
+                    delay.assert_called_once_with(0.14)
+
+    def test_latest_ordinary_message_retries_transient_avatar_without_guessing(self):
+        bounds = (0, 0, 500, 500)
+        app = object()
+        newest = ("这里有一条同话题的普通发言", (0, 260, 500, 55))
+        older = ("这条普通消息已经被超越", (0, 200, 500, 55))
+        for case in ("incoming", "outgoing", "newer", "changed", "other_account",
+                     "other_app", "different_group", "disabled"):
+            with self.subTest(case=case):
+                self.configure(case != "disabled")
+                jobs = Queue()
+                limiter = Mock(take=Mock(return_value=True))
+                self.args.auto_limiter = limiter
+                rows = [older, newest]
+                current_rows = rows
+                if case == "newer":
+                    current_rows = rows + [("又有新消息", (0, 320, 500, 55))]
+                if case == "changed":
+                    current_rows = [older, ("可见消息已重排", newest[1])]
+                after_paint = ("outgoing" if case == "outgoing" else "incoming", 5)
+                read_current = Mock(return_value=(bounds, current_rows))
+                with patch.multiple(
+                        bridge, get_app=Mock(return_value=object() if case == "other_app" else app),
+                        chat_title=Mock(side_effect=[GROUP, "另一个群"] if case == "different_group" else None,
+                                        return_value=GROUP),
+                        app_memory_account=Mock(return_value=(
+                            "second-account" if case == "other_account" else "fixture-account")),
+                        read_messages=read_current,
+                        avatar_side=Mock(side_effect=[None, None, after_paint]),
+                        _composer_has_text=Mock(return_value=False)), \
+                     patch.object(bridge.time, "sleep") as delay:
+                    handled = bridge.handle_rows(app, rows, 0, bounds, GROUP, self.args, jobs,
+                                                 memory_account="fixture-account")
+                if case == "incoming":
+                    self.assertTrue(handled)
+                    target, is_group, payload, *_ = jobs.get_nowait()
+                    self.assertEqual((target, is_group), (GROUP, True))
+                    self.assertEqual(payload["text"], newest[0])
+                    self.assertFalse(payload["at_me"])
+                    self.assertTrue(payload["group_auto_reply_window_ok"])
+                    limiter.take.assert_called_once()
+                    read_current.assert_called_once_with(app)
+                else:
+                    self.assertFalse(handled)
+                    self.assertTrue(jobs.empty())
+                    limiter.take.assert_not_called()
+                if case == "disabled":
+                    delay.assert_not_called()
+                else:
+                    delay.assert_called_once_with(0.14)
 
     def test_disabled_ordinary_messages_do_not_enter_queue_but_native_mentions_do(self):
         self.configure(False)
