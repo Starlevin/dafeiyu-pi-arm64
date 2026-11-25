@@ -188,7 +188,7 @@ class MomentsService {
     }
   }
   saveState() {
-    if (!this.dir) return;
+    if (!this.dir) return false;
     try {
       fs.mkdirSync(this.dir, { recursive: true });
       const file = path.join(this.dir, STATE_FILE);
@@ -199,25 +199,22 @@ class MomentsService {
         count: this.state.count,
       }));
       fs.renameSync(file + '.tmp', file);
+      return true;
     } catch (err) {
       this.logger?.warn?.('朋友圈点赞状态保存失败 type=' + (err && (err.code || err.name) || 'Error'));
+      return false;
     }
   }
-  markAttempt(id) {
+  reserveAutoLikeAttempt(id) {
     const key = clean(id, 120);
-    if (!key) return;
+    if (!key || Object.hasOwn(this.state.attempted, key) || this.autoLikeRemaining() <= 0) return false;
     this.state.attempted[key] = this.now();
+    this.state.count += 1;
     const keys = Object.keys(this.state.attempted);
     if (keys.length > 1000) {
       for (const old of keys.slice(0, keys.length - 1000)) delete this.state.attempted[old];
     }
-    this.saveState();
-  }
-  markLiked(id) {
-    const key = clean(id, 120);
-    if (!key) return;
-    this.state.liked.add(key);
-    this.markAttempt(key);
+    return this.saveState();
   }
   autoLikeLimit() {
     const n = Number(this.config && this.config.moments && this.config.moments.autoLikeMaxPerDay);
@@ -337,12 +334,10 @@ class MomentsService {
     try {
       const picks = await this.judgeLikes(items);
       const byId = new Map(items.map((x) => [x.id, x]));
-      const doneIds = new Set();
-      let done = 0;
+      let outcome = 'skipped';
       for (const pick of picks) {
         if (this.autoLikeRemaining() <= 0) break;
-        if (doneIds.has(pick.id) || this.state.attempted[pick.id]) continue;
-        doneIds.add(pick.id);
+        if (Object.hasOwn(this.state.attempted, pick.id)) continue;
         const item = byId.get(pick.id);
         if (!item) continue;
         const keyword = keywordOf(item.text, 20);
@@ -352,23 +347,18 @@ class MomentsService {
           && keywordOf(other.text, 20) === keyword)) continue;
         let queued;
         try {
+          this.idle();
+          if (!this.reserveAutoLikeAttempt(item.id)) break;
           queued = this.action({ action: 'like', publisher: item.nickname, keyword, account: job.account });
         } catch (err) {
-          if (err && err.statusCode === 409) break;
-          continue;
+          break;
         }
         const final = await this.waitForJob(queued.id, AUTO_LIKE_TIMEOUT_MS);
-        // 不管成功失败都记一次，绝不自动重试：点赞按钮再点一次可能变成取消。
-        this.markAttempt(item.id);
-        if (final && final.status === 'unconfirmed') {
-          this.markLiked(item.id);
-          this.state.day = dayKey(this.now());
-          this.state.count += 1;
-          this.saveState();
-        }
-        done += 1;
+        outcome = ['unconfirmed', 'failed'].includes(final?.status) ? final.status : 'unknown';
+        // 界面操作不是微信服务器回执。已登记尝试，不标成功，也不继续本批。
+        break;
       }
-      this.logger?.info?.(`朋友圈自动点赞：候选=${items.length} 选中=${picks.length} 执行=${done}`);
+      this.logger?.info?.(`朋友圈自动点赞：候选=${items.length} 选中=${picks.length} 结果=${outcome}`);
     } catch (err) {
       this.logger?.warn?.('朋友圈自动点赞失败 type=' + (err && (err.code || err.name) || 'Error'));
     } finally {
