@@ -5,6 +5,7 @@ import importlib.util
 import json
 import sys
 import tempfile
+import threading
 import time
 import types
 from pathlib import Path
@@ -39,12 +40,63 @@ def load():
     return mod
 
 
+def test_late_model_success_cannot_clear_a_newer_failure(hub):
+    primary = {'id': 'primary', 'name': 'Primary', 'fallback_to': 'backup'}
+    backup = {'id': 'backup', 'name': 'Backup'}
+    entered = threading.Event()
+    release = threading.Event()
+    routes = []
+    failures = []
+    successes = []
+
+    def invoke(profile, body):
+        case = body['messages'][0]['content']
+        if profile is primary and case == 'older request':
+            entered.set()
+            assert release.wait(5)
+        if profile is primary and case == 'newer failure':
+            raise hub.Fallbackable('http_503')
+        return {'choices': [{'message': {'content': profile['id']}}]}
+
+    def request(case):
+        return hub.complete({'model': 'primary', 'messages': [{'role': 'user', 'content': case}]})
+
+    def older_request():
+        try:
+            successes.append(request('older request'))
+        except BaseException as error:
+            failures.append(error)
+
+    hub.profiles = lambda: [primary, backup]
+    hub._invoke = invoke
+    hub.route_log = routes.append
+    with tempfile.TemporaryDirectory() as directory:
+        hub.COOLDOWN_FILE = Path(directory) / 'cooldown.json'
+        worker = threading.Thread(target=older_request, daemon=True)
+        worker.start()
+        try:
+            assert entered.wait(5)
+            assert request('newer failure')['choices'][0]['message']['content'] == 'backup'
+            recorded = hub.cooldown_state()[primary['id']]
+        finally:
+            release.set()
+            worker.join(5)
+        assert not worker.is_alive() and not failures and successes
+        assert hub.cooldown_state().get(primary['id']) == recorded
+        assert request('during cooldown')['choices'][0]['message']['content'] == 'backup'
+        assert routes[-1]['reason'] == 'cooldown_http_503'
+        hub.set_cooldown(primary['id'], 'http_503', seconds=-1)
+        assert request('after cooldown')['choices'][0]['message']['content'] == 'primary'
+        assert primary['id'] not in hub.cooldown_state()
+    print('late_model_success_preserves_newer_cooldown: PASS')
+
+
 def test_short_wechat_blank_backup_retries_once(hub):
     primary = {'id': 'workbuddy-deepseek', 'name': 'test', 'protocol': 'chat',
                'base_url': hub.GATEWAY_URL, 'fallback_to': 'sensenova-6.8-flash-lite'}
     backup = {'id': 'sensenova-6.8-flash-lite', 'name': 'test backup', 'protocol': 'chat'}
     hub.profiles = lambda: [primary, backup]
-    hub.cooldown_until = lambda _profile: 0
+    hub.cooldown_state = lambda: {}
     hub.set_cooldown = lambda *_args: None
     hub.route_log = lambda _record: None
     called = []
@@ -136,7 +188,7 @@ def test_short_wechat_reply_has_its_own_budget(hub):
     hub.time = types.SimpleNamespace(monotonic=lambda: 100.0, time=lambda: 100.0,
                                      strftime=lambda *_: 'fixture')
     hub._workbuddy_model_state = lambda _: (None, 0)
-    hub.cooldown_until = lambda _: 0
+    hub.cooldown_state = lambda: {}
     hub.set_cooldown = lambda *_: None
     hub.clear_cooldown = lambda *_: None
     routes = []
@@ -179,7 +231,7 @@ def test_scored_qq_ordinary_reply_has_a_bounded_route_without_participation(hub)
     hub.time = types.SimpleNamespace(monotonic=lambda: 100.0, time=lambda: 100.0,
                                      strftime=lambda *_: 'fixture')
     hub._workbuddy_model_state = lambda _: (None, 0)
-    hub.cooldown_until = lambda _: 0
+    hub.cooldown_state = lambda: {}
     hub.set_cooldown = lambda *_: None
     hub.clear_cooldown = lambda *_: None
     routes = []
@@ -255,7 +307,7 @@ def test_short_wechat_reserves_budget_for_the_visible_reply(hub):
                'protocol': 'chat', 'base_url': hub.GATEWAY_URL, 'reasoning': 'high'}
     hub.profiles = lambda: [profile]
     hub.route_log = lambda _row: None
-    hub.clear_cooldown = lambda _profile: None
+    hub.clear_cooldown = lambda *_: None
     observed = []
     def invoke(actual, _request):
         observed.append(actual['reasoning'])
@@ -395,6 +447,7 @@ def main():
 
     test_workbuddy_account_error_is_scoped(load())
     test_workbuddy_account_snapshot_routes(load())
+    test_late_model_success_cannot_clear_a_newer_failure(load())
     test_short_wechat_reserves_budget_for_the_visible_reply(load())
     test_short_wechat_reply_has_its_own_budget(load())
     test_scored_qq_ordinary_reply_has_a_bounded_route_without_participation(load())

@@ -382,13 +382,16 @@ def cooldown_state():
     return {key: row for key, row in data.items() if isinstance(row, dict)}
 
 
-def cooldown_until(pid):
-    item = cooldown_state().get(pid) or {}
+def _cooldown_deadline(item):
     try:
         until = float(item.get('until') or 0)
         return until if math.isfinite(until) else 0.0
     except (TypeError, ValueError, OverflowError):
         return 0.0
+
+
+def cooldown_until(pid):
+    return _cooldown_deadline(cooldown_state().get(pid) or {})
 
 
 def set_cooldown(pid, reason, seconds=FALLBACK_COOLDOWN):
@@ -398,9 +401,17 @@ def set_cooldown(pid, reason, seconds=FALLBACK_COOLDOWN):
         atomic(COOLDOWN_FILE, data)
 
 
-def clear_cooldown(pid):
+_UNGUARDED_COOLDOWN_CLEAR = object()
+
+
+def clear_cooldown(pid, expected=_UNGUARDED_COOLDOWN_CLEAR):
+    # A successful request may only clear the failure it saw before starting.
+    if expected is None:
+        return
     with LOCK:
         data = cooldown_state()
+        if expected is not _UNGUARDED_COOLDOWN_CLEAR and data.get(pid) != expected:
+            return
         if data.pop(pid, None) is not None:
             atomic(COOLDOWN_FILE, data)
 
@@ -1004,12 +1015,13 @@ def complete(body):
             raise UpstreamError(503, '主通道不可用（%s），备用模型返回空回复' % reason)
         return finish(result, backup['id'], reason)
 
+    observed_cooldown = cooldown_state().get(profile['id'])
     if backup:
         account_available, observed_at = _workbuddy_model_state(profile)
         if account_available is False:
             return standby_backup(WORKBUDDY_NO_ACCOUNT)
-        if cooldown_until(profile['id']) > time.time():
-            cooldown = cooldown_state().get(profile['id']) or {}
+        cooldown = observed_cooldown or {}
+        if _cooldown_deadline(cooldown) > time.time():
             prior = cooldown.get('reason')
             if not isinstance(prior, str) or not re.fullmatch(r'[a-z0-9_]{1,50}', prior):
                 prior = 'unknown'
@@ -1024,7 +1036,7 @@ def complete(body):
         if empty_reply(result):
             raise Fallbackable('empty_reply')
         try:
-            clear_cooldown(profile['id'])
+            clear_cooldown(profile['id'], observed_cooldown)
         except OSError:
             pass  # Cooldown persistence must not determine delivery.
         return finish(result, profile['id'])
