@@ -91,9 +91,10 @@
   }
   function phaseWaypoints(phase, requested, flowGoto) {
     if (phase === "received" || phase === "thinking") {
-      return requested ? [requested].concat(phoneSequence(requested).slice(1)) : phoneSequence();
+      return requested ? [requested].concat(phoneSequence(requested).slice(1)) : [phoneNode || idleNode];
     }
-    if (phase === "replying" || phase === "sent") return requested ? [requested].concat(idleSequence(requested).slice(1)) : idleSequence();
+    if (phase === "replying") return [phoneNode || idleNode];
+    if (phase === "sent") return requested ? [requested].concat(idleSequence(requested).slice(1)) : idleSequence();
     if (phase === "idle" || phase === "error") return requested ? [requested].concat(idleSequence(requested).slice(1)) : [idleNode];
     return flowGoto && requested ? [requested] : (requested ? [requested] : [idleNode]);
   }
@@ -371,6 +372,12 @@
       if (Number.isFinite(Number(config.idle_timeout_ms))) idleDelay = Math.max(0, Number(config.idle_timeout_ms));
       return;
     }
+    var receivedAt = Date.now();
+    if (Number.isFinite(message.expires_at) && message.expires_at > 0) {
+      var remaining = Math.min(Number(message.ttl_ms), message.expires_at * 1000 - receivedAt);
+      if (remaining <= 0) return;
+      message = Object.assign({}, message, { ttl_ms: remaining });
+    }
     showText(message);
     if (message.type === "bubble") return;
     clearTimeout(streamExpiry);
@@ -379,7 +386,7 @@
       // The next server frame may already refer to the requested theme.
       // Keep only the latest playback state and preserve its original lifetime.
       pendingTheme.frame = message;
-      pendingTheme.frameAt = Date.now();
+      pendingTheme.frameAt = receivedAt;
       return;
     }
     applyPlayback(message);

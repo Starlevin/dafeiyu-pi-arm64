@@ -191,9 +191,34 @@ async function main() {
       queuedLoop && queuedLoop.visibleMs >= 600 && queuedLoop.visibleMs < 2000,
       JSON.stringify(queuedLoop));
     await cdp.js("HTMLMediaElement.prototype.play = window.fhOriginalPlay");
-    const sequences = [["received","phone_pickup"],["thinking","phone_pickup"],["replying","phone_putdown"],["sent","phone_putdown"],["error","rest"],["idle","rest"]];
-    for (const [phase, expected] of sequences) { await send(seq++, phase, phase === "thinking" ? "wechat" : "qq"); if (phase === "thinking") await sleep(1000); else await until(() => cdp.js(`window.__fishHouseLive.getState().currentNode === ${JSON.stringify(expected)}`), phase + " mapped node"); }
-    check("all phase mappings accepted in order (received/thinking to phone, reply/sent to putdown, idle/error)", true, sequences.map(s=>s.join("→")).join(", "));
+    const fallbackTraceStart = await cdp.js("window.__fhLiveNodes.length");
+    await send(seq++, "received", "wechat");
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === 'phone_pickup'"), "received picks up phone");
+    await send(seq++, "thinking", "wechat");
+    await until(() => cdp.js("window.__fishHouseLive.getState().currentNode === 'phone_loop'"), "thinking reaches phone loop");
+    const replyingSeq = seq++;
+    await send(replyingSeq, "replying", "wechat", "flow_goto", "phone_putdown");
+    await until(() => cdp.js(`window.__fishHouseLive.getState().lastSeq === ${replyingSeq}`), "replying frame accepted");
+    const replyingState = await cdp.js("window.__fishHouseLive.getState()");
+    check("fallback keeps the phone until a sent receipt",
+      replyingState.currentNode === "phone_loop" && !replyingState.pendingNode && replyingState.queued.length === 0,
+      JSON.stringify(replyingState));
+    await send(seq++, "sent", "wechat");
+    await until(() => cdp.js("window.__fhLiveNodes.length > " + fallbackTraceStart + " && window.__fhLiveNodes.slice(-1)[0] === 'rest'"),
+      "confirmed send returns to rest");
+    const fallbackTrace = (await cdp.js("window.__fhLiveNodes")).slice(fallbackTraceStart);
+    check("fallback plays one complete round trip",
+      fallbackTrace.join(",") === "phone_pickup,phone_loop,phone_putdown,rest", JSON.stringify(fallbackTrace));
+    const expiredSeq = seq++;
+    await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({type:"state",seq:expiredSeq,ts:Math.floor(Date.now()/1000)-5,source:"wechat",phase:"received",
+        node_id:"phone_pickup",orders:[{node_id:"phone_pickup"},{node_id:"phone_loop"}],bubble_text:"过期测试",
+        ttl_ms:3000,expires_at:Date.now()/1000-2}) });
+    await until(() => cdp.js(`window.__fishHouseLive.getState().lastSeq === ${expiredSeq}`), "expired frame advances sequence");
+    await sleep(300);
+    check("expired evidence cannot revive a bubble or a phone animation",
+      await cdp.js("window.__fishHouseLive.getState().currentNode === 'rest' && !window.__fishHouseLive.getState().pendingNode && document.getElementById('bubble').classList.contains('hidden')"),
+      "expired state with a valid order is ignored");
     const dedupeSeq = seq++; await send(dedupeSeq, "received"); await until(async () => (await cdp.js("window.__fishHouseLive.getState().lastSeq")) === dedupeSeq, "received seq"); await send(dedupeSeq, "thinking", "wechat"); await sleep(300); const afterDupSeq = await cdp.js("window.__fishHouseLive.getState().lastSeq");
     check("duplicate sequence ignored", afterDupSeq === dedupeSeq, `accepted seq remains ${afterDupSeq}`);
     await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({type:"bubble",seq:seq++,ts:Math.floor(Date.now()/1000),source:"qq",phase:"received",node_id:"",bubble_text:"正在处理",ttl_ms:1200}) });
