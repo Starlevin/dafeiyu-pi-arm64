@@ -2960,7 +2960,7 @@ def deliver_ready(replies, args, health=None, *, token=""):
 # 空闲/无变化/被慢轮询占用时心跳会停摆几十秒，核心 45s 阈值随即把在线桥接判成
 # 离线（fish-house /api/status 报 wechat.connected=false 的直接根因）。
 _HB_LOCK = Lock()
-_HB_STATE = {"listener": True, "uia": False}
+_HB_STATE = {"listener": False, "uia": False}
 _HB_STOP = Event()
 
 
@@ -2971,6 +2971,36 @@ def set_heartbeat_state(listener, uia):
             _HB_STATE["listener"] = listener
         if isinstance(uia, bool):
             _HB_STATE["uia"] = uia
+
+
+class ClientWindowProbe:
+    def __init__(self, health):
+        self.health = health
+        self.blocked = None
+        self.present = None
+        self.next_at = 0.0
+
+    def refresh(self, app, now):
+        """Check the observed window without navigating or scanning chats."""
+        present = app is not None
+        if present == self.present and now < self.next_at:
+            return self.blocked
+        self.present = present
+        self.next_at = now + 20.0
+        if not present:
+            self.blocked = "client_unavailable"
+        else:
+            try:
+                self.blocked = blocking_state(app)
+                if not self.blocked and not chats_list(app) and not messages_list(app):
+                    self.blocked = "window_not_ready"
+            except Exception:
+                self.blocked = "window_not_ready"
+                self.next_at = now + 2.0
+        set_heartbeat_state(self.blocked is None, False if self.blocked else None)
+        if self.health:
+            self.health.update("client", self.blocked or "window_available")
+        return self.blocked
 
 
 def start_heartbeat(token, interval=12.0):
@@ -3140,7 +3170,8 @@ def main():
     short_refresh_target = None
     known_privates = set(_private_accounts(args).keys())
     next_heartbeat = 0.0
-    next_window_check = 0.0
+    next_saved_login_check = 0.0
+    window_probe = ClientWindowProbe(health)
     if not args.dry_run:
         start_heartbeat(token)
     blocked = None
@@ -3195,6 +3226,8 @@ def main():
         app_now, current_signatures, wal_roles, wal_event_times = read_poll_hints(
             watched, wal_wake, settling=settle_priority)
         now = time.monotonic()
+        if not settle_priority:
+            blocked = window_probe.refresh(app_now, now)
         # The WAL change notifier has no chat ID or message payload. When the
         # preview remains unchanged, only the already-open and independently
         # verified conversation can get an extra read. All other sessions
@@ -3326,20 +3359,11 @@ def main():
                 if app is None:
                     if settle_due:
                         public_question_settler.cancel(target)
-                    if health:
-                        health.update("client", "client_unavailable")
                     continue
-                if time.monotonic() >= next_window_check:
-                    blocked = blocking_state(app)
-                    if not blocked and not chats_list(app) and not messages_list(app):
-                        blocked = "window_not_ready"
-                    next_window_check = time.monotonic() + 15
-                    if health:
-                        health.update("client", blocked or "window_available")
-                        if blocked == "login_required":
-                            try_saved_login(app, expected_runtime)
-                    set_heartbeat_state(blocked is None, None)
                 if blocked:
+                    if health and blocked == "login_required" and now >= next_saved_login_check:
+                        next_saved_login_check = now + 15.0
+                        try_saved_login(app, expected_runtime)
                     if settle_due:
                         public_question_settler.cancel(target)
                     continue

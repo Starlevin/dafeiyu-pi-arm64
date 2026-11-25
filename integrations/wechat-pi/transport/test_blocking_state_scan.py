@@ -1,7 +1,7 @@
 """Offline regression tests for the fail-closed blocking-state tree scan."""
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, call, patch
 
 from test_runtime_proactive_bridge import load_bridge
 
@@ -77,6 +77,46 @@ def legacy_blocking_state(root):
 
 
 class BlockingStateScanTests(unittest.TestCase):
+    def test_idle_window_probe_refreshes_without_reopening_conversations(self):
+        app = FakeNode("application", children=(FakeNode("list", "Chats"),))
+        health = Mock()
+        probe = bridge.ClientWindowProbe(health)
+        atspi = SimpleNamespace(StateType=SimpleNamespace(SHOWING=SHOWING))
+        with (patch.object(bridge, "Atspi", atspi),
+              patch.object(bridge, "_chats_cache", (None, None)),
+              patch.object(bridge, "set_heartbeat_state") as heartbeat,
+              patch.object(bridge, "open_chat") as open_chat,
+              patch.object(bridge, "read_messages") as read_messages,
+              patch.object(bridge, "try_saved_login") as saved_login):
+            for second in range(85):
+                self.assertIsNone(probe.refresh(app, now=second))
+            self.assertEqual(health.update.call_args_list, [call("client", "window_available")] * 5)
+            self.assertEqual(heartbeat.call_args_list, [call(True, None)] * 5)
+            open_chat.assert_not_called()
+            read_messages.assert_not_called()
+            saved_login.assert_not_called()
+
+    def test_window_probe_recovers_from_missing_app_or_probe_error(self):
+        app = object()
+        health = Mock()
+        probe = bridge.ClientWindowProbe(health)
+        with (patch.object(bridge, "blocking_state", side_effect=[
+                  RuntimeError("test"), "login_confirmation_required", None]),
+              patch.object(bridge, "chats_list", return_value=object()),
+              patch.object(bridge, "set_heartbeat_state") as heartbeat):
+            self.assertEqual(probe.refresh(None, now=1), "client_unavailable")
+            self.assertEqual(probe.refresh(app, now=2), "window_not_ready")
+            self.assertEqual(probe.refresh(app, now=3), "window_not_ready")
+            self.assertEqual(probe.refresh(app, now=4), "login_confirmation_required")
+            self.assertEqual(probe.refresh(None, now=5), "client_unavailable")
+            self.assertIsNone(probe.refresh(app, now=6))
+        self.assertEqual(health.update.call_args_list, [
+            call("client", "client_unavailable"), call("client", "window_not_ready"),
+            call("client", "login_confirmation_required"), call("client", "client_unavailable"),
+            call("client", "window_available"),
+        ])
+        self.assertEqual(heartbeat.call_args_list, [call(False, False)] * 4 + [call(True, None)])
+
     def test_message_viewport_lookup_skips_hidden_pages_and_chats_children(self):
         sidebar_row = FakeNode("list item", "fixture room")
         sidebar = FakeNode("list", "Chats", children=(sidebar_row,))

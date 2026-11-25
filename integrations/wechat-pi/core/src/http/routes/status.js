@@ -17,8 +17,9 @@ function bridgeDiagnostics() {
     const result = {};
     for (const key of ['client', 'last_event', 'last_failure', 'last_success', 'last_unknown']) {
       const value = data[key];
-      if (!Number.isInteger(value?.time) || !/^[a-z_]{1,32}$/.test(value.phase) ||
-          !/^[A-Za-z0-9_:-]{1,80}$/.test(value.reason)) continue;
+      if (!Number.isFinite(value?.time) || value.time <= 0 ||
+          typeof value.phase !== 'string' || !/^[a-z_]{1,32}$/.test(value.phase) ||
+          typeof value.reason !== 'string' || !/^[A-Za-z0-9_:-]{1,80}$/.test(value.reason)) continue;
       result[key] = { time: value.time, phase: value.phase, reason: value.reason };
       if (/^[a-f0-9-]{36}$/.test(value.trace)) result[key].trace = value.trace;
     }
