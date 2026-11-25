@@ -484,8 +484,15 @@ private func inbound(_ text: String = "合成消息",
         var repeated = candidate
         repeated.groupAutoReplyContext = ["机器人: 厂长开会就是这梗", related, body]
         #expect((await core.handle(repeated)).gate == "proactive_context_not_ready")
+        var closed = candidate
+        closed.groupAutoReplyContext = [related, "这件事已经说清楚了", "哈哈哈", body]
+        #expect((await core.handle(closed)).gate == "proactive_context_not_ready")
+        var onlyReaction = candidate
+        onlyReaction.groupAutoReplyContext = ["哈哈哈", body]
+        #expect((await core.handle(onlyReaction)).gate == "proactive_context_not_ready")
         #expect(await generator.value() == 0)
 
+        candidate.groupAutoReplyContext = [related, "哈哈哈", body]
         #expect((await core.handle(candidate)).reply.action == "reply")
         #expect((await core.handle(candidate)).gate == "durable_replay")
         candidate.msgId = "contextual-later"
@@ -493,7 +500,7 @@ private func inbound(_ text: String = "合成消息",
         #expect(await scorer.value() == 0)
         #expect(await generator.value() == 1)
         #expect(await recorder.contextualParticipation == [true])
-        #expect(await recorder.publicQuestionContexts == [[related]])
+        #expect(await recorder.publicQuestionContexts == [[related, "哈哈哈"]])
         #expect(await recorder.publicQuestionFast == [false])
     }
 
@@ -529,8 +536,13 @@ private func inbound(_ text: String = "合成消息",
         event.groupAutoReplyContext = [body]
         #expect((await core.handle(event)).gate == "proactive_context_not_ready")
         event.msgId = "paraphrase-just-replied"
-        event.groupAutoReplyContext = ["机器人: 我刚收好东西了", body]
+        event.groupAutoReplyContext = ["机器人: 我刚收好东西了", "哈哈哈", body]
         #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+        var laughter = event
+        laughter.msgId = "paraphrase-laughter-only"
+        laughter.text = "哈哈哈哈哈"
+        laughter.groupAutoReplyContext = [previous, laughter.text]
+        #expect((await core.handle(laughter)).gate == "proactive_context_not_ready")
         #expect(await calls.value() == 0)
 
         event.msgId = "paraphrase-high"

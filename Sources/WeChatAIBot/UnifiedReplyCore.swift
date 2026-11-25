@@ -989,6 +989,11 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         return groupMemoryFollowup?.firstMatch(in: text, range: range) != nil
     }
 
+    private static func isLightGroupReaction(_ text: String) -> Bool {
+        let topic = text.lowercased().filter { $0.isLetter || $0.isNumber }
+        return topic.range(of: #"^(?:哈{2,}|h{3,}|233+|笑死了?)$"#, options: .regularExpression) != nil
+    }
+
     private static func hasContextualOpening(_ body: String, window: [String],
                                              allowSemanticMatch: Bool) -> Bool {
         let stops = ["@", "＠", "你", "私聊", "已解决", "已经解决", "解决了", "不用了", "算了", "谢谢"]
@@ -996,8 +1001,9 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         let topic = text.lowercased().filter { $0.isLetter || $0.isNumber }
         let prior = window.dropLast().suffix(3)
         guard (4...125).contains(body.count), text == body, topic.count >= 4,
-              !stops.contains(where: body.contains),
-              let latest = prior.last, !latest.hasPrefix("机器人: ") else {
+              !stops.contains(where: body.contains), !isLightGroupReaction(text),
+              let latest = prior.last(where: { !isLightGroupReaction($0) }),
+              !latest.hasPrefix("机器人: ") else {
             return false
         }
         let previousTopic = latest.lowercased().filter { $0.isLetter || $0.isNumber }
