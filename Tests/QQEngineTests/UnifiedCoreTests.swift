@@ -1453,6 +1453,42 @@ private func inbound(_ text: String = "合成消息",
         #expect(await recorder.systemPrompts.last?.contains("当前会话唯一生效性格：雌小鬼") == true)
     }
 
+    @Test func directWeChatReplyOnlyIncludesRelevantGroupNotes() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("journal.json")
+        var config = makeConfig(allowed: ["fixture-group", "other-group"], maxPerMinute: 20)
+        config.allowedAccounts = ["fixture-account"]
+        config.confirmedWeChatMemoryEnabled = true
+        let recorder = RequestRecorder()
+        let generator = FixtureReplyGenerator(replyJSON: validJSON("合成短回复"), fail: false,
+                                              calls: CallCounter(), recorder: recorder)
+        let journal = UnifiedIdempotencyJournal(fileURL: file)
+        let core = UnifiedReplyCore(config: config, generator: generator, journal: journal)
+        for (index, entry) in [
+            ("fixture-group", "记住事项：团建集合地点＝新校区东门"),
+            ("fixture-group", "记住偏好：周报版式＝三栏"),
+            ("other-group", "记住事项：团建集合地点＝图书馆西门"),
+        ].enumerated() {
+            let outcome = await core.handle(inbound(entry.1, chatId: entry.0, msgId: "standing-\(index)"))
+            let receipt = try #require(outcome.reply.memoryReceipt)
+            #expect(await core.confirmWeChatMemory(receipt))
+        }
+        let reopened = UnifiedReplyCore(config: config, generator: generator,
+                                        journal: UnifiedIdempotencyJournal(fileURL: file))
+        _ = await reopened.handle(inbound("今天风好大", msgId: "unrelated"))
+        let unrelated = try #require(await recorder.prompts.last)
+        #expect(!unrelated.contains("本群长期记录"))
+        #expect(!unrelated.contains("新校区东门"))
+        #expect(!unrelated.contains("周报版式"))
+        _ = await reopened.handle(inbound("团建集合地点在哪", msgId: "related"))
+        let related = try #require(await recorder.prompts.last)
+        #expect(related.contains("新校区东门"))
+        #expect(!related.contains("周报版式"))
+        #expect(!related.contains("图书馆西门"))
+    }
+
     @Test func memoryRecallPauseSurvivesRestartAndCorrectionWithoutAffectingOtherGroups() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

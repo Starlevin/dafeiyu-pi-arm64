@@ -64,6 +64,23 @@ struct QQMemoryBookTests {
         #expect(b.queueCount == 141); #expect(b.droppedEvents == 0); #expect((b.refusedEvents ?? 0) == 0)
         #expect(b.recent.count == 24)
     }
+    @Test func groupNotesRequireTopicOverlapButSpeakerPreferencesRemainAvailable() {
+        let expires = now.addingTimeInterval(86400)
+        let groupTask = QQMemoryItem(subject: "CONVERSATION", kind: "task", text: "团建集合地点＝新校区东门",
+                                     keywords: ["团建集合地点"], updatedAt: now, expiresAt: expires)
+        let groupPreference = QQMemoryItem(subject: "CONVERSATION", kind: "preference", text: "周报版式＝三栏",
+                                           keywords: ["周报版式"], updatedAt: now, expiresAt: expires)
+        let speakerPreference = QQMemoryItem(subject: "MEMBER_A", kind: "preference", text: "喜欢清淡晚饭",
+                                             updatedAt: now, expiresAt: expires)
+        let index = QQMemoryIndex([groupTask, groupPreference, speakerPreference])
+        #expect(index.context("今天风好大", subject: "CONVERSATION", characters: 480, now: now).isEmpty)
+        let related = index.context("团建集合地点在哪", subject: "CONVERSATION", characters: 480, now: now)
+        #expect(related.contains("新校区东门"))
+        #expect(!related.contains("周报版式"))
+        #expect(index.context("今天风好大", subject: "MEMBER_A", characters: 480, now: now).contains("清淡晚饭"))
+        #expect(index.context("今天风好大", subject: "MEMBER_B", characters: 480, now: now).isEmpty)
+    }
+
     @Test func hardCapRefusesNewExcerptsWithoutDeletingQueuedOnes() throws {
         var book = QQMemoryBook()
         for i in 0..<QQMemoryBook.pendingHardLimit {

@@ -251,10 +251,13 @@ public struct QQMemoryIndex: Sendable {
             let weight = log(1 + Double(records.count + 1) / Double(matches.count + 1))
             for id in matches where records[id]?.subject == subject { scores[id, default: 0] += weight }
         }
-        // Small persistent context: current speaker's profile and open tasks, even without word overlap.
-        for item in records.values where item.subject == subject && item.inferredFromConversation != true
-            && ["preference", "task", "legacy"].contains(item.kind) {
-            scores[item.id, default: 0] += 1
+        // Only the current speaker gets standing context. Group notes belong
+        // to a topic and should not enter an unrelated reply.
+        if subject != "CONVERSATION" {
+            for item in records.values where item.subject == subject && item.inferredFromConversation != true
+                && ["preference", "task", "legacy"].contains(item.kind) {
+                scores[item.id, default: 0] += 1
+            }
         }
         return scores.compactMap { id, score -> (QQMemoryItem, Double)? in
             guard let item = records[id], item.subject == subject,
