@@ -6,11 +6,12 @@ struct QQProactiveScorer: ReplyScoring {
     let context: [String]
     let bearer: String?
     var ordinaryConversation = false
+    var group: QQGroupContext? = nil
 
     func score(_ input: ReplyDecisionInput) async -> Double? {
         guard let bearer, !bearer.isEmpty else { return nil }
         return await QQProactiveDecision.score(context: context, bearer: bearer,
-                                              ordinaryConversation: ordinaryConversation)
+                                              ordinaryConversation: ordinaryConversation, group: group)
     }
 }
 

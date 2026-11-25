@@ -1526,7 +1526,7 @@ struct QQEngineSharedState: Sendable {
                                              enforced: settings.mode == .enforce)
                 return
             }
-            let score = await QQProactiveDecision.score(context: texts, bearer: bearer)
+            let score = await QQProactiveDecision.score(context: texts, bearer: bearer, group: context)
             let elapsed = start.duration(to: .now).components
             let latency = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
             let number = score.map { String($0) } ?? "-"
@@ -1602,7 +1602,7 @@ struct QQEngineSharedState: Sendable {
             }
             let bearer = try? self.resolveModelKey()
             let baseScorer = QQProactiveScorer(context: texts, bearer: bearer,
-                                               ordinaryConversation: swiftOrdinary)
+                                               ordinaryConversation: swiftOrdinary, group: context)
             let scorerState = QQBudgetedScorerState()
             let scorer = QQBudgetedReplyScorer(base: baseScorer, reserve: { [weak self] in
                 guard let self else { return .rejected("engine_unavailable") }
@@ -1680,7 +1680,7 @@ struct QQEngineSharedState: Sendable {
         Task { [weak self] in
             guard let self else { return }
             let scorer: (any ReplyScoring)? = v2.scoreInShadow
-                ? QQProactiveScorer(context: texts, bearer: try? self.resolveModelKey())
+                ? QQProactiveScorer(context: texts, bearer: try? self.resolveModelKey(), group: context)
                 : nil
             guard let trace = await self.replyDecisionGate.decide(
                 message: message, context: context, profile: profile, settings: v2, scorer: scorer

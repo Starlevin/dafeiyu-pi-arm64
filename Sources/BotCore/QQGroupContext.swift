@@ -59,20 +59,28 @@ public struct QQGroupContext: Sendable {
         events.last(where: { $0.subject == "BOT" }).map { (Self.readableText($0.text), $0.at) }
     }
 
-    public func context(characters: Int) -> String {
+    public func context(characters: Int, maxEvents: Int = 32, useMessageAliases: Bool = false,
+                        transformText: (String) -> String = { $0 }) -> String {
         var lines: [String] = [], used = 0
         let formatter = ISO8601DateFormatter()
-        for event in events.reversed() {
-            let text = Self.readableText(event.text)
+        let window = events.suffix(max(0, maxEvents))
+        var aliases: [String: String] = [:]
+        if useMessageAliases {
+            for (index, event) in window.enumerated() {
+                aliases[event.id] = "m\(index + 1)"
+            }
+        }
+        for event in window.reversed() {
+            let text = transformText(Self.readableText(event.text))
             let speaker = event.subject == "OWNER" ? "[OWNER] 本账号主人/开发者的人工发言" : event.subject
-            var fields = ["message": event.id, "time": formatter.string(from: event.at), "speaker": speaker,
+            var fields = ["message": aliases[event.id] ?? event.id, "time": formatter.string(from: event.at), "speaker": speaker,
                           "text": text.isEmpty ? "[媒体/表情未读取，不猜测画面或情绪]" : String(text.prefix(500))]
             if let message = messages[event.id] {
                 fields["addressedTo"] = message.mentionedUsers.map {
                     $0 == "all" ? "全体成员" : $0 == account ? "BOT（本账号）" : QQMemoryBook.subject(account: account, target: message.key, sender: $0)
                 }.joined(separator: ",")
                 if let reference = message.replyTo {
-                    fields["replyTo"] = reference
+                    fields["replyTo"] = useMessageAliases ? (aliases[reference] ?? "outside_window") : reference
                     fields["quotedSpeaker"] = self.speaker(for: reference) ?? "引用作者未核验，不猜测"
                 }
             }

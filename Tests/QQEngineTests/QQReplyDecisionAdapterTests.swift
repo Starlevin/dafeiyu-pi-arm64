@@ -23,6 +23,60 @@ import Testing
         QQScopedProactiveProfile(groupKey: groupKey, mode: .natural)
     }
 
+    @Test func scoringContextPreservesTrustedQuoteAndParticipantMetadata() throws {
+        let payload = try #require(QQProactiveDecision.scoringContext(["原消息", "引用一下"],
+                                                                       group: context(quotedSpeaker: "BOT")))
+        let lines = payload.split(separator: "\n")
+        #expect(lines.count == 2)
+        let last = try #require(lines.last)
+        let decoded = try JSONSerialization.jsonObject(with: Data(last.utf8))
+        let fields = try #require(decoded as? [String: String])
+        #expect(fields["message"] == "m2")
+        #expect(fields["replyTo"] == "m1")
+        #expect(fields["quotedSpeaker"] == "BOT")
+        #expect(fields["speaker"]?.hasPrefix("[OWNER]") == true)
+        let privateText = "示例地址 https://example.test/private 和号码 123456789，口令：sample-secret"
+        let messageID = "843721137"
+        let mention = QQIncoming(id: messageID, sender: "20002", target: "10001", group: true,
+                                 text: privateText, time: now.timeIntervalSince1970, replyTo: nil,
+                                 images: [], mentionsSelf: true, isOwner: false, mentionedUsers: ["30003"])
+        let privateGroup = try #require(QQGroupContext(
+            events: [QQMemoryEvent(id: messageID, subject: "MEMBER", text: privateText, at: now)],
+            through: messageID, messages: [messageID: mention], account: "30003"
+        ))
+        let scrubbed = try #require(QQProactiveDecision.scoringContext(["简化文本"], group: privateGroup))
+        #expect(scrubbed.contains("[省略]"))
+        let mentionedJSON = try JSONSerialization.jsonObject(with: Data(scrubbed.utf8))
+        let mentionedFields = try #require(mentionedJSON as? [String: String])
+        #expect(mentionedFields["addressedTo"] == "BOT（本账号）")
+        #expect(mentionedFields["message"] == "m1")
+        #expect(!scrubbed.contains(messageID))
+        #expect(!scrubbed.contains("example.test"))
+        #expect(!scrubbed.contains("123456789"))
+        #expect(!scrubbed.contains("sample-secret"))
+        #expect(QQProactiveDecision.scoringContext(["原消息"], group: nil) == "[\"原消息\"]")
+    }
+
+    @Test func scoringContextBoundsHistoryAndKeepsTheTrigger() throws {
+        let events = (1...12).map { index in
+            QQMemoryEvent(id: "source-\(index)", subject: index == 2 ? "BOT" : "MEMBER", text: "\(index)号测试队友",
+                          at: now.addingTimeInterval(Double(index)))
+        }
+        let trigger = QQIncoming(id: "source-12", sender: "20002", target: "10001", group: true,
+                                 text: "12号测试队友", time: now.addingTimeInterval(12).timeIntervalSince1970,
+                                 replyTo: "source-2", images: [], mentionsSelf: false, isOwner: false)
+        let group = try #require(QQGroupContext(events: events, through: trigger.id, messages: [trigger.id: trigger]))
+        let payload = try #require(QQProactiveDecision.scoringContext(["触发"], group: group))
+        let lines = payload.split(separator: "\n")
+        #expect(lines.count == 8)
+        #expect(payload.count <= 1_400)
+        #expect(lines.last?.contains("12号测试队友") == true)
+        #expect(lines.last?.contains("\"replyTo\":\"outside_window\"") == true)
+        #expect(lines.last?.contains("\"quotedSpeaker\":\"BOT\"") == true)
+        #expect(!payload.contains("4号测试队友"))
+        #expect(!payload.contains("source-"))
+    }
+
     @Test func replyToOtherIsNotMustAnswer() async {
         let input = QQReplyDecisionInputBuilder.build(
             message: QQIncoming(id: "m2", sender: "20002", target: "10001", group: true,

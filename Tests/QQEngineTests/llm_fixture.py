@@ -92,8 +92,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if mode == "slow":
             time.sleep(3)
+        content = "0.62" if self.path == "/v1/chat/completions" else "mock reply"
         self._send(200, {
-            "choices": [{"message": {"content": "mock reply"}, "finish_reason": "stop"}],
+            "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
             "usage": {"total_tokens": 7},
         })
 

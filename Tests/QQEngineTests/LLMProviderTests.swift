@@ -67,6 +67,32 @@ import BotCore
         return request["body"] as? [String: Any] ?? [:]
     }
 
+    @Test func qqScoringMakesOneBoundedRequestWithGroupContextAndKeepsLegacyText() async throws {
+        try await withFixture { port in
+            let event = QQMemoryEvent(id: "874536298", subject: "MEMBER", text: "这局节奏有点慢", at: Date())
+            let group = try #require(QQGroupContext(events: [event], through: event.id))
+            let result = await QQProactiveDecision.score(context: [event.text], bearer: "fixture",
+                                                         ordinaryConversation: true, group: group, port: port)
+            #expect(result == 0.62)
+            let first = try await stats(port: port, mode: "v1")
+            #expect(first["count"] as? Int == 1)
+            let body = try await lastBody(port: port, mode: "v1")
+            #expect(body["max_tokens"] as? Int == 12)
+            let messages = try #require(body["messages"] as? [[String: String]])
+            let user = try #require(messages.first { $0["role"] == "user" }?["content"])
+            #expect(user.contains("\"speaker\":\"MEMBER\""))
+            #expect(!user.contains(event.id))
+
+            let legacy = await QQProactiveDecision.score(context: [event.text], bearer: "fixture", port: port)
+            #expect(legacy == 0.62)
+            let second = try await stats(port: port, mode: "v1")
+            #expect(second["count"] as? Int == 2)
+            let legacyBody = try await lastBody(port: port, mode: "v1")
+            let legacyMessages = try #require(legacyBody["messages"] as? [[String: String]])
+            #expect(legacyMessages.first { $0["role"] == "user" }?["content"] == "[\"这局节奏有点慢\"]")
+        }
+    }
+
     @discardableResult
     private func reply(_ client: DeepSeekClient, thinking: Bool = false, json: Bool = false) async throws -> ModelResult {
         try await client.reply(key: "test-key", config: BotConfig(), rule: ChatRule(name: "test"),
