@@ -60,10 +60,11 @@ def visible_context(rows, index: int, side_fn=None) -> List[str]:
     """
     if not isinstance(rows, (list, tuple)) or not isinstance(index, int) or index < 0:
         return []
-    # 第一遍：收集候选之前所有可见文本（有界回看，避免 O(n) 扫全历史）
+    # 从最近的行开始，避免为最终会被丢弃的旧行采样头像。
     start = max(0, index - (MAX_PRIOR * 4))
+    end = min(index, len(rows))
     prior: List[str] = []
-    for i in range(start, min(index, len(rows))):
+    for i in range(end - 1, start - 1, -1):
         row = rows[i]
         try:
             raw = row[0]
@@ -79,19 +80,17 @@ def visible_context(rows, index: int, side_fn=None) -> List[str]:
         cleaned = scrub(raw_str) if raw_str else ""
         if side == "outgoing":
             if cleaned and cleaned.strip() not in _MEDIA_PLACEHOLDER:
-                prior = [("机器人: " + cleaned)[:MAX_CHARS]]
+                prior.append(("机器人: " + cleaned)[:MAX_CHARS])
             elif raw_str and raw_str in _MEDIA_PLACEHOLDER:
-                prior = [("机器人: " + raw_str)[:MAX_CHARS]]
-            else:
-                prior = []
-            continue
-        if not isinstance(raw, str):
-            continue
+                prior.append(("机器人: " + raw_str)[:MAX_CHARS])
+            break
         if not cleaned or cleaned.strip() in _MEDIA_PLACEHOLDER:
             continue
         prior.append(cleaned)
-    # 最近优先：只保留紧邻候选的 MAX_PRIOR 条（最旧多余部分丢弃）
-    return prior[-MAX_PRIOR:]
+        if len(prior) == MAX_PRIOR:
+            break
+    prior.reverse()
+    return prior
 
 
 def windowed_context(rows, index: int, candidate_text: str, side_fn=None) -> Tuple[List[str], bool]:
