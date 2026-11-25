@@ -545,6 +545,7 @@ def _proactive_funnel(root: Path | None) -> dict:
     truncated = False
     first_event_at = None
     last_event_at = None
+    seen_records = set()
     if root:
         for suffix in ("", ".1", ".2", ".3"):
             path = root / "run" / ("qq-bot.log" + suffix)
@@ -570,6 +571,12 @@ def _proactive_funnel(root: Path | None) -> dict:
                 event_at = float(stamp)
                 if not now - 86400 <= event_at <= now:
                     continue
+                # The archive is written before rotating the source so a
+                # failed rotation cannot lose its records.
+                record = (stamp, scope, event, reason)
+                if record in seen_records:
+                    continue
+                seen_records.add(record)
                 if first_event_at is None or event_at < first_event_at:
                     first_event_at = event_at
                 if last_event_at is None or event_at > last_event_at:

@@ -41,13 +41,12 @@ for proc in /proc/[0-9]*; do
   log "检测到已运行的引擎实例（pid=$pid），拒绝重启或杀进程"
   exit "$EX_CONFIG"
 done
-# 启动前归档上一代日志：保留最近 2 份，避免 [social_style]/[qq_reply_decision_v2]
-# 诊断行随重启被清空；权限始终 0600，日志含面板控制 URL，绝不写入 systemd journal。
+# 保留最近两份完整日志和滚出的脱敏主动发言记录。
+# 新进程单独开日志，读取控制 URL 的调用方仍只看到当前面板。
 mkdir -p -- "$(dirname -- "$LOG_FILE")"
 if [[ -e "$LOG_FILE" ]]; then
-  if [[ -e "$LOG_FILE.2" ]]; then rm -f -- "$LOG_FILE.2"; fi
-  if [[ -e "$LOG_FILE.1" ]]; then mv -f -- "$LOG_FILE.1" "$LOG_FILE.2"; fi
-  mv -f -- "$LOG_FILE" "$LOG_FILE.1"
+  ROTATOR="$(dirname -- "${BASH_SOURCE[0]}")/dafeiyu-logrotate.py"
+  timeout 20s python3 "$ROTATOR" --startup "$LOG_FILE" >/dev/null
 fi
 : > "$LOG_FILE"
 chmod 0600 "$LOG_FILE"

@@ -4,8 +4,10 @@
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -61,6 +63,68 @@ def test_rotate():
         shutil.rmtree(tmp)
 
 
+def test_restarts_keep_recent_funnel_without_copying_private_logs():
+    rot = load("logrotate_archive_test", "dafeiyu-logrotate.py")
+    with tempfile.TemporaryDirectory() as directory:
+        log = Path(directory) / "qq-bot.log"
+        stamp = int(time.time()) - 10
+        current = f"[qq_proactive_funnel] at={stamp} scope=0123456789abcdef event=confirmed reason=-\n".encode()
+        old = current.replace(str(stamp).encode(), str(stamp - 86400).encode())
+        private = b"QQ_CONTROL_URL=http://127.0.0.1:11111/#fixture-secret\n"
+        for sample in (current + old + private, b"start 2\n", b"start 3\n", b"start 4\n"):
+            log.write_bytes(sample)
+            assert rot.rotate(log, starting=True).startswith("rotated_startup")
+            assert not log.exists()
+            assert log.with_suffix(".log.1").read_bytes() == sample
+        archive = log.with_suffix(".log.3")
+        assert archive.read_bytes() == current
+        if os.name != "nt":
+            assert archive.stat().st_mode & 0o777 == 0o600
+        # A stopped rotation could have left the just-archived source in .2.
+        log.with_suffix(".log.2").write_bytes(current + private)
+        log.write_bytes(b"scheduled rotation\n")
+        rot.MAX_BYTES = 1
+        assert rot.rotate(log).startswith("rotated")
+        assert archive.read_bytes() == current
+        assert log.read_bytes() == b""
+        print("funnel history across 4 startup rotations and timer: PASS")
+
+
+def test_launcher_retains_only_the_current_panel_address_in_active_log():
+    if os.name == "nt":
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        assets = root / "Resources/QQControl"
+        assets.mkdir(parents=True)
+        for name in ("index.html", "app.js"):
+            (assets / name).write_text("fixture", encoding="utf-8")
+        binary = root / "engine"
+        binary.touch()
+        binary.chmod(0o700)
+        profile = root / "runtime-profile.sh"
+        profile.write_text(
+            'DAFEIYU_BASE="$HOME"\nDAFEIYU_BIN="$HOME/engine"\n',
+            encoding="utf-8")
+        profile.chmod(0o600)
+        log = root / "run/qq-bot.log"
+        env = {"PATH": os.environ["PATH"], "HOME": str(root),
+               "DAFEIYU_RUNTIME_PROFILE": str(profile)}
+        for n in range(4):
+            binary.write_text(
+                f'#!/bin/sh\nprintf "%s\\n" "QQ_CONTROL_URL=http://127.0.0.1:12345/#fixture-{n}"\n',
+                encoding="utf-8")
+            subprocess.run(["bash", str(HERE / "dafeiyu-launch.sh")],
+                           env=env, check=True, timeout=10)
+            assert log.read_text(encoding="utf-8").splitlines() == [
+                f"QQ_CONTROL_URL=http://127.0.0.1:12345/#fixture-{n}"
+            ]
+        assert log.stat().st_mode & 0o777 == 0o600
+        print("launcher keeps an isolated current panel address across restarts: PASS")
+
+
 if __name__ == "__main__":
     test_classify()
     test_rotate()
+    test_restarts_keep_recent_funnel_without_copying_private_logs()
+    test_launcher_retains_only_the_current_panel_address_in_active_log()

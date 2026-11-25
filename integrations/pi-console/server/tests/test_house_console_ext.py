@@ -699,6 +699,11 @@ class HouseConsoleExtTests(unittest.TestCase):
             f"[qq_proactive_funnel] at={oldest_stamp} scope={scope} event=ordinary reason=-\n",
             encoding="utf-8",
         )
+        log.with_suffix(".log.3").write_text(
+            f"[qq_proactive_funnel] at={oldest_stamp} scope={scope} event=ordinary reason=-\n"
+            f"[qq_proactive_funnel] at={stamp} scope={scope} event=confirmed reason=-\n",
+            encoding="utf-8",
+        )
         log.write_text(
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=ordinary reason=-\n"
             f"[qq_proactive_funnel] at={stamp} scope={scope} event=candidate reason=none\n"
@@ -732,7 +737,7 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(result["qqFunnel"]["lastEventAt"], float(fractional_stamp))
         self.assertEqual(result["qqFunnel"]["counts"]["ordinary"], 2)
         self.assertEqual(result["qqFunnel"]["groups"][scope]["ordinary"], 2)
-        self.assertEqual(result["qqFunnel"]["counts"]["confirmed"], 0)
+        self.assertEqual(result["qqFunnel"]["counts"]["confirmed"], 1)
         self.assertEqual(result["qqFunnel"]["scoreAfterRejectReasons"], {"new_mention": 1})
         self.assertEqual(result["qqFunnel"]["counts"]["after_enqueue_skip"], 2)
         self.assertEqual(result["qqFunnel"]["afterEnqueueSkipReasons"], {
