@@ -2342,6 +2342,29 @@ def _composer_has_text(app):
         return False
 
 
+def _retry_direct_mention_side(app, rows, index, bounds, target, memory_account):
+    """Retry a transient avatar paint only while the original view is still proven."""
+    try:
+        if chat_title(app) != target:
+            return None
+        time.sleep(0.14)
+        if get_app() != app or chat_title(app) != target:
+            return None
+        if memory_account and app_memory_account(app) != memory_account:
+            return None
+        current_bounds, current_rows = read_messages(app)
+        if current_bounds != bounds or len(current_rows) < len(rows) or current_rows[:len(rows)] != rows:
+            return None
+        side = avatar_side(rows[index][1], bounds)
+        if not side or chat_title(app) != target:
+            return None
+        if memory_account and app_memory_account(app) != memory_account:
+            return None
+        return side
+    except Exception:
+        return None
+
+
 def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                 public_question_settler=None, public_question_settled_trace=None,
                 *, rows_observed_at=None, memory_account=None):
@@ -2358,6 +2381,7 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
         if not private_id or private_id == ADMIN_LOCAL_ID:
             return False
     queued_any = False
+    direction_retried = False
     side_cache, row_side = _make_row_side_fn(bounds)
     for i in range(start, len(rows)):
         text, rect = rows[i]
@@ -2385,6 +2409,10 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                 record(health, "mention", "no_direct_mention", trace)
             continue
         side = avatar_side(rect, bounds)
+        if (side is None and is_group and not auto_candidate
+                and app is not None and not direction_retried):
+            direction_retried = True
+            side = _retry_direct_mention_side(app, rows, i, bounds, target, memory_account)
         if rect is not None:
             rkey = tuple(rect) if isinstance(rect, (list, tuple)) else rect
             side_cache[rkey] = side[0] if side else None

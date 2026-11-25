@@ -553,6 +553,36 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                     bridge.dispatch_sticker.assert_not_called()
                     bridge.send_reply.assert_not_called()
 
+    def test_direct_mention_retries_transient_avatar_without_reprocessing_ordinary_rows(self):
+        self.configure(True)
+        bounds = (0, 0, 500, 500)
+        app = object()
+        direct = (f"@大肥鱼{bridge.MENTION_TOKEN}测试复读", (0, 200, 500, 55))
+        for case in ("incoming", "outgoing", "changed", "other_account", "other_app", "ordinary"):
+            with self.subTest(case=case):
+                jobs = Queue()
+                row = ("语音里有个同话题的普通接话机会", direct[1]) if case == "ordinary" else direct
+                view = [row] if case != "changed" else [("changed fixture", row[1])]
+                side = ("outgoing", 5) if case == "outgoing" else ("incoming", 5)
+                account = "other-account" if case == "other_account" else "fixture-account"
+                with patch.multiple(
+                    bridge, get_app=Mock(return_value=object() if case == "other_app" else app),
+                    chat_title=Mock(return_value=GROUP), app_memory_account=Mock(return_value=account),
+                    read_messages=Mock(return_value=(bounds, view)),
+                    avatar_side=Mock(side_effect=[None, side]),
+                ), patch.object(bridge.time, "sleep") as delay:
+                    bridge.handle_rows(app, [row], 0, bounds, GROUP, self.args, jobs,
+                                       memory_account="fixture-account")
+                    if case == "incoming":
+                        self.assertTrue(jobs.get_nowait()[2]["at_me"])
+                        self.assertEqual(bridge.avatar_side.call_count, 2)
+                    else:
+                        self.assertTrue(jobs.empty())
+                    if case == "ordinary":
+                        delay.assert_not_called()
+                    else:
+                        delay.assert_called_once_with(0.14)
+
     def test_disabled_ordinary_messages_do_not_enter_queue_but_native_mentions_do(self):
         self.configure(False)
         self.assertTrue(self.ingest(direct=False).empty())
