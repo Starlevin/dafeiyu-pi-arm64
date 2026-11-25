@@ -277,7 +277,15 @@ public enum IdvScheduleTool {
         }
         guard !slots.isEmpty else { return nil }
         let zone = leagueToken == "IJL" ? "日本时间/JST(UTC+9)" : "北京时间/UTC+8"
-        return "\(day) \(leagueToken)（\(zone)）：" + slots.joined(separator: "；")
+        var answer = "\(day) \(leagueToken)（\(zone)）："
+        for (index, slot) in slots.enumerated() {
+            let separator = index == 0 ? "" : "；"
+            if answer.count + separator.count + slot.count > 175 {
+                return answer + "；另有 \(slots.count - index) 场见近期赛程页"
+            }
+            answer += separator + slot
+        }
+        return answer
     }
 
     /// 行内日期是否**完整匹配**（年+月+日）。支持两种真实写法：

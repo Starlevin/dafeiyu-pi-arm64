@@ -15,6 +15,13 @@ struct IdvSchedulePlannerTests {
 
     private var tonight: Date { date("2026-11-14 22:05") }
 
+    @Test func publicEventLookupDoesNotCaptureIdentityVTactics() {
+        #expect(!IdvSchedulePlanner.namesIdentityVEvent("各位，第五人格什么时候该压机？"))
+        #expect(!IdvSchedulePlanner.namesIdentityVEvent("第五人格比赛什么时候该压机？"))
+        #expect(IdvSchedulePlanner.namesIdentityVEvent("第五人格明天有比赛吗"))
+        #expect(IdvSchedulePlanner.namesIdentityVEvent("IJL 今天谁打谁"))
+    }
+
     @Test func todayWithLeagueIsUsable() throws {
         let query = try #require(IdvSchedulePlanner.plan(message: "今天IVL赛程", now: tonight))
         #expect(query.eventDate == "2026-11-14")

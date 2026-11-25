@@ -69,10 +69,13 @@ public enum IdvSchedulePlanner {
         words.contains { text.range(of: $0, options: .caseInsensitive) != nil }
     }
 
-    /// 微信快路径只根据本轮明确的游戏名或联赛取数，不从泛指的“今晚比赛”推断。
+    /// 公开问题必须点明联赛，或同时写出游戏和赛事线索；游戏战术不是赛程。
     public static func namesIdentityVEvent(_ text: String) -> Bool {
-        contains(["第五人格", "身份V", "Identity V", "深渊的呼唤"], text)
-            || text.range(of: #"(?i)(?<![a-z])(?:ivl|ijl|coa)(?![a-z])"#, options: .regularExpression) != nil
+        if text.range(of: #"(?i)(?<![a-z])(?:ivl|ijl|coa)(?![a-z])"#, options: .regularExpression) != nil
+            || text.contains("深渊的呼唤") { return true }
+        guard contains(["第五人格", "身份V", "Identity V"], text) else { return false }
+        let event = contains(["赛事", "赛程", "联赛", "对阵", "赛果", "比分", "谁打谁", "开打", "开赛"], text)
+        return event || (text.contains("比赛") && contains(["今天", "明天", "后天", "几点", "哪天"], text))
     }
 
     /// 是否在说第五人格。无游戏线索时，只有带时间词的赛程/赛果提问才算；

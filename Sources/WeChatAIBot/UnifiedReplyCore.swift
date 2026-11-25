@@ -829,8 +829,10 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         var modelCalled = false
         do {
             let result: UnifiedGenerationResult
+            var replyPersona = effective.persona
             if let local = try publicQuestionGameData?.localResult() {
                 result = UnifiedGenerationResult(text: local.text, tokens: local.tokens, sources: local.sources)
+                replyPersona.maxCharacters = 200
             } else {
                 auditModelTraceID = modelTraceID.uuidString.lowercased()
                 modelCalled = true
@@ -853,7 +855,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 return finish(stale, modelCalled: modelCalled, gate: "generation_stale")
             }
             // 9b) 用 QQPersona.decode 做同一套输出校验/越权兜底
-            let decoded = effective.persona.decode(result.text, input: body)
+            let decoded = replyPersona.decode(result.text, input: body)
             guard !decoded.isFallback else {
                 let rejected = UnifiedReply.failure("model_output_rejected", scope: scope, trace: trace)
                 await journal.complete(idemKey, reply: rejected, ok: false, at: Date().timeIntervalSince1970)

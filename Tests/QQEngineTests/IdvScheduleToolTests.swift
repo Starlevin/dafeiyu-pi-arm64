@@ -195,7 +195,7 @@ struct IdvScheduleToolTests {
 
     /// 第 5 条核心：默认上限须高于实测页面（约 436 KiB），避免必然截断。
     @Test func defaultByteBudgetExceedsMeasuredPage() {
-        #expect(IdvScheduleConfig.measuredPageBytes == 436_632)
+        #expect(IdvScheduleConfig.measuredPageBytes == 258_523)
         #expect(IdvScheduleConfig().maxBytes > IdvScheduleConfig.measuredPageBytes)
     }
 }

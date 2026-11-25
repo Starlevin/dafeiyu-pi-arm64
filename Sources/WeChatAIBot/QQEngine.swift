@@ -2120,6 +2120,7 @@ struct QQEngineSharedState: Sendable {
                     ? Self.rerankStickers(baseStickerOptions, plan: socialStylePlan)
                     : baseStickerOptions
                 var result: ModelResult
+                var replyPersona = persona
                 if !proactive && persona.rebuff(for: message.text) != nil {
                     result = ModelResult(text: "", tokens: 0, seconds: 0)
                 } else {
@@ -2149,6 +2150,7 @@ struct QQEngineSharedState: Sendable {
                         }
                         if let local = try gameData?.localResult() {
                             result = local
+                            replyPersona.maxCharacters = 200
                         } else {
                             timing?.modelStart = ContinuousClock.now
                             waitingForModel = true
@@ -2225,7 +2227,7 @@ struct QQEngineSharedState: Sendable {
                     record(target.id, .skipped, detail)
                     try persist(); continue
                 }
-                let reply = persona.decode(result.text, input: !proactive ? message.text : "主动加入群话题")
+                let reply = replyPersona.decode(result.text, input: !proactive ? message.text : "主动加入群话题")
                 if swiftOrdinary && reply.isFallback {
                     countProactive(.modelSilent, groupKey: message.key)
                     logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "invalid_model_decision")
