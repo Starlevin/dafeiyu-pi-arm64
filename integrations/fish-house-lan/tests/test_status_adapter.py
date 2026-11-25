@@ -109,6 +109,8 @@ class ActivityStatusTests(unittest.TestCase):
                     self.assertEqual(wechat["activity_state"], "thinking")
                     self.assertTrue(wechat["connected"])
                     self.assertTrue(wechat["running"])
+                    self.assertIsNone(wechat["reply_capable"])
+                    self.assertIsNone(wechat["logged_in"])
                     self.assertIn("transport", wechat)
                     self.assertIn("last_activity", wechat)
                     self.assertNotIn(trace, json.dumps(payload))
@@ -126,6 +128,28 @@ class ActivityStatusTests(unittest.TestCase):
                     expired = get_status()
                     self.assertEqual(expired["wechat"]["activity_state"], "idle")
                     self.assertIn("last_activity", expired["wechat"])
+
+                    bridge = current["gateways"][0]["bridge"]
+                    cases = [
+                        ("window_available", True, True, True, "ok", True, True),
+                        ("window_available", True, False, True, "offline", True, False),
+                        ("window_available", True, True, False, "offline", True, False),
+                        ("window_not_ready", True, True, True, "offline", None, False),
+                        ("client_unavailable", True, True, True, "offline", None, False),
+                        ("login_required", True, True, True, "qr", False, False),
+                        ("login_confirmation_required", True, True, True, "qr", False, False),
+                        ("login_required", False, True, True, "ok", None, None),
+                        ("window_available", False, False, True, "offline", None, False),
+                    ]
+                    for reason, fresh, online, listener, state, logged_in, capable in cases:
+                        with self.subTest(reason=reason, fresh=fresh, online=online, listener=listener):
+                            current["bridgeDiagnostics"] = {"fresh": fresh, "client": {"reason": reason}}
+                            bridge.update(online=online, listener=listener)
+                            status = get_status()["wechat"]
+                            self.assertEqual(status["client_state"], state)
+                            self.assertIs(status["logged_in"], logged_in)
+                            self.assertIs(status["reply_capable"], capable)
+                            self.assertEqual(status["client_reason"], reason if fresh else "")
                 finally:
                     httpd.shutdown()
                     httpd.server_close()

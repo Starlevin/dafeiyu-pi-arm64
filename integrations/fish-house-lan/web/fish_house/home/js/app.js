@@ -157,8 +157,10 @@
       var snap = eventEngine.getState();
       applyLiveStatusDots(data, snap);
       if (drawerOpen && activeTab === "console") {
-        if (apiAdapter.state.overview) renderQQOverview(snap);
-        else renderConsoleUI();
+        if (apiAdapter.state.overview) {
+          renderQQOverview(snap);
+          renderWeChatOverview();
+        } else renderConsoleUI();
       }
     },
     onConnectionChange: function (conn) {
@@ -752,6 +754,25 @@
     return "在线";
   }
 
+  function wechatReplyStatus(info) {
+    if (!info) return "收发待确认";
+    var state = info.client_state || info.clientState;
+    if (state === "disabled") return "未启用";
+    if (state === "qr") {
+      var reason = info.client_reason || info.clientReason;
+      return reason === "login_confirmation_required" ? "等待手机确认" : "需要扫码";
+    }
+    if (info.reply_capable === true) return "收发就绪";
+    if (info.logged_in === true) {
+      return info.reply_capable === false ? "已登录 · 收发暂不可用" : "已登录 · 收发待确认";
+    }
+    if (info.bridge_online === false || info.bridgeStatus === "offline") return "桥接离线";
+    if (info.reply_capable === false || state === "offline" || info.bridgeStatus === "window_pending") {
+      return "收发暂不可用";
+    }
+    return "收发待确认";
+  }
+
   function applyLiveStatusDots(data, snap) {
     if (!data) return;
     var qqDot = $("fh-qq-dot");
@@ -766,9 +787,10 @@
         : (qc === false ? "off" : "busy"));
     }
     if (data.wechat) {
-      var wc = data.wechat.connected;
-      if (wxText) wxText.textContent = wc === true ? "在线" : (wc === false ? "离线" : "待确认");
-      if (wxDot) wxDot.className = "fh-dot " + (wc === true ? "" : (wc === false ? "off" : "busy"));
+      var wx = data.wechat;
+      if (wxText) wxText.textContent = wechatReplyStatus(wx);
+      if (wxDot) wxDot.className = "fh-dot " + (wx.reply_capable === true
+        ? "" : (wx.reply_capable === false ? "off" : "busy"));
     }
   }
 
@@ -781,6 +803,14 @@
     $("fh-ov-qq").textContent = qq
       ? qqReplyStatus(qq, snap) + (model ? (" · " + model) : "")
       : "未连接";
+  }
+
+  function renderWeChatOverview() {
+    var st = apiAdapter.state;
+    var overview = st.overview && st.overview.wechat;
+    var live = st.liveStatus && st.liveStatus.wechat;
+    var model = (overview && overview.model) || (live && live.model);
+    $("fh-ov-wx").textContent = wechatReplyStatus(live || overview) + (model ? (" · " + model) : "");
   }
 
   function renderSaveBar() {
@@ -889,13 +919,8 @@
 
     // Module 1: Platform & Transport
     var ov = st.overview;
-    var live = st.liveStatus;
-    var wxInfo = (ov && ov.wechat) || (live && live.wechat) || null;
     renderQQOverview(eventEngine.getState());
-    $("fh-ov-wx").textContent = wxInfo
-      ? (wxInfo.connected === true ? "在线" : (wxInfo.connected === false ? "未连接" : "未确认")) +
-        (wxInfo.model ? (" · " + wxInfo.model) : "")
-      : "未连接";
+    renderWeChatOverview();
     $("fh-ov-transport").textContent = conn.offline ? "离线重连中" : (conn.transport.toUpperCase() + (conn.connected ? " 已连接" : " 探测中"));
     $("fh-ov-time").textContent = formatClock(st.lastOverviewAt || st.lastStatusAt);
 

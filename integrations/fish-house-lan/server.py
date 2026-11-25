@@ -139,7 +139,7 @@ CORE_STATUS_URL = "http://127.0.0.1:19301/api/status"
 # 与 adapters.WeChatAdapter 同一口径：扫码/阻断/在线/未知，绝不在缺证据时猜。
 WECHAT_SCAN_REASONS = ("login_required", "login_confirmation_required",
                        "scan_required", "qrcode_required", "logout_required")
-WECHAT_BLOCKED_REASONS = WECHAT_SCAN_REASONS + (
+WECHAT_WINDOW_REASONS = (
     "window_blocked", "window_not_ready", "client_unavailable", "client_runtime_changed")
 
 
@@ -300,8 +300,8 @@ def derive_wechat(core):
                  if isinstance(core.get("bridgeDiagnostics"), dict) else {})
     client_diag = diag_root.get("client") if isinstance(diag_root.get("client"), dict) else {}
 
-    reason = str(client_diag.get("reason") or "")
     fresh = diag_root.get("fresh") is True
+    reason = str(client_diag.get("reason") or "") if fresh else ""
     enabled = _bool(gateway.get("enabled"))
     online = _bool(bridge.get("online"))
     listener = _bool(bridge.get("listener"))
@@ -309,11 +309,11 @@ def derive_wechat(core):
     age = bridge.get("lastSeenSec")
     age = int(age) if isinstance(age, (int, float)) and not isinstance(age, bool) else None
 
-    if fresh and reason in WECHAT_SCAN_REASONS:
-        state = "qr"
-    elif enabled is False:
+    if enabled is False:
         state = "disabled"
-    elif fresh and reason in WECHAT_BLOCKED_REASONS:
+    elif reason in WECHAT_SCAN_REASONS:
+        state = "qr"
+    elif reason in WECHAT_WINDOW_REASONS:
         state = "offline"
     elif online is True:
         if listener is False or account_ok is False:
@@ -334,20 +334,24 @@ def derive_wechat(core):
     else:
         connected = running = None
 
-    client_text = {
-        "ok": "微信客户端在线",
-        "qr": "微信客户端等待扫码登录",
-        "offline": "微信本地桥接离线",
-        "disabled": "微信客户端未启用",
-    }.get(state, "微信连接状态未确认")
-
-    # 登录态只认「桥接刚探过且报 window_available」，否则如实记 None。
-    if fresh and reason == "window_available":
+    # A temporary window or bridge failure is not evidence of logout.
+    if reason == "window_available":
         logged_in = True
-    elif fresh and reason in WECHAT_BLOCKED_REASONS:
+    elif reason in WECHAT_SCAN_REASONS:
         logged_in = False
     else:
         logged_in = None
+    reply_capable = None
+    if state in ("qr", "offline", "disabled"):
+        reply_capable = False
+    elif state == "ok" and logged_in is True:
+        reply_capable = True
+    client_text = {
+        "ok": "微信收发就绪" if reply_capable else "微信桥接监听正常，收发待确认",
+        "qr": "微信客户端等待扫码或手机确认",
+        "offline": "微信本地桥接离线" if online is False else "微信暂时不能收发",
+        "disabled": "微信客户端未启用",
+    }.get(state, "微信收发状态未确认")
 
     def stat(key):
         value = gateway.get(key)
@@ -376,7 +380,7 @@ def derive_wechat(core):
         "logged_in": logged_in,
         "enabled": enabled,
         "model": str(core.get("model") or ""),
-        "reply_capable": (state == "ok" and listener is True and account_ok is not False),
+        "reply_capable": reply_capable,
         "transport": {
             "bridge_online": online,
             "listener": listener,
