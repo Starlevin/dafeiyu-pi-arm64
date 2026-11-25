@@ -428,6 +428,38 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(bridge.state_snapshot()["source"], "wechat")
             self.assertEqual(bridge.produce(), [])
 
+    def test_qq_receipt_hidden_by_new_work_still_closes_the_previous_reply(self):
+        panel = {"runtimeRecords": [
+            {"state": "queued", "timestamp": NOW - .1, "_ingress": True},
+            {"state": "confirmed", "timestamp": NOW - .4, "detail": "性格已切换为温柔"},
+            {"state": "confirmed", "timestamp": NOW - 1, "_chat": True},
+            {"state": "confirmed", "timestamp": NOW - live_ws.SENT_WINDOW_SEC, "_chat": True},
+        ]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: self.live(), lambda: panel)
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            frames = bridge.produce()
+            self.assertEqual((frames[-1]["phase"], frames[-1]["event_at"]), ("sent", NOW - 1))
+            self.assertEqual(frames[-1]["expires_at"], NOW - 1 + live_ws.SENT_WINDOW_SEC)
+            frames = bridge.produce()
+            self.assertEqual((frames[-1]["phase"], frames[-1]["event_at"]), ("received", NOW - .1))
+            self.assertEqual(bridge.produce(), [])
+
+    def test_multiple_qq_receipts_and_wechat_receipt_are_kept_in_time_order(self):
+        live = self.live(wx={"activity_state": "sent", "activity_at": NOW - 2})
+        panel = {"runtimeRecords": [
+            {"state": "generating", "timestamp": NOW - .1, "_active": True},
+            {"state": "confirmed", "timestamp": NOW - 1, "_chat": True},
+            {"state": "confirmed", "timestamp": NOW - 3, "_chat": True},
+        ]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), lambda: live, lambda: panel)
+        with patch.object(live_ws.time, "time", return_value=NOW):
+            for source, stamp in (("qq", NOW - 3), ("wechat", NOW - 2), ("qq", NOW - 1)):
+                frame = bridge.produce()[-1]
+                self.assertEqual((frame["source"], frame["phase"], frame["event_at"]),
+                                 (source, "sent", stamp))
+            self.assertEqual(bridge.produce()[-1]["phase"], "thinking")
+            self.assertEqual(bridge.produce(), [])
+
     def test_presented_receipt_does_not_resume_after_another_source_interrupts(self):
         live = self.live(wx={"activity_state": "sent", "activity_at": NOW - 2},
                          qq={"service_running": True})
@@ -852,8 +884,11 @@ class LoopbackWebSocketTests(unittest.TestCase):
 
     def test_chat_receipt_reaches_state_frame_without_detail(self):
         self.state["wechat_activity"] = "idle"
+        queued_at = time.time()
+        sent_at = queued_at - .5
         self.state["panel"] = {"runtimeRecords": [
-            {"state": "confirmed", "timestamp": int(time.time()), "_chat": True,
+            {"state": "queued", "timestamp": queued_at, "_ingress": True},
+            {"state": "confirmed", "timestamp": sent_at, "_chat": True,
              "detail": "OneBot 已接受发送 message_id=9"}]}
         sock, _ = self.connect()
         try:
@@ -861,12 +896,15 @@ class LoopbackWebSocketTests(unittest.TestCase):
             self.next_json(reader)  # config
             message, _ = self.wait_for(reader, lambda m: m.get("phase") == "sent" and m["type"] == "state")
             self.assertEqual(message["source"], "qq")
+            self.assertEqual(message["event_at"], sent_at)
             self.assertEqual(message["node_id"], "w1")
             self.assertEqual([order["node_id"] for order in message["orders"]],
                              ["pick", "ph1", "put", "w1"])
             blob = json.dumps(message, ensure_ascii=False)
             for needle in ("OneBot", "message_id", "detail", "_chat", "已接受发送"):
                 self.assertNotIn(needle, blob)
+            queued, _ = self.wait_for(reader, lambda m: m.get("phase") == "received" and m["type"] == "state")
+            self.assertEqual(queued["event_at"], queued_at)
         finally:
             sock.close()
 

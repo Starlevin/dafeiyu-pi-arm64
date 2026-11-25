@@ -511,13 +511,28 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
     return EvidenceSnapshot("qq", "idle", EVIDENCE_VERIFIED, reason="no_source", at=now)
 
 
+def pending_qq_receipt(panel: dict[str, Any] | None, *, after: float,
+                       now: float) -> EvidenceSnapshot | None:
+    """Keep an accepted send even when newer work leads the next panel poll."""
+    records = (panel or {}).get("runtimeRecords")
+    if not isinstance(records, list):
+        return None
+    first = None
+    for row in records[:QQ_MAX_RECORDS]:
+        if not qq_confirmed_chat(row):
+            continue
+        receipt = receipt_evidence("qq", row.get("timestamp"), now=now)
+        if receipt is not None and receipt.at > after and (first is None or receipt.at < first.at):
+            first = receipt
+    return first
+
+
 def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                   now: float, last_sent_at: dict[str, float] | None = None,
                   current_event: tuple[str, str, float] | None = None) -> EvidenceSnapshot:
     """Prefer recent verified activity and retain overlapping delivery receipts."""
     wx = wechat_evidence(live, now=now)
     qq = qq_evidence(live, panel, now=now)
-    retained_delivery = False
     wechat = live.get("wechat") if isinstance(live, dict) else None
     if last_sent_at is not None and isinstance(wechat, dict):
         delivery = receipt_evidence("wechat", wechat.get("delivery_at"), now=now)
@@ -528,6 +543,14 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
             current_receipt = current_event == ("wechat", "sent", delivery.at)
             if retained_delivery or (current_receipt and (wx.phase == "idle" or wx.at <= delivery.at)):
                 wx = delivery
+    if last_sent_at is not None:
+        qq_receipt = pending_qq_receipt(panel, after=last_sent_at.get("qq", 0.0), now=now)
+        # Present each fresh verified receipt once, oldest first. A newly
+        # queued task or activity on the other platform cannot erase a send.
+        pending = [candidate for candidate in (wx, qq_receipt or qq)
+                   if candidate.phase == "sent" and candidate.at > last_sent_at.get(candidate.source, 0.0)]
+        if pending:
+            return min(pending, key=lambda candidate: candidate.at)
     active = [candidate for candidate in (wx, qq)
               if candidate.evidence == EVIDENCE_VERIFIED and candidate.phase != "idle"]
     if last_sent_at is not None:
@@ -535,15 +558,6 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                   if candidate.phase != "sent" or candidate.at <= 0
                   or candidate.at > last_sent_at.get(candidate.source, 0.0)
                   or (candidate.source, candidate.phase, candidate.at) == current_event]
-        if len(active) == 2 and all(candidate.phase == "sent" and candidate.at > 0 for candidate in active):
-            # Both platforms can confirm between ticks. Deliver each new
-            # receipt once, before the newer snapshot obscures the older one.
-            unseen = [candidate for candidate in active
-                      if candidate.at > last_sent_at.get(candidate.source, 0.0)]
-            if unseen:
-                return min(unseen, key=lambda candidate: candidate.at)
-    if retained_delivery:
-        return wx
     if active:
         return max(active, key=lambda candidate: candidate.at)
     idle = qq if qq.evidence == EVIDENCE_DEGRADED else wx
@@ -756,7 +770,8 @@ class LiveBridge:
             node_id = self._node_id
 
         text, _ = bubble_for(phase)
-        if ((phase, evidence.source) == (self._phase, self._source) and not force
+        new_receipt = phase == "sent" and evidence.at > self._last_sent_at.get(evidence.source, 0.0)
+        if ((phase, evidence.source) == (self._phase, self._source) and not force and not new_receipt
                 and bubble_expired(self._bubble, self._bubble_at, now, BUBBLE_TTL_MS)):
             text = ""
 
