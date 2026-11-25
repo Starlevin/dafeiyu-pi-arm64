@@ -9,6 +9,7 @@ import BotCore
 struct QQStickerTests {
     let directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/QQStickers")
     @Test func communityCatalogImportsIndependentlyWithoutChangingBuiltInPack() throws {
+        let builtIn = QQStickerLibrary(directory: directory).items
         let community = directory.deletingLastPathComponent().appendingPathComponent("PhotoStickers")
         let catalog = QQStickerLibrary(directory: community)
         let records = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: community.appendingPathComponent("manifest.json"))) as? [[String: Any]])
@@ -25,7 +26,9 @@ struct QQStickerTests {
         }
         #expect(local.items.count == catalog.items.count)
         #expect(local.items.allSatisfy { $0.publicSharing == false })
-        #expect(QQStickerLibrary(directory: directory).items.count == 37)
+        let afterImport = QQStickerLibrary(directory: directory).items
+        #expect(afterImport.map(\.id) == builtIn.map(\.id))
+        #expect(afterImport.map(\.sha256) == builtIn.map(\.sha256))
     }
     @Test func resourcePackValidatesBeforeImportAndRetainsPerImageMetadata() throws {
         let item = try #require(QQStickerLibrary(directory: directory).items.first)
@@ -54,7 +57,11 @@ struct QQStickerTests {
     }
     @Test func everyBundledImagePassesIntegrityAndDecodeChecks() throws {
         let library = QQStickerLibrary(directory: directory)
-        #expect(library.items.count == 37)
+        let manifest = try JSONDecoder().decode([QQStickerLibrary.Item].self,
+                                                from: Data(contentsOf: directory.appendingPathComponent("manifest.json")))
+        #expect(!manifest.isEmpty)
+        #expect(library.items.map(\.id) == manifest.map(\.id))
+        #expect(library.items.map(\.sha256) == manifest.map(\.sha256))
         #expect(library.items.allSatisfy { $0.character == "deepseek-whale-maid" })
         #expect(!library.items.contains { $0.id.hasPrefix("pysio-") })
         for item in library.items { #expect(library.data(for: item) != nil) }
