@@ -164,7 +164,8 @@ def main():
         else:
             raise AssertionError("The backup must time out before returning its late response")
         elapsed = time.monotonic() - started
-        assert 0.3 <= elapsed < 1.25, elapsed
+        # The HTTP client may return before the full budget if the read phase times out.
+        assert 0.2 <= elapsed < 1.25, elapsed
         assert POSTED_MODELS == ["fixture-workbuddy-unavailable", "fixture-sensenova-stalled"]
         assert hub._test_routes[-1]["reason"] == "backup_timeout"
         assert hub._test_routes[-1]["actual"] == ""
