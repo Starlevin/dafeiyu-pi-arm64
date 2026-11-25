@@ -129,6 +129,33 @@ class ReplyHoldWakeTests(unittest.TestCase):
         self.assertEqual(wal.latest_pending_message_at(), 1.0)
         wal.take_pending_with_timing.assert_not_called()
 
+    def test_hint_after_sidebar_read_but_before_hold_checks_changed_conversation(self):
+        wal = Mock()
+        wal.latest_pending_message_at.return_value = 1.1
+        replies = Queue()
+        wake = _ScheduledWake([(5.0, lambda: replies.put("model result"))])
+        wake.now = 1.5
+        preview = Mock(return_value=True)
+        result = bridge.wait_for_group_reply(
+            replies, wake, wal, preview, since_sidebar=1.0, clock=wake.clock)
+        self.assertEqual(result, "sidebar_changed")
+        self.assertEqual(wake.now, 1.5)
+        preview.assert_called_once_with()
+        wal.take_pending_with_timing.assert_not_called()
+
+    def test_hint_before_sidebar_read_does_not_interrupt_hold(self):
+        wal = Mock()
+        wal.latest_pending_message_at.return_value = 0.9
+        replies = Queue()
+        wake = _ScheduledWake([(5.0, lambda: replies.put("model result"))])
+        wake.now = 1.5
+        preview = Mock(return_value=True)
+        result = bridge.wait_for_group_reply(
+            replies, wake, wal, preview, since_sidebar=1.0, clock=wake.clock)
+        self.assertEqual(result, "reply_ready")
+        self.assertEqual(wake.now, 5.0)
+        preview.assert_not_called()
+
     def test_old_hint_keeps_hold_until_actual_reply(self):
         wal = Mock()
         wal.latest_pending_message_at.return_value = -1.0

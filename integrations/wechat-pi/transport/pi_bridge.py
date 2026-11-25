@@ -191,10 +191,12 @@ def read_poll_hints(watched, wal_wake, *, settling):
     return app, signatures, wal_wake.take_pending(), {}
 
 
-def wait_for_group_reply(replies, wake_signal, wal_wake, preview_changed, *, timeout=12.0, clock=None):
-    """Hold the current chat while generating, yielding to a real sidebar change."""
+def wait_for_group_reply(replies, wake_signal, wal_wake, preview_changed, *,
+                         timeout=12.0, since_sidebar=None, clock=None):
+    """Yield the generation hold to UI changes since the last sidebar observation."""
     clock = time.monotonic if clock is None else clock
     started = clock()
+    hint_cutoff = started if since_sidebar is None else since_sidebar
     deadline = started + timeout
     next_probe = started
     while True:
@@ -206,7 +208,7 @@ def wait_for_group_reply(replies, wake_signal, wal_wake, preview_changed, *, tim
         if now >= deadline:
             return "timeout"
         pending_at = wal_wake.latest_pending_message_at()
-        if pending_at is not None and pending_at >= started:
+        if pending_at is not None and pending_at >= hint_cutoff:
             if now >= next_probe:
                 if preview_changed():
                     return "sidebar_changed"
@@ -3113,6 +3115,7 @@ def main():
     blocked = None
     last_wal_hint_log = 0.0
     deferred_wal_hint = None
+    last_sidebar_probe = None
     print("bridge_ready apex_auto=%s candidate_groups=%d" % (
         AUTO_REPLY_GROUP in args.auto_reply_group,
         sum(1 for g in args.auto_reply_group if g != AUTO_REPLY_GROUP)), flush=True)
@@ -3155,6 +3158,9 @@ def main():
             except Exception as error:
                 log("moments_read", status=type(error).__name__)
         sidebar_started = time.monotonic()
+        # A quiet-window iteration does not observe the sidebar or drain WAL hints.
+        if not settle_priority:
+            last_sidebar_probe = sidebar_started
         app_now, current_signatures, wal_roles, wal_event_times = read_poll_hints(
             watched, wal_wake, settling=settle_priority)
         now = time.monotonic()
@@ -3468,7 +3474,9 @@ def main():
                                        for name in latest)
 
                         hold_started = time.monotonic()
-                        hold_result = wait_for_group_reply(replies, wake_signal, wal_wake, preview_changed)
+                        hold_result = wait_for_group_reply(
+                            replies, wake_signal, wal_wake, preview_changed,
+                            since_sidebar=last_sidebar_probe)
                         resume_for_sidebar = hold_result == "sidebar_changed"
                         log("generation_hold", result=hold_result,
                             hold_ms=int((time.monotonic() - hold_started) * 1000))
