@@ -430,6 +430,7 @@ _WECHAT_EVENT_LABELS = {
     ("mention", "direction_unverified"): "消息方向未确认",
     ("queue", "accepted"): "已入队",
     ("queue", "queue_full"): "队列已满",
+    ("queue", "composer_not_empty"): "输入框有草稿，本条接话未入队",
     ("generation", "started"): "模型开始生成",
     ("generation", "ready"): "回复已生成",
     ("generation", "proactive_participation_declined"): "模型选择不接话",

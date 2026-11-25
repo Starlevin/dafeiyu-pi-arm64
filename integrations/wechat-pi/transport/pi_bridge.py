@@ -2605,7 +2605,7 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
         else:
             if auto_candidate:
                 if _composer_has_text(app):
-                    log("auto_candidate", reason="composer_not_empty")
+                    record(health, "queue", "composer_not_empty", trace)
                     continue
                 if not settled_candidate:
                     limiter = getattr(args, "auto_limiter", None)

@@ -786,6 +786,15 @@ class WeChatAdapter:
                          if isinstance(client_diag.get("time"), (int, float))
                          and not isinstance(client_diag.get("time"), bool) else None),
             }
+            last_event = diag.get("last_event")
+            if state == "ok" and isinstance(last_event, dict):
+                at = last_event.get("time")
+                if (last_event.get("phase") == "queue"
+                        and last_event.get("reason") == "composer_not_empty"
+                        and last_read is not None and type(at) in (int, float)
+                        and last_read - 60 <= at <= last_read):
+                    diags.append({"platform": "wechat", "level": "info",
+                                  "message": "最近一条微信自动接话因输入框有草稿而暂停"})
 
         return {
             "connected": connected,

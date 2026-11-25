@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -975,6 +976,68 @@ class StatusTruthTests(unittest.TestCase):
         w = self.wx_status()
         self.assertIsInstance(w["lastRead"], (int, float))
         self.assertGreater(w["lastRead"], 1_600_000_000)
+
+    def test_wechat_recent_composer_not_empty_is_reported_without_leaking(self):
+        """Recent queue/composer_not_empty pauses auto-reply but keeps status ok.
+
+        Only status()[1] diagnostics carry the fixed Chinese message; the status
+        dict stays online. Expired / future / other events never produce it, and
+        neither trace nor message body may leak into any diagnostic.
+        """
+        import adapters
+
+        now = 1_794_400_000
+        message = "最近一条微信自动接话因输入框有草稿而暂停"
+        secrets = ("SECRET-TRACE-XYZ", "SECRET-BODY-ABC")
+
+        def run(last_event):
+            fixture = self.wx(
+                bridge={"online": True, "listener": True, "accountOk": True},
+                bridgeDiagnostics={
+                    "fresh": True,
+                    "client": {"time": now, "phase": "window_available",
+                               "reason": "window_available"},
+                    "last_event": last_event,
+                },
+            )
+            with mock.patch.object(adapters, "_now", return_value=now):
+                return self.adapter("wechat", fixture).status()
+
+        def event(offset, **extra):
+            e = {"time": now + offset, "phase": "queue",
+                 "reason": "composer_not_empty",
+                 "trace": secrets[0], "text": secrets[1]}
+            e.update(extra)
+            return e
+
+        # Fresh, within the last 60 seconds: message shown, status still online.
+        status, diags = run(event(-10))
+        self.assertEqual(status["clientState"], "ok")
+        self.assertIs(status["connected"], True)
+        self.assertIs(status["running"], True)
+        messages = [str(d.get("message") or "") for d in diags]
+        self.assertIn(message, messages)
+        for text in messages:
+            for secret in secrets:
+                self.assertNotIn(secret, text)
+
+        # Boundary: exactly 60s old is still "recent".
+        _, diags = run(event(-60))
+        self.assertIn(message, [str(d.get("message") or "") for d in diags])
+
+        # Stale, future, or a different event must not report the message.
+        for last_event in (
+            event(-61),
+            event(10),
+            event(-10, phase="replying", reason="model_done"),
+            event(-10, reason="composer_empty"),
+        ):
+            with self.subTest(last_event=last_event):
+                _, diags = run(last_event)
+                for d in diags:
+                    self.assertNotIn(message, str(d.get("message") or ""))
+                    for secret in secrets:
+                        self.assertNotIn(secret, str(d.get("message") or ""))
 
     # ---- model: current + candidates + read-back --------------------------- #
 

@@ -430,18 +430,19 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         reader = Mock(get_character_count=Mock(return_value=7))
         composer = Mock(return_value=(Mock(get_text_iface=Mock(return_value=reader)), None))
         limiter = Mock(take=Mock(return_value=True))
+        health = Mock()
         settler = bridge.PublicQuestionSettleQueue()
         rows = [("夹具普通闲聊消息", (1, 1, 2, 2))]
         app = object()
         with patch.object(bridge, "composer", composer):
-            accepted, jobs = self.ingest_rows(rows, limiter=limiter, app=app)
+            accepted, jobs = self.ingest_rows(rows, limiter=limiter, app=app, health=health)
             self.assertFalse(accepted)
             self.assertTrue(jobs.empty())
             _, jobs = self.ingest_rows(rows, public_question_settler=settler,
                                        swift_route=True, app=app)
             self.assertTrue(jobs.empty())
             accepted, jobs = self.ingest_rows(
-                rows, limiter=limiter, public_question_settler=settler,
+                rows, limiter=limiter, public_question_settler=settler, health=health,
                 settled_trace=settler.pending(GROUP).trace, swift_route=True,
                 monotonic=124.5, app=app)
             self.assertFalse(accepted)
@@ -452,6 +453,10 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertEqual(composer.call_args_list, [unittest.mock.call(app)] * 2)
         reader.get_text.assert_not_called()
         limiter.take.assert_not_called()
+        trace = bridge.stable_message_trace(GROUP, rows, 0,
+                                            account=os.environ.get("DAFEIYU_WECHAT_ACCOUNT", ""))
+        stops = [call for call in health.update.call_args_list if call.args[0] == "queue"]
+        self.assertEqual(stops, [unittest.mock.call("queue", "composer_not_empty", trace)] * 2)
 
     def test_unknown_or_empty_composer_keeps_normal_proactive_admission(self):
         for result in (0, RuntimeError("unreadable")):

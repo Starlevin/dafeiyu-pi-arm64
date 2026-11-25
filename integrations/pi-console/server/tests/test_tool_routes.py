@@ -317,6 +317,7 @@ class BridgeTests(unittest.TestCase):
             f"{syntax} confirmation trace='{trace}' reason='visible_outgoing'",
             f"{syntax} confirmation trace='{trace}' reason='unconfirmed:client_unavailable'",
             f"{syntax} submit trace='{trace}' reason='tx_denied:composer_not_empty'",
+            f"{syntax} queue trace='{trace}' reason='composer_not_empty'",
             f"{syntax} poll_slow target='fixture-room-name'",
             f"{syntax} generation trace='{trace}' reason='fixture-free-text'",
             f"{syntax} confirmation trace='{trace}' reason='visible_outgoing' text='private fixture body'",
@@ -327,9 +328,10 @@ class BridgeTests(unittest.TestCase):
         self.login()
         status, data, body = self.c.req("GET", path)
         self.assertEqual(status, 200, data)
-        self.assertEqual(len(data["lines"]), 8)
+        self.assertEqual(len(data["lines"]), 9)
         expected = ["收到群消息", "符合自动接话条件", "已入队", "模型开始生成", "正在提交发送",
-                    "已确认原会话可见", "发送结果未确认", "输入框有草稿，已停止发送"]
+                    "已确认原会话可见", "发送结果未确认", "输入框有草稿，已停止发送",
+                    "输入框有草稿，本条接话未入队"]
         self.assertEqual([line.split("] ")[1] for line in data["lines"]], expected)
         self.assertEqual(len({line.split("] ")[0] for line in data["lines"]}), 1)
         for forbidden in (trace, "fixture-room-name", "fixture-free-text", "private fixture body"):
