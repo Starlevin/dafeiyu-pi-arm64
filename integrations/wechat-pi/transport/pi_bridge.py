@@ -1968,6 +1968,7 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
         # title and unique row both before and after reading it, using this app.
         started = time.monotonic()
         before_reason = _receipt_identity_reason(receipt_app, target)
+        reacquired_client = False
         # The new row may be visible before the header geometry is readable.
         # Retry the missing observation once on the same live client. A
         # mismatch stays terminal; fresh receipt evidence still needs both
@@ -1982,8 +1983,18 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
                     # reads. Recheck the existing live proxy and still require
                     # the normal fresh outgoing row and both target proofs.
                     refreshed_app = receipt_app
-                if refreshed_app != receipt_app or not _receipt_proxy_live(refreshed_app):
+                available = refreshed_app == receipt_app and _receipt_proxy_live(refreshed_app)
+                if not available:
+                    # Reacquire only the original client. A replacement proxy
+                    # cannot prove that this submitted row reached the target.
+                    time.sleep(0.15)
+                    refreshed_app = get_app()
+                    available = refreshed_app == receipt_app and _receipt_proxy_live(refreshed_app)
+                    reacquired_client = available
+                if not available:
                     before_reason = "client_unavailable"
+                elif reacquired_client and memory_account and app_memory_account(receipt_app) != memory_account:
+                    before_reason = "target_changed"
                 else:
                     before_reason = _receipt_identity_reason(refreshed_app, target)
             except Exception:
@@ -2015,6 +2026,13 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
             confirm_reason = "observation_error"
         started = time.monotonic()
         after_reason = _receipt_identity_reason(receipt_app, target)
+        if reacquired_client and not after_reason:
+            try:
+                if (get_app() != receipt_app or not _receipt_proxy_live(receipt_app)
+                        or (memory_account and app_memory_account(receipt_app) != memory_account)):
+                    after_reason = "target_changed"
+            except Exception:
+                after_reason = "observation_error"
         timings["identity_after_ms"] += int((time.monotonic() - started) * 1000)
         if after_reason:
             return False, "target_changed", True

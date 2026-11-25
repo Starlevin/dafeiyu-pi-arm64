@@ -723,7 +723,7 @@ class SendReceiptTests(unittest.TestCase):
         rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
         cases = (([None, None], [], "header_unreadable"),
                  ([None, "其他群"], [], "title_mismatch"),
-                 ([None], ["same", "other"], "client_unavailable"),
+                 ([None], ["same", "other", "other"], "client_unavailable"),
                  ([None], [None, "other"], "header_unreadable"))
         for titles, apps, reason in cases:
             with self.subTest(titles=titles, apps=apps):
@@ -732,6 +732,43 @@ class SendReceiptTests(unittest.TestCase):
                 self.assertEqual(harness.send(), "unconfirmed:" + reason)
                 self.assertEqual(harness.state["return_key_count"], 1)
                 self.assertFalse(harness.state["timing_logs"][-1][1]["final_check_attempted"])
+
+    def test_receipt_reacquires_exact_original_client_after_header_retry_gap(self):
+        rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
+        harness = SendReplyHarness(post_rows=rows, identity_title_sequence=[None],
+                                   post_get_app_sequence=["same", "other", "same", "same"])
+        self.assertEqual(harness.send(), "visible_outgoing")
+        self.assertEqual(harness.state["return_key_count"], 1)
+        self.assertEqual(harness.state["submit_count"], 1)
+        self.assertEqual(len(set(harness.state["identity_app_ids"])), 1)
+        self.assertEqual(harness.state["timing_logs"][-1][1]["candidate_reads"], 2)
+
+    def test_reacquired_client_requires_fresh_outgoing_row_and_same_target(self):
+        old = [("此前可见消息", (0, 0, 600, 50))]
+        candidate = old + [("我的回复", (0, 1, 600, 50))]
+        for reads, apps, titles, reason in (
+                ([candidate, old], ["same", "other", "same", "same"], [None], "no_new_rows"),
+                ([candidate, candidate], ["same", "other", "same", "other"], [None], "target_changed"),
+                ([candidate, candidate], ["same", "other", "same"], [None, "其他群"], "title_mismatch")):
+            with self.subTest(reason=reason):
+                harness = SendReplyHarness(post_read_sequence=reads, post_rows=candidate,
+                                           post_get_app_sequence=apps, identity_title_sequence=titles)
+                self.assertEqual(harness.send(), "unconfirmed:" + reason)
+                self.assertEqual(harness.state["return_key_count"], 1)
+                self.assertEqual(harness.state["submit_count"], 1)
+
+    def test_reacquired_client_requires_the_original_account(self):
+        rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
+        for account_checks in (["other-account"], ["original-account", "other-account"]):
+            with self.subTest(account_checks=account_checks):
+                harness = SendReplyHarness(post_rows=rows, identity_title_sequence=[None],
+                                           post_get_app_sequence=["same", "other", "same", "same"])
+                accounts = iter(account_checks)
+                harness.ns["app_memory_account"] = lambda _app: (
+                    next(accounts) if harness.state["returned"] else "original-account")
+                self.assertEqual(harness.send(memory_account="original-account"),
+                                 "unconfirmed:target_changed")
+                self.assertEqual(harness.state["return_key_count"], 1)
 
     def test_receipt_keeps_live_proxy_when_header_retry_cannot_enumerate_app(self):
         rows = [("此前可见消息", (0, 0, 600, 50)), ("我的回复", (0, 1, 600, 50))]
