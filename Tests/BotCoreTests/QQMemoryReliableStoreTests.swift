@@ -191,6 +191,70 @@ struct QQMemoryReliableStoreTests {
         store.close()
     }
 
+    @Test func forgetDeltaSuppressesHistoryAndSummariesAfterRestoringOlderState() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        let source = event("supper", "我喜欢咸味晚饭")
+        _ = try store.ingest(source)
+        _ = try store.apply(try delta(source: source, summary: "讨论过咸味晚饭"),
+                            batch: store.batch(), candidateIDs: [], now: now)
+        let item = try #require(store.items.first)
+        let oldState = try Data(contentsOf: store.stateURL)
+        let request = event("retract", "忘记刚才的晚饭口味", at: 10)
+        _ = try store.ingest(request)
+        let when = now.addingTimeInterval(10)
+        _ = try store.apply(try delta(source: request, text: "", replaces: [item.id], operation: "forget",
+                                      summary: "之前说过咸味晚饭"),
+                            batch: store.batch(), candidateIDs: [item.id], now: when)
+        #expect(store.search("晚饭口味", subject: "PEER", now: when, history: true).isEmpty)
+        #expect(store.episodes.isEmpty)
+        #expect(store.forgottenIDs.contains(item.id))
+        #expect(!store.recent.contains { $0.id == source.id })
+        store.close()
+
+        try oldState.write(to: dir.appendingPathComponent("state.json"), options: .atomic)
+        let restored = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        #expect(restored.context("以前的晚饭口味", subject: "PEER", characters: 600, now: when).isEmpty)
+        #expect(restored.episodes.isEmpty)
+        #expect(restored.forgottenIDs.contains(item.id))
+        #expect(!restored.recent.contains { $0.id == source.id })
+        #expect(!accepted(try restored.ingest(source, now: when)))
+        #expect(!restored.batch().contains { $0.event.id == source.id })
+        restored.close()
+    }
+
+    @Test func oldForgetArchiveVersionIsAppliedAsASuppressionRecord() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        let source = event("legacy-note", "过去的合成会议口令")
+        _ = try store.ingest(source)
+        _ = try store.apply(try delta(source: source, summary: "讨论过合成会议口令"),
+                            batch: store.batch(), candidateIDs: [], now: now)
+        let old = try #require(store.items.first)
+        store.close()
+        let stamp = ISO8601DateFormatter().string(from: now)
+        let entry: [String: Any] = [
+            "kind": "itemVersion", "at": stamp,
+            "item": ["id": old.id, "subject": old.subject, "kind": old.kind, "text": old.text,
+                     "sourceIDs": old.sourceIDs, "validFrom": stamp, "validTo": stamp, "reason": "forget"],
+        ]
+        var line = try JSONSerialization.data(withJSONObject: entry)
+        line.append(0x0a)
+        let archive = dir.appendingPathComponent("archive.jsonl")
+        let handle = try FileHandle(forWritingTo: archive)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: line)
+        try handle.close()
+
+        let reopened = try QQMemoryReliableStore(directory: dir, scope: "group-a")
+        #expect(reopened.search("合成会议口令", subject: "PEER", now: now, history: true).isEmpty)
+        #expect(reopened.episodes.isEmpty)
+        #expect(reopened.forgottenIDs.contains(old.id))
+        reopened.close()
+    }
+
     @Test func kindSpecificExpiryIsRespected() throws {
         let dir = try tempDir()
         let store = try QQMemoryReliableStore(directory: dir, scope: "group-a")

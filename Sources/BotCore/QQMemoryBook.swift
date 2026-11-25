@@ -175,17 +175,25 @@ public struct QQMemoryBook: Codable, Equatable, Sendable {
                 throw CoreError.invalid("记忆证据、归属或更新范围未通过校验")
             }
         }
-        // The whole delta has passed; old versions remain marked as historical.
-        for change in changes {
+        let forgotten = Set(changes.filter { $0.operation == "forget" }.flatMap(\.replaces))
+        if !forgotten.isEmpty {
+            let sources = Set(items.filter { forgotten.contains($0.id) && $0.kind != "episode" }
+                .flatMap(\.sourceIDs))
+            items.removeAll {
+                forgotten.contains($0.id) || ($0.kind == "episode" && !sources.isDisjoint(with: $0.sourceIDs))
+            }
+            recent.removeAll { sources.contains($0.id) }
+        }
+        // Corrections keep their old versions as historical records.
+        for change in changes where change.operation == "upsert" {
             let obsoleteSources = Set(items.filter { change.replaces.contains($0.id) }.flatMap(\.sourceIDs))
             for i in items.indices where change.replaces.contains(items[i].id) || (items[i].kind == "episode" && !obsoleteSources.isDisjoint(with: items[i].sourceIDs)) { items[i].invalidatedAt = now }
-            guard change.operation == "upsert" else { continue }
             let text = Self.redact(change.text)
             if items.contains(where: { $0.subject == change.subject && $0.kind == change.kind && QQReplyRepetitionPolicy.normalized($0.text) == QQReplyRepetitionPolicy.normalized(text) && $0.current(now) }) { continue }
             let days = min(change.days, change.kind == "event" ? 90 : change.kind == "task" ? 30 : 365)
             items.append(QQMemoryItem(subject: change.subject, kind: change.kind, text: text, keywords: change.keywords.map(Self.redact), importance: change.importance, sourceIDs: [change.sourceID], updatedAt: now, expiresAt: now.addingTimeInterval(Double(days * 86400))))
         }
-        if !delta.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if forgotten.isEmpty && !delta.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             items.append(QQMemoryItem(subject: "CONVERSATION", kind: "episode", text: Self.redact(delta.summary), keywords: [], importance: 1, sourceIDs: batch.map(\.id), updatedAt: now, expiresAt: now.addingTimeInterval(90 * 86400)))
         }
         let active = items.filter { $0.kind != "episode" && $0.current(now) }.sorted { ($0.importance, $0.updatedAt) > ($1.importance, $1.updatedAt) }.prefix(256)

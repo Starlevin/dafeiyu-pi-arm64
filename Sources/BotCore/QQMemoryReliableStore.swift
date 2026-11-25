@@ -116,6 +116,7 @@ public final class QQMemoryReliableStore {
         var appliedIDs: [String] = []
         var legacyImported: Bool?
         var forgottenIDs: [String]?
+        var forgottenSourceIDs: [String]?
         var episodes: [QQMemoryEpisode] = []
         var droppedEvents = 0
         var refusedEvents = 0
@@ -141,6 +142,7 @@ public final class QQMemoryReliableStore {
         var episode: QQMemoryEpisode?
         var ids: [String]?
         var at: Date
+        var forgottenSourceIDs: [String]? = nil
     }
 
     public let directoryURL: URL
@@ -183,6 +185,9 @@ public final class QQMemoryReliableStore {
     public var episodes: [QQMemoryEpisode] { state.episodes }
     public var hasImportedLegacy: Bool { state.legacyImported ?? false }
     public var forgottenIDs: [String] { state.forgottenIDs ?? [] }
+    private var processedEventIDs: Set<String> {
+        Set(state.appliedIDs).union(state.forgottenSourceIDs ?? [])
+    }
 
     public var stats: QQMemoryReliableStats {
         let journalStats = journal.stats()
@@ -206,6 +211,7 @@ public final class QQMemoryReliableStore {
 
     @discardableResult
     public func ingest(_ event: QQMemoryEvent, now: Date = Date()) throws -> QQMemoryJournalAppend {
+        if state.forgottenSourceIDs?.contains(event.id) == true { return .duplicate }
         let queueable = !["BOT", "SELF_UNKNOWN"].contains(event.subject)
         let result: QQMemoryJournalAppend
         if queueable {
@@ -220,7 +226,7 @@ public final class QQMemoryReliableStore {
     }
 
     public func due(now: Date = Date()) -> Bool {
-        let entries = journal.entries(knownIDs: Set(state.appliedIDs))
+        let entries = journal.entries(knownIDs: processedEventIDs)
         guard let oldest = entries.first?.event else { return false }
         let chars = entries.reduce(0) { $0 + $1.event.text.count }
         return entries.count >= options.thresholds.messageThreshold ||
@@ -229,7 +235,7 @@ public final class QQMemoryReliableStore {
     }
 
     public func batch(limit: Int = 32, maxCharacters: Int = 7500) -> [QQMemoryJournalEntry] {
-        journal.batch(knownIDs: Set(state.appliedIDs), limit: limit, maxCharacters: maxCharacters)
+        journal.batch(knownIDs: processedEventIDs, limit: limit, maxCharacters: maxCharacters)
     }
 
     /// A named group note, with a delivery-proven event as its source.
@@ -244,7 +250,7 @@ public final class QQMemoryReliableStore {
               ["fact", "preference", "task", "event"].contains(kind) else {
             throw QQMemoryReliableError.invalid("无效的群记忆条目")
         }
-        guard !state.appliedIDs.contains(id) else { return }
+        guard !processedEventIDs.contains(id) else { return }
         let subject = "CONVERSATION"
         let prior = state.items.filter {
             $0.subject == subject && $0.keywords == [key] && $0.current(now)
@@ -253,7 +259,7 @@ public final class QQMemoryReliableStore {
         if prior.contains(where: { $0.updatedAt > now }) { return }
         let event = QQMemoryEvent(id: id, subject: subject, text: text, at: now)
         let recorded = try ingest(event, now: now)
-        let entry = recorded.entry ?? journal.entries(knownIDs: Set(state.appliedIDs)).first { $0.id == id }
+        let entry = recorded.entry ?? journal.entries(knownIDs: processedEventIDs).first { $0.id == id }
         guard let entry else { throw QQMemoryReliableError.invalid("群记忆日志未接受条目") }
         let candidates = prior.sorted { $0.updatedAt > $1.updatedAt }.prefix(6).map(\.id)
         let change = QQMemoryDelta.Change(operation: "upsert", replaces: candidates, subject: subject,
@@ -276,7 +282,7 @@ public final class QQMemoryReliableStore {
                       now: Date = Date(), inferredFromConversation: Bool = false,
                       retainingExpiry: Date? = nil) throws -> QQMemoryApplyReport {
         guard !batch.isEmpty else { throw QQMemoryReliableError.invalid("空记忆批次") }
-        let pendingIDs = Set(journal.entries(knownIDs: Set(state.appliedIDs)).map(\.event.id))
+        let pendingIDs = Set(journal.entries(knownIDs: processedEventIDs).map(\.event.id))
         guard Set(batch.map(\.event.id)).isSubset(of: pendingIDs) else {
             throw QQMemoryReliableError.invalid("记忆批次已变化，等待下一轮")
         }
@@ -299,17 +305,24 @@ public final class QQMemoryReliableStore {
         let snapshot = state
         var archived: [ArchiveRecord] = []
         var report = QQMemoryApplyReport(batchCount: batch.count, changes: delta.changes.count)
-        for change in delta.changes {
+        let forgotten = Set(delta.changes.filter { $0.operation == "forget" }.flatMap(\.replaces))
+        if !forgotten.isEmpty {
+            let sources = Set(state.items.filter { forgotten.contains($0.id) && $0.kind != "episode" }
+                .flatMap(\.sourceIDs))
+            report.invalidated += suppressForgotten(ids: forgotten, sourceIDs: sources)
+            archived.append(ArchiveRecord(kind: "tombstone", item: nil, episode: nil,
+                                          ids: forgotten.sorted(), at: now, forgottenSourceIDs: sources.sorted()))
+        }
+        for change in delta.changes where change.operation == "upsert" {
             let obsoleteSources = Set(state.items.filter { change.replaces.contains($0.id) }.flatMap(\.sourceIDs))
             for index in state.items.indices where change.replaces.contains(state.items[index].id) ||
                 (state.items[index].kind == "episode" && !obsoleteSources.isDisjoint(with: state.items[index].sourceIDs)) {
                 if state.items[index].invalidatedAt == nil {
                     state.items[index].invalidatedAt = now
                     report.invalidated += 1
-                    archived.append(archiveVersion(of: state.items[index], at: now, reason: change.operation == "forget" ? "forget" : "correction"))
+                    archived.append(archiveVersion(of: state.items[index], at: now, reason: "correction"))
                 }
             }
-            guard change.operation == "upsert" else { continue }
             let text = String(QQMemoryRedactor.redact(change.text).prefix(options.maxItemTextCharacters))
             if state.items.contains(where: {
                 $0.subject == change.subject && $0.kind == change.kind &&
@@ -325,7 +338,7 @@ public final class QQMemoryReliableStore {
         }
 
         let summary = QQMemoryDelta.decodeSummaryFallback(delta.summary)
-        if !summary.isEmpty {
+        if forgotten.isEmpty && !summary.isEmpty {
             let previous = state.episodes.last(where: { $0.current(now) })
             let version = (state.episodes.map(\.version).max() ?? 0) + 1
             let episode = QQMemoryEpisode(text: summary, sourceIDs: batch.map(\.event.id), version: version,
@@ -444,7 +457,9 @@ public final class QQMemoryReliableStore {
     }
 
     public func importLegacy(_ book: QQMemoryBook, now: Date = Date()) throws -> QQMemoryImportReport {
-        let legacyPending = book.pending + (book.archivedPending ?? [])
+        let omittedSources = Set(state.forgottenSourceIDs ?? [])
+        let legacyPending = (book.pending + (book.archivedPending ?? []))
+            .filter { !omittedSources.contains($0.id) }
         let need = legacyPending.count
         let currentPending = journal.stats().pendingCount
         guard currentPending + need <= options.journal.maxPendingEvents else {
@@ -452,8 +467,10 @@ public final class QQMemoryReliableStore {
         }
         var report = QQMemoryImportReport()
         var archiveBatch: [ArchiveRecord] = []
+        let forgotten = Set(state.forgottenIDs ?? [])
         for item in book.items {
-            if (state.forgottenIDs ?? []).contains(item.id) {
+            if forgotten.contains(item.id) ||
+                (item.kind == "episode" && !omittedSources.isDisjoint(with: item.sourceIDs)) {
                 report.forgotten += 1
                 continue
             }
@@ -546,12 +563,13 @@ public final class QQMemoryReliableStore {
     }
 
     private func recoverFromJournal() throws {
-        let pending = journal.recover(knownIDs: Set(state.appliedIDs))
+        let processed = processedEventIDs
+        let pending = journal.recover(knownIDs: processed)
         for entry in pending where !state.knownIDs.contains(entry.event.id) {
             note(entry.event)
         }
         // Crash window: state was applied but the cursor was not advanced. Applied IDs are proof.
-        let applied = journal.entries().filter { state.appliedIDs.contains($0.event.id) }
+        let applied = journal.entries().filter { processed.contains($0.event.id) }
         if let last = applied.last {
             _ = try? journal.commit(ids: Set(applied.map(\.event.id)), through: last.seq)
         }
@@ -583,25 +601,46 @@ public final class QQMemoryReliableStore {
         return ArchiveRecord(kind: "itemVersion", item: archived, episode: nil, ids: nil, at: now)
     }
 
-    /// Tombstones are the durable delete authority even if state.json is lost or
-    /// restored from an older backup. Re-reading them on open prevents an old
-    /// legacy book/archive from resurrecting a forgotten item.
-    private func mergeArchiveTombstones() throws {
-        guard FileManager.default.fileExists(atPath: archiveURL.path),
-              let data = try? Data(contentsOf: archiveURL) else { return }
-        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
-        var ids: [String] = []
-        for line in lines {
-            guard let record = try? decoder.decode(ArchiveRecord.self, from: Data(line)),
-                  record.kind == "tombstone" else { continue }
-            ids.append(contentsOf: record.ids ?? [])
-        }
-        guard !ids.isEmpty else { return }
-        state.forgottenIDs = mergeIDs(state.forgottenIDs ?? [], ids)
+    private func suppressForgotten(ids: Set<String>, sourceIDs: Set<String>) -> Int {
         let before = state.items.count + state.episodes.count
-        state.items.removeAll { ids.contains($0.id) }
-        state.episodes.removeAll { ids.contains($0.id) || !Set(ids).isDisjoint(with: $0.sourceIDs) }
-        if state.items.count + state.episodes.count != before { try persistState() }
+        if !ids.isEmpty { state.forgottenIDs = mergeIDs(state.forgottenIDs ?? [], ids.sorted()) }
+        if !sourceIDs.isEmpty {
+            state.forgottenSourceIDs = mergeIDs(state.forgottenSourceIDs ?? [], sourceIDs.sorted())
+        }
+        let sources = ids.union(sourceIDs)
+        state.items.removeAll {
+            ids.contains($0.id) || ($0.kind == "episode" && !sources.isDisjoint(with: $0.sourceIDs))
+        }
+        state.episodes.removeAll { ids.contains($0.id) || !sources.isDisjoint(with: $0.sourceIDs) }
+        state.recent.removeAll { sourceIDs.contains($0.id) }
+        return before - state.items.count - state.episodes.count
+    }
+
+    /// Replay deletions even if state.json came from a backup made before them.
+    private func mergeArchiveTombstones() throws {
+        let previousIDs = state.forgottenIDs
+        let previousSources = state.forgottenSourceIDs
+        let recentCount = state.recent.count
+        var ids = Set(previousIDs ?? [])
+        var sources = Set(previousSources ?? [])
+        if let data = try? Data(contentsOf: archiveURL) {
+            for line in data.split(separator: 0x0A) {
+                guard let record = try? decoder.decode(ArchiveRecord.self, from: Data(line)) else { continue }
+                if record.kind == "tombstone" {
+                    ids.formUnion(record.ids ?? [])
+                    sources.formUnion(record.forgottenSourceIDs ?? [])
+                } else if record.kind == "itemVersion", let item = record.item, item.reason == "forget" {
+                    ids.insert(item.id)
+                    if item.kind != "episode" { sources.formUnion(item.sourceIDs) }
+                }
+            }
+        }
+        guard !ids.isEmpty || !sources.isEmpty else { return }
+        let removed = suppressForgotten(ids: ids, sourceIDs: sources)
+        if removed > 0 || recentCount != state.recent.count ||
+            previousIDs != state.forgottenIDs || previousSources != state.forgottenSourceIDs {
+            try persistState()
+        }
     }
 
     private func appendArchive(_ records: [ArchiveRecord]) throws {

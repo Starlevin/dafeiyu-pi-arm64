@@ -46,6 +46,10 @@ struct QQMemoryBookTests {
         book.append(forget); let latest = try #require(book.items.first { $0.current(now.addingTimeInterval(30)) })
         try book.apply(delta(source: forget, text: "", replaces: [latest.id], operation: "forget"), batch: [forget], candidateIDs: [latest.id], now: now.addingTimeInterval(30))
         #expect(QQMemoryIndex(book.items).search("晚饭", subject: "PEER", now: now.addingTimeInterval(31)).isEmpty)
+        let afterForget = QQMemoryIndex(book.items).context("以前的晚饭口味", subject: "PEER",
+                                                              characters: 600, now: now.addingTimeInterval(31))
+        #expect(!afterForget.contains("吃辣"))
+        #expect(afterForget.contains("清淡"))
     }
     @Test func isolatedSubjectsSecretRedactionAndBoundedJournal() throws {
         let member = QQMemoryBook.subject(account: "12345", target: "group:99999", sender: "54321")
