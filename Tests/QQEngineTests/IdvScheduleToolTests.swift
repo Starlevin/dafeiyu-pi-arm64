@@ -187,13 +187,13 @@ struct IdvScheduleToolTests {
         #expect(!IdvScheduleConfig.fromEnvironment([:]).enabled)
         #expect(!IdvScheduleConfig.fromEnvironment(["DAFEIYU_IDV_SCHEDULE": "maybe"]).enabled)
         #expect(IdvScheduleConfig.fromEnvironment(["DAFEIYU_IDV_SCHEDULE": "true"]).enabled)
-        // 越界值不生效，保持默认 1 MiB（实测页面约 436 KiB，默认留足余量）。
+        // 越界值不生效，保持默认 1 MiB（实测页面约 252 KiB，默认留足余量）。
         #expect(IdvScheduleConfig.fromEnvironment([:]).maxBytes == 1024 * 1024)
         #expect(IdvScheduleConfig.fromEnvironment(["DAFEIYU_IDV_SCHEDULE_MAX_BYTES": "999999999"]).maxBytes == 1024 * 1024)
         #expect(IdvScheduleConfig.fromEnvironment([:]).canHoldMeasuredPage)
     }
 
-    /// 第 5 条核心：默认上限须高于实测页面（约 436 KiB），避免必然截断。
+    /// 第 5 条核心：默认上限须高于实测页面（约 252 KiB），避免必然截断。
     @Test func defaultByteBudgetExceedsMeasuredPage() {
         #expect(IdvScheduleConfig.measuredPageBytes == 258_523)
         #expect(IdvScheduleConfig().maxBytes > IdvScheduleConfig.measuredPageBytes)

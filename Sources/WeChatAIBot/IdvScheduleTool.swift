@@ -42,7 +42,7 @@ public struct IdvScheduleConfig: Sendable, Equatable {
     /// 字节预算是否足以容纳实测页面（防止把上限调到会必然失败的过小值）。
     public var canHoldMeasuredPage: Bool { maxBytes > Self.measuredPageBytes }
 
-    /// 实测页面大小（2026-11-14 多次实测 436,632 字节）。仅作预算校验基准。
+    /// 近期赛程页大小（2026-11-26 树莓派实测 258,523 字节）。仅作预算校验基准。
     public static let measuredPageBytes = 258_523
 }
 
