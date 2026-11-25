@@ -96,27 +96,27 @@ class _MemoryAccountChanged(RuntimeError):
     pass
 
 class AutoReplyLimiter:
-    """Per-process high-participation guard, group-scoped and bounded."""
+    """Per-group candidate cooldown with shared bridge-wide cost limits."""
     def __init__(self, cooldown=15, hourly_cap=90, daily_cap=300):
         self.cooldown = cooldown
         self.hourly_cap = hourly_cap
         self.daily_cap = daily_cap
         self.hourly = deque()
         self.daily = deque()
-        self.last = float("-inf")
+        self.last_by_group = {}
 
-    def take(self, now):
+    def take(self, target, now):
         while self.hourly and now - self.hourly[0] >= 3600:
             self.hourly.popleft()
         while self.daily and now - self.daily[0] >= 86400:
             self.daily.popleft()
-        if (now - self.last < self.cooldown
+        if (now - self.last_by_group.get(target, float("-inf")) < self.cooldown
                 or len(self.hourly) >= self.hourly_cap
                 or len(self.daily) >= self.daily_cap):
             return False
         self.hourly.append(now)
         self.daily.append(now)
-        self.last = now
+        self.last_by_group[target] = now
         return True
 
 
@@ -2535,7 +2535,7 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                     continue
                 if not settled_candidate:
                     limiter = getattr(args, "auto_limiter", None)
-                    if limiter is None or not limiter.take(time.monotonic()):
+                    if limiter is None or not limiter.take(target, time.monotonic()):
                         log("auto_candidate", reason="rate_limited")
                         continue
                 record(health, "mention", "auto_reply", trace)

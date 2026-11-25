@@ -156,6 +156,38 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                                         rows_observed_at=rows_observed_at)
         return result, jobs
 
+    def test_compatibility_cooldown_does_not_block_other_authorized_group(self):
+        other = "另一授权夹具群"
+        self.args.auto_reply_group = self.args.group = [GROUP, other]
+        self.path.write_text(json.dumps({
+            "group": {"proactiveJudge": {"enabled": True, "groups": [GROUP, other]}},
+        }), encoding="utf-8")
+        jobs = Queue()
+
+        def ingest(target, now):
+            rows = [(f"同一话题的普通接话候选{now}", (1, 1, 2, 2))]
+            with patch.multiple(bridge, mention_body=Mock(return_value=None),
+                                avatar_side=Mock(return_value=("incoming", 0)),
+                                chat_title=Mock(return_value=target)), \
+                 patch.object(bridge.time, "monotonic", return_value=now):
+                return bridge.handle_rows(None, rows, 0, (0, 0, 500, 500),
+                                          target, self.args, jobs)
+
+        self.assertTrue(ingest(GROUP, 100))
+        self.assertFalse(ingest(GROUP, 101))
+        self.assertTrue(ingest(other, 101))
+        self.assertTrue(ingest(GROUP, 115))
+        self.assertEqual([jobs.get_nowait()[0] for _ in range(3)], [GROUP, other, GROUP])
+        self.assertTrue(jobs.empty())
+
+    def test_compatibility_limiter_keeps_shared_hourly_and_daily_caps(self):
+        limiter = bridge.AutoReplyLimiter(hourly_cap=1, daily_cap=2)
+        self.assertTrue(limiter.take(GROUP, 100))
+        self.assertFalse(limiter.take("第二个夹具群", 101))
+        self.assertTrue(limiter.take("第二个夹具群", 3700))
+        self.assertFalse(limiter.take("第三个夹具群", 7300))
+        self.assertTrue(limiter.take("第三个夹具群", 86500))
+
     def test_ingress_latency_is_joinable_to_an_admitted_turn_without_text(self):
         output = io.StringIO()
         with redirect_stdout(output):
@@ -179,7 +211,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         with patch.object(bridge.bpc, "build_proven", wraps=bridge.bpc.build_proven) as prove:
             result, jobs = self.ingest_rows(rows, limiter=limiter)
         self.assertTrue(result)
-        self.assertEqual(limiter.take.call_args_list, [unittest.mock.call(123.0)])
+        self.assertEqual(limiter.take.call_args_list, [unittest.mock.call(GROUP, 123.0)])
         prove.assert_called_once()
         queued = jobs.get_nowait()
         self.assertEqual(queued[2]["text"], "第二条普通真实入站消息")
