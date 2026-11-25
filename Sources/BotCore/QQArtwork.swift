@@ -183,6 +183,9 @@ public struct QQArtworkLedger: Codable, Sendable {
     public mutating func finish(_ ticket: UUID, confirmed: Bool) {
         if let index = deliveries.firstIndex(where: { $0.ticket == ticket }) { deliveries[index].state = confirmed ? "confirmed" : "unknown" }
     }
+    public mutating func reject(_ ticket: UUID) {
+        if let index = deliveries.firstIndex(where: { $0.ticket == ticket }) { deliveries[index].state = "rejected" }
+    }
     public mutating func recover() {
         for index in deliveries.indices where deliveries[index].state == "sending" { deliveries[index].state = "unknown" }
         trim()

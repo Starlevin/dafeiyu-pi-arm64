@@ -253,9 +253,17 @@ private final class ImageProviderFixture: URLProtocol, @unchecked Sendable {
             #expect(engine.imageGenerationStatus.contains(mode == "proactive" ? "生成成功" : "已切换备用"))
             let payload = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("payload"))) as? [String: Any])
             let segments = try #require(payload["message"] as? [[String: Any]])
-            #expect(segments.count == 2)
-            #expect((segments[1]["data"] as? [String: String])?["file"] == "base64://" + ImageProviderFixture.png.base64EncodedString())
-            #expect((segments[0]["data"] as? [String: String])?["text"]?.contains(mode == "proactive" ? "AI 生成 · 智谱" : "AI 生成 · Cloudflare") == true)
+            let isProactive = mode == "proactive"
+            let textIndex = isProactive ? 1 : 0
+            try #require(segments.count == textIndex + 2)
+            if isProactive {
+                #expect(segments[0]["type"] as? String == "reply")
+                #expect((segments[0]["data"] as? [String: String])?["id"] == "1")
+            }
+            #expect(segments[textIndex]["type"] as? String == "text")
+            #expect((segments[textIndex]["data"] as? [String: String])?["text"]?.contains(isProactive ? "AI 生成 · 智谱" : "AI 生成 · Cloudflare") == true)
+            #expect(segments[textIndex + 1]["type"] as? String == "image")
+            #expect((segments[textIndex + 1]["data"] as? [String: String])?["file"] == "base64://" + ImageProviderFixture.png.base64EncodedString())
         } else if mode == "planDecline" {
             #expect(engine.sends.confirmed == 1); #expect(engine.usage.calls == 3)
             #expect(ImageProviderFixture.captured.allSatisfy { $0.url?.host == "api.deepseek.com" })

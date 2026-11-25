@@ -221,6 +221,7 @@ import BotCore
         do {
             let config = try JSONSerialization.jsonObject(with: JSONEncoder().encode(engine.config))
             let object: [String: Any] = ["config": config, "configurationSaved": configurationSaved, "configurationRevision": currentConfigurationRevision(), "connected": engine.connected, "running": engine.running,
+                "groupReplyPolicy": engine.groupReplyPolicySnapshot(),
                 "busy": engine.busy || engine.runtimeBusy, "status": engine.status, "error": engine.error ?? "",
                 "temporaryCredentials": engine.usesTemporaryCredentials,
                 "supportsKeychain": RuntimeResources.supportsKeychain,

@@ -548,7 +548,7 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         #expect(stale.error != nil)
         #expect(try Data(contentsOf: file) == before)
     }
-    @Test(arguments: ["pause", "pauseReview", "takeOver", "disconnect", "complete", "deadline", "noSticker", "missingSticker", "unknown", "cooldown", "fastStickers", "longRunQueue", "groupMentionOnly", "groupQuotedReply", "periodicStickers", "memory", "memoryIsolation", "privateQuotedReply", "privateQuotedOwn", "privateQuotedWrongPeer", "privateQuotedMissing", "privateTimeline", "privateOwnerIntervenes"])
+    @Test(arguments: ["pause", "pauseReview", "takeOver", "disconnect", "complete", "deadline", "noSticker", "missingSticker", "unknown", "relaySentinel", "genericError", "negativeSend", "relayNonSendSentinel", "cooldown", "fastStickers", "longRunQueue", "groupMentionOnly", "groupQuotedReply", "periodicStickers", "memory", "memoryIsolation", "privateQuotedReply", "privateQuotedOwn", "privateQuotedWrongPeer", "privateQuotedMissing", "privateTimeline", "privateOwnerIntervenes"])
     func cancelsGenerationAndDropsQueuedMessages(control: String) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -585,7 +585,8 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
             try JSONSerialization.data(withJSONObject: state).write(to: file)
         }
         let engine = QQEngine(allowAuthenticationUI: false, storageDirectory: directory,
-                              modelClient: DeepSeekClient(session: session), stickerLibrary: QQStickerLibrary(directory: control == "missingSticker" ? nil : URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/QQStickers")))
+                              modelClient: DeepSeekClient(session: session), stickerLibrary: QQStickerLibrary(directory: control == "missingSticker" ? nil : URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/QQStickers")),
+                              testRelayIdentity: ["relaySentinel", "relayNonSendSentinel"].contains(control) ? .fixture : nil)
         defer { engine.disconnect() }
         engine.config.endpoint = "ws://127.0.0.1:\(port)"
         engine.config.expectedSelfID = "12345"
@@ -596,6 +597,10 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
         if expectedMessages > 2 { try Data(String(expectedMessages).utf8).write(to: directory.appendingPathComponent("message-count")) }
         if control == "noSticker" { engine.config.effectivePersona.stickersEnabled = false }
         if control == "unknown" { try Data().write(to: directory.appendingPathComponent("drop-send")) }
+        if control == "relaySentinel" { try Data().write(to: directory.appendingPathComponent("relay-send-sentinel")) }
+        if control == "relayNonSendSentinel" { try Data().write(to: directory.appendingPathComponent("relay-status-sentinel")) }
+        if control == "genericError" { try Data().write(to: directory.appendingPathComponent("generic-error")) }
+        if control == "negativeSend" { try Data().write(to: directory.appendingPathComponent("negative-send")) }
         if control == "groupMentionOnly" { try Data().write(to: directory.appendingPathComponent("hold-send")) }
         #expect(engine.useTemporaryCredentials(token: "synthetic-test-token", key: "synthetic-key"))
         await engine.connect()
@@ -693,7 +698,7 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
             #expect(cleared.memoryBooks.isEmpty)
             return
         }
-        if ["complete", "noSticker", "missingSticker", "unknown", "cooldown", "fastStickers", "groupMentionOnly", "groupQuotedReply", "periodicStickers"].contains(control) || control.hasPrefix("privateQuoted") {
+        if ["complete", "noSticker", "missingSticker", "unknown", "relaySentinel", "genericError", "negativeSend", "relayNonSendSentinel", "cooldown", "fastStickers", "groupMentionOnly", "groupQuotedReply", "periodicStickers"].contains(control) || control.hasPrefix("privateQuoted") {
             // Positive control: this same fixture must detect a send when generation completes.
             DelayedModelProtocol.completePending(intensity: control == "periodicStickers" ? 1 : 3)
             if control == "groupMentionOnly" {
@@ -711,9 +716,27 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
             }
             let desired = control == "periodicStickers" ? 6 : (["cooldown", "fastStickers"].contains(control) || control.hasPrefix("privateQuoted")) ? 2 : 1
             let sendDeadline = Date().addingTimeInterval(control == "periodicStickers" ? 10 : 4)
-            while engine.sends.confirmed < desired && engine.sends.uncertain == 0 && Date() < sendDeadline {
+            while engine.sends.confirmed < desired && engine.sends.uncertain == 0 && !engine.logs.contains(where: { $0.state == .failed }) && Date() < sendDeadline {
                 DelayedModelProtocol.completePending(intensity: control == "periodicStickers" ? 1 : 3)
                 try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            if control == "relaySentinel" {
+                #expect(engine.running)
+                #expect(engine.sends.attempts == 1)
+                #expect(engine.sends.confirmed == 0)
+                #expect(engine.sends.uncertain == 0)
+                #expect(engine.logs.contains { $0.state == .failed && $0.detail.contains("message_id=-1") })
+                let actions = try String(contentsOf: directory.appendingPathComponent("actions"), encoding: .utf8)
+                #expect(actions.components(separatedBy: "send_private_msg").count - 1 == 1)
+                engine.pause()
+                return
+            }
+            if control == "genericError" {
+                #expect(!engine.running)
+                #expect(engine.sends.attempts == 1)
+                #expect(engine.sends.confirmed == 0)
+                #expect(engine.sends.uncertain == 1)
+                return
             }
             engine.pause()
             #expect(engine.sends.attempts == desired)
@@ -751,7 +774,8 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
             if control != "unknown" {
                 let stored = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("qq-state.json"))) as? [String: Any])
                 let ids = try #require(stored["botMessageIDs"] as? [String: Double])
-                #expect(ids["12345:" + (group ? "group:99999" : "private:54321") + ":99"] != nil)
+                let receiptID = control == "negativeSend" ? "-1" : "99"
+                #expect(ids["12345:" + (group ? "group:99999" : "private:54321") + ":" + receiptID] != nil)
             }
             let encoded = try Data(contentsOf: directory.appendingPathComponent("qq-state.json"))
             let state = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])

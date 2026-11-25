@@ -45,5 +45,58 @@ struct QQProactiveDecisionTests {
         #expect(judge.reserve(group: "a", budget: 1, now: tomorrow))
         #expect(!judge.reserve(group: "b", budget: 1, now: tomorrow))
     }
+
+    @Test @MainActor func overlappingAttemptDoesNotPersistAnotherBudgetReservation() {
+        let judge = QQProactiveDecision()
+        let today = Date(timeIntervalSince1970: 100_000)
+        #expect(judge.reserve(group: "a", budget: 2, now: today))
+
+        var persistCalls = 0
+        let result = judge.reserveAfterPersist(group: "a", budget: 2, now: today) {
+            persistCalls += 1
+            return .persisted
+        }
+
+        #expect(result == .alreadyInFlight)
+        #expect(persistCalls == 0)
+    }
+
+    @Test @MainActor func successfulAttemptPersistsAndConsumesExactlyOneSlotPerGroup() {
+        let judge = QQProactiveDecision()
+        let today = Date(timeIntervalSince1970: 100_000)
+        var persistCalls = 0
+        func persist() -> QQProactiveDecision.PersistenceResult {
+            persistCalls += 1
+            return .persisted
+        }
+
+        #expect(judge.reserveAfterPersist(group: "a", budget: 1, now: today, persist: persist) == .reserved)
+        #expect(judge.reserveAfterPersist(group: "b", budget: 1, now: today, persist: persist) == .reserved)
+        judge.finish(group: "a")
+        #expect(judge.reserveAfterPersist(group: "a", budget: 1, now: today, persist: persist) == .dailyLimitReached)
+        #expect(persistCalls == 2)
+    }
+
+    @Test @MainActor func persistenceFailureDoesNotConsumeTheDecisionSlot() {
+        let judge = QQProactiveDecision()
+        let today = Date(timeIntervalSince1970: 100_000)
+        let failed = judge.reserveAfterPersist(group: "a", budget: 1, now: today) { .failed }
+        #expect(failed == .persistenceFailed)
+
+        let retried = judge.reserveAfterPersist(group: "a", budget: 1, now: today) { .persisted }
+        #expect(retried == .reserved)
+        judge.finish(group: "a")
+
+        let exhausted = judge.reserveAfterPersist(group: "a", budget: 1, now: today) { .dailyLimitReached }
+        #expect(exhausted == .dailyLimitReached)
+    }
+
+    @Test @MainActor func durableLimitIsDistinctFromPersistenceFailure() {
+        let judge = QQProactiveDecision()
+        let now = Date(timeIntervalSince1970: 100_000)
+        #expect(judge.reserveAfterPersist(group: "a", budget: 2, now: now) { .dailyLimitReached } == .dailyLimitReached)
+        #expect(judge.reserveAfterPersist(group: "a", budget: 2, now: now) { .persisted } == .reserved)
+        judge.finish(group: "a")
+    }
 }
 

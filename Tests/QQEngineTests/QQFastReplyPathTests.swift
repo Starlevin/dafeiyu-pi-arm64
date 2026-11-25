@@ -85,6 +85,19 @@ struct QQFastReplyPathTests {
         #expect(FastPathFixtureProtocol.count == 1)
     }
 
+    @Test @MainActor func routeASwiftApprovedReplyDoesNotRequireAnotherParticipationDecision() async throws {
+        FastPathFixtureProtocol.reset()
+        let session = makeSession()
+        defer { session.invalidateAndCancel() }
+        let result = try await makeClient(session).reviewedQQReply(
+            key: "synthetic", config: QQConfig().ai, rule: ChatRule(name: "fixture"),
+            history: [], text: "群成员聊起合成话题", proactive: true, decisionAlreadyScored: true,
+            userText: "这个合成话题真有趣", toolsMayRun: false, reserve: {})
+        #expect(result.shouldSend)
+        #expect(FastPathFixtureProtocol.count == 1)
+        #expect(QQPersona().decode(result.text, input: "").text == "在的呀。")
+    }
+
     /// 普通简短私聊：只应调用模型一次。
     @Test @MainActor func plainShortMessageUsesSingleModelCall() async throws {
         FastPathFixtureProtocol.reset()

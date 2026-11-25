@@ -174,7 +174,13 @@ private final class VisualFixture: URLProtocol, @unchecked Sendable {
             }
             let payload = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("payload"))) as? [String: Any])
             let segments = try #require(payload["message"] as? [[String: Any]])
-            #expect(segments.count == 1); #expect(segments[0]["type"] as? String == "text")
+            let textIndex = mode == "proactive" ? 1 : 0
+            try #require(segments.count == textIndex + 1)
+            if mode == "proactive" {
+                #expect(segments[0]["type"] as? String == "reply")
+                #expect((segments[0]["data"] as? [String: String])?["id"] == "2")
+            }
+            #expect(segments[textIndex]["type"] as? String == "text")
         } else {
             #expect(engine.sends.attempts == 0)
             #expect(!requests.contains { $0.url?.host == "api.deepseek.com" })

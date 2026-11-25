@@ -68,6 +68,13 @@ public struct SendUsage: Codable, Sendable {
         guard pending.remove(ticket) != nil else { return }
         if confirmed { self.confirmed += 1 } else { uncertain += 1 }
     }
+    /// Releases a reservation after an upstream response proves no message was accepted.
+    /// The attempted-send quota and cooldown remain consumed, but this is neither a
+    /// confirmed delivery nor an uncertain submission.
+    public mutating func reject(_ ticket: UUID, now: Date = Date()) {
+        rollover(now: now)
+        pending.remove(ticket)
+    }
     public mutating func recoverInterrupted(now: Date = Date()) {
         rollover(now: now); uncertain += pending.count; pending = []
     }

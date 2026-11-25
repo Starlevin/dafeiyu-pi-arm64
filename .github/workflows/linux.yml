@@ -27,6 +27,7 @@ jobs:
         run: |
           swift build --jobs 2
           python3 scripts/test-onebot-transport.py "$(swift build --show-bin-path)/WeChatAIBot"
+          python3 scripts/test-qq-group-policy.py "$(swift build --show-bin-path)/WeChatAIBot"
       - name: Shared engine tests
         run: bash scripts/test.sh
       - name: Linux image boundaries

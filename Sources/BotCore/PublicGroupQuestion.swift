@@ -13,7 +13,16 @@
 
 public enum PublicGroupQuestion {
     public static func matches(_ text: String) -> Bool {
+        matchesNormalized(normalize(text))
+    }
+
+    /// Additional question forms for QQ's opt-in public-question lane.
+    public static func matchesForQQ(_ text: String) -> Bool {
         let body = normalize(text)
+        return matchesNormalized(body) || isExplicitTechnicalHelp(body)
+    }
+
+    private static func matchesNormalized(_ body: String) -> Bool {
         guard !body.isEmpty else { return false }
         guard !isExcluded(body) else { return false }
         guard hasQuestionForm(body) else { return false }
@@ -192,6 +201,34 @@ public enum PublicGroupQuestion {
               !body.contains("你"), !body.split(whereSeparator: { !$0.isLetter }).contains("you"),
               containsAny(body, factualQuestionForms) else { return false }
         return hasConcreteContent(removing(body, factualQuestionForms))
+    }
+
+    private static let technicalHelpTopics: Set<String> = [
+        "报错", "编译错误", "编译报错", "运行错误", "运行报错", "依赖冲突", "安装报错",
+        "配置报错", "连接错误", "启动失败"
+    ]
+
+    private static func isExplicitTechnicalHelp(_ body: String) -> Bool {
+        let politePrefix = "请问,"
+        let hasPolitePrefix = body.hasPrefix(politePrefix)
+        let question = hasPolitePrefix
+            ? String(body.dropFirst(politePrefix.count).drop(while: { $0 == " " }))
+            : body
+        let suffix: String
+        if question.hasSuffix("的解决方法是什么?") {
+            suffix = "的解决方法是什么?"
+        } else if hasPolitePrefix && question.hasSuffix("怎么解决?") {
+            suffix = "怎么解决?"
+        } else {
+            return false
+        }
+
+        // An exact topic keeps names, quotes and resolved status outside these forms.
+        let topic = String(question.dropLast(suffix.count))
+        if technicalHelpTopics.contains(topic) { return true }
+        return ["这个", "这次", "该", "此"].contains { prefix in
+            topic.hasPrefix(prefix) && technicalHelpTopics.contains(String(topic.dropFirst(prefix.count)))
+        }
     }
 
     private static let questionStarts: [String] = [

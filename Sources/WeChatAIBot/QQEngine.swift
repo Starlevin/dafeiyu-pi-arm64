@@ -36,12 +36,17 @@ private struct QQStored: Codable {
     var artworkLedger: QQArtworkLedger?
     var proactiveSendHistory: [String: [Date]]?
     var proactiveMetrics: [String: QQProactiveDailyStats]?
+    var proactiveScoreBudgets: [String: QQProactiveScoreBudget]?
     var scopedParticipation: QQScopedParticipation?
 }
 private struct QQScopedParticipation: Codable {
     let account: String
     let day: Int
     var counts: [String: Int]
+}
+private struct QQProactiveScoreBudget: Codable {
+    var day: Int
+    var count: Int
 }
 struct QQContact: Identifiable {
     var number: String; var name: String; var group: Bool
@@ -66,6 +71,7 @@ struct QQEngineSharedState: Sendable {
 }
 
 @MainActor final class QQEngine: ObservableObject {
+    private static let nativeChatIngressDetail = "QQ原生聊天已入队"
     @Published var config = QQConfig()
     @Published private(set) var connected = false
     @Published private(set) var running = false
@@ -116,7 +122,10 @@ struct QQEngineSharedState: Sendable {
     private var fence = RunFence()
     private var seen: [String: Double] = [:]
     private var worker: Task<Void, Never>?
-    private let decisionSettings = QQDecisionSettings.load()
+    private var decisionSettings = QQDecisionRuntimeSettings.environment()
+    private var decisionConfigFile: URL?
+    private var lastDecisionConfigRead = Date.distantPast
+    private var decisionConfigRevision = "environment"
     private let proactiveDecision = QQProactiveDecision()
     // ReplyDecision Protocol v1 (opt-in; default off keeps the legacy path unchanged).
     private let replyDecisionSettings = QQReplyDecisionSettings.load()
@@ -132,10 +141,16 @@ struct QQEngineSharedState: Sendable {
     @Published private(set) var queuedCount = 0
     private let replyTimingEnabled = ProcessInfo.processInfo.environment["DAFEIYU_QQ_REPLY_TIMING"] == "1"
     private enum Work {
-        case reply(QQIncoming, QQTarget, Bool, QQGroupContext?, QQReplyTiming?)
+        case reply(QQIncoming, QQTarget, Bool, QQGroupContext?, QQReplyTiming?, QQDecisionRuntimeSettings?,
+                   swiftOrdinary: Bool = false)
         case artwork(QQArtworkRequest, QQTarget, Date?)
         case persona(QQPersonaCommand, QQTarget)
     }
+    private struct PendingPublicQuestion {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
+    private var pendingPublicQuestionTasks: [String: PendingPublicQuestion] = [:]
     private var queue: [Work] = [] {
         didSet { queuedCount = queue.count }
     }
@@ -200,7 +215,27 @@ struct QQEngineSharedState: Sendable {
         }
     }
     private(set) var proactiveMetrics: [String: QQProactiveDailyStats] = [:]
-    private func countProactive(_ event: QQProactiveDailyStats.Event, groupKey: String) {
+    private var proactiveScoreBudgets: [String: QQProactiveScoreBudget] = [:]
+    private func reserveProactiveScoreBudget(groupKey: String, limit: Int, now: Date) -> QQProactiveDecision.PersistenceResult {
+        let localDay = Int(floor((now.timeIntervalSince1970 + 28_800) / 86_400))
+        let previous = proactiveScoreBudgets[groupKey]
+        var entry = previous ?? QQProactiveScoreBudget(day: localDay, count: 0)
+        if entry.day != localDay { entry = QQProactiveScoreBudget(day: localDay, count: 0) }
+        guard entry.count < limit else { return .dailyLimitReached }
+        entry.count += 1
+        proactiveScoreBudgets[groupKey] = entry
+        // Persist the candidate reservation before the model request. Restore the
+        // prior in-memory state on a failed atomic write so a later candidate is
+        // not charged for a score request that never started.
+        do { try persist(); return .persisted }
+        catch {
+            if let previous { proactiveScoreBudgets[groupKey] = previous }
+            else { proactiveScoreBudgets.removeValue(forKey: groupKey) }
+            self.error = error.localizedDescription
+            return .failed
+        }
+    }
+    private func countProactive(_ event: QQProactiveDailyStats.Event, groupKey: String, reason: String? = nil) {
         proactiveMetrics[groupKey, default: QQProactiveDailyStats()].add(event)
         let name: String
         switch event {
@@ -211,13 +246,65 @@ struct QQEngineSharedState: Sendable {
         case .confirmed: name = "confirmed"
         default: return
         }
-        logProactiveFunnel(name, groupKey: groupKey)
+        logProactiveFunnel(name, groupKey: groupKey, reason: reason)
     }
-    private func logProactiveFunnel(_ event: String, groupKey: String, reason: String = "-") {
-        // Callers pass fixed reason codes or ReplyDecisionReason values. Never
-        // include the raw group key, message body, sender or credential.
-        let scope = SHA256.hash(data: Data(groupKey.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16)
-        print("[qq_proactive_funnel] at=\(Date().timeIntervalSince1970) scope=\(scope) event=\(event) reason=\(reason)")
+    private func logProactiveFunnel(_ event: String, groupKey: String, reason: String? = nil) {
+        let digest = SHA256.hash(data: Data(groupKey.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16)
+        let safeReason = reason.map { $0.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "_", options: .regularExpression) } ?? "-"
+        print("[qq_proactive_funnel] at=\(Date().timeIntervalSince1970) scope=\(digest) event=\(event) reason=\(safeReason)")
+    }
+    private func logProactiveScoreReason(_ reason: String, groupKey: String, enforced: Bool) {
+        logProactiveFunnel(enforced ? "score_rejected" : "score_skipped", groupKey: groupKey, reason: reason)
+    }
+    private func proactiveScorePreflight(target: QQTarget, texts: [String]) -> String? {
+        guard !texts.isEmpty else { return "empty_context" }
+        guard modelClient.provider.baseURL.absoluteString == QQProactiveDecision.gateway else {
+            return "provider_mismatch"
+        }
+        let allowance = sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits,
+                                        chatCooldown: config.ai.cooldownSeconds)
+        switch allowance {
+        case .allowed:
+            break
+        case .globalLimit:
+            return "send_global_limit"
+        case .chatLimit:
+            return "send_chat_limit"
+        case .cooldown:
+            return "send_cooldown"
+        }
+        return nil
+    }
+    private func prepareProactiveScore(groupKey: String, target: QQTarget, texts: [String], dailyBudget: Int) -> String? {
+        if let reason = proactiveScorePreflight(target: target, texts: texts) { return reason }
+        let now = Date()
+        switch proactiveDecision.reserveAfterPersist(group: groupKey, budget: dailyBudget, now: now, persist: {
+            reserveProactiveScoreBudget(groupKey: groupKey, limit: dailyBudget, now: now)
+        }) {
+        case .reserved:
+            return nil
+        case .alreadyInFlight:
+            return "parallel_in_flight"
+        case .dailyLimitReached:
+            return "daily_limit_reached"
+        case .persistenceFailed:
+            return "score_budget_persist_failed"
+        }
+    }
+    private func reserveV2ProactiveScoreBudget(groupKey: String, dailyBudget: Int) -> QQScoreBudgetAdmission {
+        let now = Date()
+        switch proactiveDecision.reserveAfterPersist(group: groupKey, budget: dailyBudget, now: now, persist: {
+            reserveProactiveScoreBudget(groupKey: groupKey, limit: dailyBudget, now: now)
+        }) {
+        case .reserved:
+            return .reserved
+        case .alreadyInFlight:
+            return .rejected("parallel_in_flight")
+        case .dailyLimitReached:
+            return .rejected("score_budget_daily_limit")
+        case .persistenceFailed:
+            return .rejected("score_budget_persist_failed")
+        }
     }
     private var groupRecentMessages: [String: [QQMemoryEvent]] = [:]
     private var groupRecentInputs: [String: [String: QQIncoming]] = [:]
@@ -233,6 +320,7 @@ struct QQEngineSharedState: Sendable {
     private var runtimeLock: Int32 = -1
     private var singleReply = false
     private let allowAuthenticationUI: Bool
+    private let testRelayIdentity: OneBotRelayIdentity?
     private let credentialWriter: (String, String) throws -> Void
     private let modelClient: DeepSeekClient
     private let incomingImageLoader: QQIncomingImages
@@ -359,9 +447,10 @@ struct QQEngineSharedState: Sendable {
         guard let value = Double(raw), value >= 0 else { return 600 }
         return min(value, 3600)
     }
-    init(preview: Bool = false, allowAuthenticationUI: Bool = true, storageDirectory: URL? = nil, modelClient: DeepSeekClient = DeepSeekClient(), stickerLibrary: QQStickerLibrary? = nil, imageGenerator: QQImageGenerator = QQImageGenerator(), incomingImageLoader: QQIncomingImages = QQIncomingImages(), artworkLibrary: QQArtworkLibrary? = nil, credentialWriter: @escaping (String, String) throws -> Void = { value, account in try Keychain.save(value, account: account) }) {
+    init(preview: Bool = false, allowAuthenticationUI: Bool = true, storageDirectory: URL? = nil, modelClient: DeepSeekClient = DeepSeekClient(), stickerLibrary: QQStickerLibrary? = nil, imageGenerator: QQImageGenerator = QQImageGenerator(), incomingImageLoader: QQIncomingImages = QQIncomingImages(), artworkLibrary: QQArtworkLibrary? = nil, testRelayIdentity: OneBotRelayIdentity? = nil, credentialWriter: @escaping (String, String) throws -> Void = { value, account in try Keychain.save(value, account: account) }) {
         self.credentialWriter = credentialWriter
         self.allowAuthenticationUI = allowAuthenticationUI
+        self.testRelayIdentity = testRelayIdentity
         self.modelClient = modelClient
         self.imageGenerator = imageGenerator
         self.incomingImageLoader = incomingImageLoader
@@ -392,6 +481,9 @@ struct QQEngineSharedState: Sendable {
                 }
             }
             file = directory.appendingPathComponent("qq-state.json")
+            let configuredDecisionFile = ProcessInfo.processInfo.environment["DAFEIYU_DECISION_CONFIG_FILE"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            decisionConfigFile = configuredDecisionFile.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+                ?? directory.appendingPathComponent("qq-decision-config.json")
             if let file, FileManager.default.fileExists(atPath: file.path) {
                 let data = try Data(contentsOf: file)
                 var state = try JSONDecoder().decode(QQStored.self, from: data)
@@ -406,6 +498,7 @@ struct QQEngineSharedState: Sendable {
                 proactiveSendHistory = state.proactiveSendHistory ?? [:]
                 scopedParticipation = state.scopedParticipation
                 proactiveMetrics = state.proactiveMetrics ?? [:]
+                proactiveScoreBudgets = state.proactiveScoreBudgets ?? [:]
                 recentStickers = state.stickerHistory ?? [:]; lastStickerAt = state.stickerLastSentAt
                 if let books = state.memoryBooks { memoryBooks = books }
                 else {
@@ -679,7 +772,8 @@ struct QQEngineSharedState: Sendable {
     /// 且 `get_status` 报告 online/good 时才算连上；否则一律视为失败，交由上层有限退避重试。
     private func establishConnection(current: UUID) async throws {
         let token = try resolveOneBotToken()
-        try await connection.connect(endpoint: config.endpoint, token: token)
+        let relayIdentity = testRelayIdentity ?? (config.effectiveQQAdminRelayQuotaSentinelEnabled ? .qqAdminLoopback : nil)
+        try await connection.connect(endpoint: config.endpoint, token: token, relayIdentity: relayIdentity)
         try await verifyOneBotSession(current: current)
         let friends = try await connection.action("get_friend_list")
         let groups = try await connection.action("get_group_list")
@@ -882,7 +976,7 @@ struct QQEngineSharedState: Sendable {
 
     // MARK: - 部署策略（环境变量）
 
-    /// 部署侧允许的自动回复目标集合，例如 `DAFEIYU_ALLOWED_TARGETS=private:1915946704`。
+    /// 部署侧允许的自动回复目标集合，例如 `DAFEIYU_ALLOWED_TARGETS=private:12345`。
     ///
     /// 设置后：启用集合必须**恰好**等于该集合，且不得包含群聊目标；
     /// 不满足时拒绝启动自动回复，而不是"尽量修正后照常回复"。
@@ -1002,7 +1096,7 @@ struct QQEngineSharedState: Sendable {
         if let sleepPrevention, sleepPrevention.isRunning { sleepPrevention.terminate() }
         sleepPrevention = nil
         deadlineTask?.cancel(); deadlineTask = nil; runDeadline = nil
-        fence.stop(); running = false; queue.removeAll(); worker?.cancel(); worker = nil
+        fence.stop(); cancelAllPendingPublicQuestions(); running = false; queue.removeAll(); worker?.cancel(); worker = nil
         activeChatStage = nil
         activeToolStage = nil
         latestNativeChatIngress = nil
@@ -1080,6 +1174,10 @@ struct QQEngineSharedState: Sendable {
             rejectedScopedEvents += 1; return
         }
         guard target.key == message.key, seen[message.dedupKey] == nil else { return }
+        refreshDecisionSettingsIfNeeded()
+        if message.group, cancelPendingPublicQuestion(for: message.key) {
+            logProactiveFunnel("public_question_not_enqueued", groupKey: message.key, reason: "superseded")
+        }
         if message.isOwner {
             guard botMessageIDs[config.expectedSelfID + ":" + message.key + ":" + message.id] == nil else { return }
             // Self events may precede send acknowledgements. Resolve the bot ID before classifying manual input.
@@ -1167,8 +1265,39 @@ struct QQEngineSharedState: Sendable {
             groupContext = QQGroupContext(events: groupRecentMessages[message.key, default: []], through: message.id,
                                           messages: groupRecentInputs[message.key, default: [:]], account: config.expectedSelfID)
         }
-        var proactive = false
         let groupProfile = scopedProactiveProfiles[message.key]
+        let decisionSettingsForGroup = proactiveDecisionSettings(groupKey: message.key, profile: groupProfile)
+        let route = QQPublicQuestionAdmission.route(
+            message: message, hasUnansweredContext: groupContext?.hasUnansweredText == true,
+            settings: decisionSettingsForGroup, profileAuthorized: groupProfile != nil,
+            swiftEnforced: replyDecisionSettings.enforces)
+        switch route {
+        case .ignore(let rejection):
+            if groupProfile != nil {
+                countProactive(.ordinary, groupKey: message.key, reason: rejection.rawValue)
+            }
+            return
+        case .publicQuestion:
+            guard let groupProfile, let decisionSettingsForGroup, let groupContext else { return }
+            countProactive(.ordinary, groupKey: message.key)
+            countProactive(.candidate, groupKey: message.key)
+            let now = Date()
+            guard groupProfile.canSpeakPublicQuestion(
+                at: now, confirmed: proactiveSendHistory[message.key, default: []],
+                cooldownSeconds: decisionSettingsForGroup.publicQuestionCooldownSeconds
+            ) else {
+                countProactive(.blocked, groupKey: message.key)
+                let reason = groupProfile.inQuietHours(now) ? "quiet_hours" : "cooldown_or_daily_limit"
+                logProactiveFunnel("public_question_not_enqueued", groupKey: message.key, reason: reason)
+                return
+            }
+            schedulePublicQuestion(message, target: target, context: groupContext)
+            return
+        case .ordinary, .existing:
+            break
+        }
+        let swiftOrdinary = route == .ordinary
+        var proactive = false
         if message.group, groupProfile != nil, message.mentionsSelf { countProactive(.directMention, groupKey: message.key) }
         if message.group && proactiveAllowed(for: target) {
             // Real mentions are independent: never increment or reset proactive progress.
@@ -1185,20 +1314,16 @@ struct QQEngineSharedState: Sendable {
                 if let profile = groupProfile {
                     countProactive(.candidate, groupKey: message.key)
                     guard profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) else {
-                        countProactive(.blocked, groupKey: message.key)
-                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "profile_limits")
-                        return
+                        countProactive(.blocked, groupKey: message.key); return
                     }
-                    guard profile.shouldEvaluate(messageCount: count, roll: Double.random(in: 0..<1)) else {
-                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "sampled_out")
-                        return
-                    }
+                    guard profile.shouldEvaluate(messageCount: count, roll: Double.random(in: 0..<1)) else { return }
                     countProactive(.gatePassed, groupKey: message.key)
                 }
                 guard let groupContext, groupContext.hasUnansweredText || (config.effectiveVisionEnabled && !groupContext.recentImages.isEmpty) else {
                     if groupProfile != nil {
                         countProactive(.contextRejected, groupKey: message.key)
-                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "no_unanswered_context")
+                        logProactiveScoreReason("no_unanswered_context", groupKey: message.key,
+                                                enforced: replyDecisionSettings.enforces || decisionSettings[message.key]?.mode == .enforce)
                     }
                     record(target.id, .skipped, "接话计数已到：当前时段只有未读取媒体或已回复话题，不翻旧话题补答")
                     return
@@ -1206,7 +1331,8 @@ struct QQEngineSharedState: Sendable {
                 if message.mentionedUsers.contains(where: { $0 != "all" }) {
                     if groupProfile != nil {
                         countProactive(.contextRejected, groupKey: message.key)
-                        logProactiveFunnel("score_skipped", groupKey: message.key, reason: "other_member_mentioned")
+                        logProactiveScoreReason("other_member_mentioned", groupKey: message.key,
+                                                enforced: replyDecisionSettings.enforces || decisionSettings[message.key]?.mode == .enforce)
                     }
                     record(target.id, .skipped, "接话计数已到：当前在点名其他成员，不代答")
                     return
@@ -1215,21 +1341,42 @@ struct QQEngineSharedState: Sendable {
             }
         }
         if message.group && !message.mentionsSelf && !proactive { return } // Memory capture alone never authorizes a reply.
-        guard queue.count < Self.queueCapacity else { record(target.id, .skipped, "队列已满，本次触发不补发"); return }
+        guard queue.count < Self.queueCapacity else {
+            if proactive && groupProfile != nil {
+                logProactiveFunnel("score_rejected", groupKey: message.key, reason: "queue_full")
+            }
+            record(target.id, .skipped, "队列已满，本次触发不补发")
+            return
+        }
         if proactive && groupProfile != nil {
             groupMessageCounts[message.key] = 0
             updateScopedParticipation(0, group: message.key, at: now)
         }
         let timing = detected.map { QQReplyTiming(detected: $0, group: message.group, proactive: proactive) }
-        let work = Work.reply(message, target, proactive, groupContext, timing)
+        let work = Work.reply(message, target, proactive, groupContext, timing, nil, swiftOrdinary: swiftOrdinary)
         let referencesBot = message.replyTo.map { reference in
             groupContext?.speaker(for: reference) == "BOT"
                 || botMessageIDs[config.expectedSelfID + ":" + message.key + ":" + reference] != nil
         } ?? false
-        if proactive, let settings = decisionSettings[message.key], settings.mode != .off,
+        if proactive, groupProfile != nil {
+            if referencesBot {
+                logProactiveScoreReason("reply_references_bot", groupKey: message.key,
+                                        enforced: replyDecisionSettings.enforces || decisionSettingsForGroup?.mode == .enforce)
+            } else if let settings = decisionSettingsForGroup {
+                if settings.mode == .off {
+                    logProactiveScoreReason("scoring_mode_off", groupKey: message.key,
+                                            enforced: replyDecisionSettings.enforces)
+                }
+            } else {
+                logProactiveScoreReason("scoring_not_configured", groupKey: message.key,
+                                        enforced: replyDecisionSettings.enforces)
+            }
+        }
+        if proactive, let settings = decisionSettingsForGroup, settings.mode != .off,
            !referencesBot {
             if let groupContext {
-                evaluateProactiveDecision(message, target: target, context: groupContext, settings: settings, work: work)
+                evaluateProactiveDecision(message, target: target, context: groupContext, settings: settings,
+                                          work: work, swiftOrdinary: swiftOrdinary)
             }
             // v1 enforce owns the enqueue decision; returning here also prevents double
             // enqueue when the legacy mode is shadow but v1 is enforce.
@@ -1237,48 +1384,194 @@ struct QQEngineSharedState: Sendable {
         }
         enqueueReply(work, groupKey: proactive && groupProfile != nil ? message.key : nil)
     }
+
+    private func proactiveDecisionSettings(groupKey: String, profile: QQScopedProactiveProfile?) -> QQDecisionRuntimeSettings? {
+        if let live = decisionSettings[groupKey] { return live }
+        guard replyDecisionSettings.enforces, let profile else { return nil }
+        return QQDecisionRuntimeSettings(
+            mode: .enforce, threshold: replyDecisionSettings.thresholdOverride ?? 0.70,
+            dailyBudget: replyDecisionSettings.dailyLimitOverride ?? profile.dailyLimit,
+            freshnessSeconds: 3)
+    }
+
+    private func ordinaryReplyAllowed(groupKey: String, requiresSwift: Bool) -> Bool {
+        refreshDecisionSettingsIfNeeded()
+        let profile = scopedProactiveProfiles[groupKey]
+        let settings = proactiveDecisionSettings(groupKey: groupKey, profile: profile)
+        if requiresSwift || settings?.ordinaryReplyEnabled != nil {
+            return profile != nil && replyDecisionSettings.enforces && settings?.admitsOrdinarySwiftScoring == true
+        }
+        return true
+    }
+
+    /// A read-only control-panel status may refresh the bounded decision file
+    /// immediately so an operator can verify a save while the group is quiet.
+    func groupReplyPolicySnapshot() -> [String: Any] {
+        refreshDecisionSettingsIfNeeded(force: true)
+        var groups: [String: [String: Any]] = [:]
+        for target in config.targets where target.group && target.enabled {
+            let profile = scopedProactiveProfiles[target.key]
+            guard let policy = proactiveDecisionSettings(groupKey: target.key, profile: profile) else { continue }
+            groups[target.key] = [
+                "ordinary": profile != nil && replyDecisionSettings.enforces && policy.admitsOrdinarySwiftScoring,
+                "publicQuestion": QQPublicQuestionAdmission.pilotApplies(
+                    profileAuthorized: profile != nil, settings: policy, isGroup: true, mentionsSelf: false),
+                "threshold": policy.threshold
+            ]
+        }
+        return ["revision": decisionConfigRevision, "groups": groups]
+    }
+
+    @discardableResult
+    private func cancelPendingPublicQuestion(for groupKey: String) -> Bool {
+        guard let pending = pendingPublicQuestionTasks.removeValue(forKey: groupKey) else { return false }
+        pending.task.cancel()
+        return true
+    }
+
+    private func cancelAllPendingPublicQuestions() {
+        let tasks = pendingPublicQuestionTasks.values.map(\.task)
+        pendingPublicQuestionTasks.removeAll()
+        tasks.forEach { $0.cancel() }
+    }
+
+    private func schedulePublicQuestion(_ message: QQIncoming, target: QQTarget, context: QQGroupContext) {
+        let key = message.key
+        cancelPendingPublicQuestion(for: key)
+        let token = UUID()
+        let epoch = fence.epoch
+        let task = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_500_000_000) }
+            catch { return }
+            guard let self,
+                  self.pendingPublicQuestionTasks[key]?.token == token else { return }
+            self.pendingPublicQuestionTasks.removeValue(forKey: key)
+            self.refreshDecisionSettingsIfNeeded()
+            guard self.fence.permits(epoch), self.running,
+                  let liveSettings = self.currentPublicQuestionSettings(message, target: target),
+                  let liveProfile = self.scopedProactiveProfiles[key] else {
+                self.logProactiveFunnel("public_question_not_enqueued", groupKey: key,
+                                        reason: "context_or_settings_changed")
+                return
+            }
+            let now = Date()
+            guard liveProfile.canSpeakPublicQuestion(
+                    at: now, confirmed: self.proactiveSendHistory[key, default: []],
+                    cooldownSeconds: liveSettings.publicQuestionCooldownSeconds
+                  ) else {
+                let reason = liveProfile.inQuietHours(now) ? "quiet_hours" : "cooldown_or_daily_limit"
+                self.logProactiveFunnel("public_question_not_enqueued", groupKey: key, reason: reason)
+                return
+            }
+            guard self.queue.count < Self.queueCapacity else {
+                self.logProactiveFunnel("public_question_not_enqueued", groupKey: key, reason: "queue_full")
+                return
+            }
+            self.countProactive(.gatePassed, groupKey: key)
+            self.enqueueReply(.reply(message, target, true, context, nil, liveSettings), groupKey: key)
+        }
+        pendingPublicQuestionTasks[key] = PendingPublicQuestion(token: token, task: task)
+    }
+
+    private func currentPublicQuestionSettings(_ message: QQIncoming, target: QQTarget) -> QQDecisionRuntimeSettings? {
+        refreshDecisionSettingsIfNeeded()
+        let previousMessageTimes = groupRecentMessages[message.key, default: []]
+            .filter { $0.id != message.id }
+            .map { $0.at.timeIntervalSince1970 }
+        guard message.group,
+              config.targets.contains(where: { $0.id == target.id && $0.key == message.key && $0.enabled && $0.group }),
+              proactiveAllowed(for: target),
+              QQPublicQuestionAdmission.candidateWithinLifetime(
+                messageTime: message.time, now: Date().timeIntervalSince1970),
+              QQPublicQuestionAdmission.candidateIsChronologicallyLatest(
+                messageTime: message.time, previousMessageTimes: previousMessageTimes),
+              groupRecentMessages[message.key]?.last?.id == message.id,
+              groupRecentInputs[message.key]?[message.id] == message,
+              let profile = scopedProactiveProfiles[message.key],
+              let settings = proactiveDecisionSettings(groupKey: message.key, profile: profile),
+              settings.mode == .enforce, settings.publicQuestionEnabled else { return nil }
+        return settings
+    }
+
     private func evaluateProactiveDecision(_ message: QQIncoming, target: QQTarget, context: QQGroupContext,
-                                           settings: QQDecisionSettings, work: Work) {
+                                           settings: QQDecisionRuntimeSettings, work: Work, swiftOrdinary: Bool) {
         let key = message.key
         // v1 switch: enforce replaces the 0–1 score gate; shadow only logs, legacy path continues.
         if replyDecisionSettings.enforces {
-            evaluateProactiveDecisionV2(message, target: target, context: context, settings: settings, work: work)
+            evaluateProactiveDecisionV2(message, target: target, context: context, settings: settings,
+                                        work: work, swiftOrdinary: swiftOrdinary)
             return
         }
         if replyDecisionSettings.mode == .shadow {
             logProactiveDecisionShadow(message, context: context, settings: settings)
         }
         let texts = QQProactiveDecision.context(context.eventsText())
-        guard !texts.isEmpty, modelClient.provider.baseURL.absoluteString == QQProactiveDecision.gateway,
-              sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits,
-                              chatCooldown: config.ai.cooldownSeconds) == .allowed,
-              proactiveDecision.reserve(group: key, budget: settings.dailyBudget) else { return }
+        if let reason = prepareProactiveScore(groupKey: key, target: target, texts: texts,
+                                              dailyBudget: settings.dailyBudget) {
+            logProactiveScoreReason(reason, groupKey: key, enforced: settings.mode == .enforce)
+            return
+        }
         let epoch = fence.epoch
         let trace = UUID()
         let start = ContinuousClock.now
         Task { [weak self] in
             guard let self else { return }
             defer { self.proactiveDecision.finish(group: key) }
-            guard (try? self.check(epoch, scope: key, target: target)) != nil,
-                  let bearer = try? self.resolveModelKey() else { return }
+            guard (try? self.check(epoch, scope: key, target: target)) != nil else {
+                self.logProactiveScoreReason("epoch_invalid", groupKey: key, enforced: settings.mode == .enforce)
+                return
+            }
+            guard let bearer = try? self.resolveModelKey(), !bearer.isEmpty else {
+                self.logProactiveScoreReason("provider_credential_unavailable", groupKey: key,
+                                             enforced: settings.mode == .enforce)
+                return
+            }
             let score = await QQProactiveDecision.score(context: texts, bearer: bearer)
             let elapsed = start.duration(to: .now).components
             let latency = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
             let number = score.map { String($0) } ?? "-"
             print("[qq_decision] trace=\(trace) mode=\(settings.mode.rawValue) model=\(QQProactiveDecision.model) score=\(number) threshold=\(settings.threshold) latency_ms=\(latency)")
-            guard settings.mode == .enforce else { return }
-            guard let score, score >= settings.threshold else {
-                self.logProactiveFunnel("score_rejected", groupKey: key,
-                                        reason: score == nil ? "scorer_unavailable" : "below_threshold")
+            guard let score else {
+                self.logProactiveScoreReason("scorer_unavailable", groupKey: key, enforced: settings.mode == .enforce)
+                return
+            }
+            guard score >= settings.threshold else {
+                self.logProactiveScoreReason("score_below_threshold", groupKey: key, enforced: settings.mode == .enforce)
+                return
+            }
+            guard settings.mode == .enforce else {
+                self.logProactiveScoreReason("mode_not_enforce", groupKey: key, enforced: false)
+                return
+            }
+            guard (try? self.check(epoch, scope: key, target: target)) != nil else {
+                self.logProactiveScoreReason("epoch_invalid_after_score", groupKey: key, enforced: true)
+                return
+            }
+            guard self.proactiveAllowed(for: target) else {
+                self.logProactiveScoreReason("authorization_revoked", groupKey: key, enforced: true)
+                return
+            }
+            guard self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? true else {
+                self.logProactiveScoreReason("profile_eligibility", groupKey: key, enforced: true)
                 return
             }
             self.logProactiveFunnel("score_passed", groupKey: key)
-            guard (try? self.check(epoch, scope: key, target: target)) != nil,
-                  self.proactiveAllowed(for: target),
-                  self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? true,
-                  self.groupRecentMessages[key]?.last?.id == message.id,
-                  Date().timeIntervalSince1970 - message.time <= 120 else {
-                self.logProactiveFunnel("score_after_reject", groupKey: key, reason: "post_score_guard")
+            if let reason = QQProactiveDecisionFreshness.vetoReason(
+                candidate: message,
+                timeline: self.groupRecentMessages[key] ?? [],
+                messages: self.groupRecentInputs[key] ?? [:], freshnessSeconds: settings.freshnessSeconds
+            ) {
+                self.logProactiveFunnel("score_after_reject", groupKey: key, reason: "post_score_\(reason)")
+                print("[qq_decision_veto] trace=\(trace) reason=post_score_\(reason)")
+                self.record(target.id, .skipped, "主动话题后置复核拒绝[\(reason)]")
+                return
+            }
+            guard Date().timeIntervalSince1970 - message.time <= 120 else {
+                self.logProactiveFunnel("score_rejected", groupKey: key, reason: "candidate_expired")
+                return
+            }
+            guard self.queue.count < Self.queueCapacity else {
+                self.logProactiveFunnel("score_rejected", groupKey: key, reason: "queue_full")
                 return
             }
             self.enqueueReply(work, groupKey: self.scopedProactiveProfiles[key] == nil ? nil : key)
@@ -1286,48 +1579,90 @@ struct QQEngineSharedState: Sendable {
     }
 
     private func evaluateProactiveDecisionV2(_ message: QQIncoming, target: QQTarget, context: QQGroupContext,
-                                             settings: QQDecisionSettings, work: Work) {
+                                             settings: QQDecisionRuntimeSettings, work: Work, swiftOrdinary: Bool) {
         let key = message.key
-        guard let profile = scopedProactiveProfiles[key] else { return }
+        guard let profile = scopedProactiveProfiles[key] else {
+            logProactiveScoreReason("profile_missing", groupKey: key, enforced: true)
+            return
+        }
         let texts = QQProactiveDecision.context(context.eventsText())
-        guard !texts.isEmpty, modelClient.provider.baseURL.absoluteString == QQProactiveDecision.gateway,
-              sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits,
-                              chatCooldown: config.ai.cooldownSeconds) == .allowed,
-              proactiveDecision.reserve(group: key, budget: settings.dailyBudget) else {
-            logProactiveFunnel("score_skipped", groupKey: key, reason: "proactive_preflight")
+        if let reason = proactiveScorePreflight(target: target, texts: texts) {
+            logProactiveScoreReason(reason, groupKey: key, enforced: true)
             return
         }
         let epoch = fence.epoch
         let traceID = UUID()
         let start = ContinuousClock.now
-        let v2 = replyDecisionSettings
+        let v2 = replyDecisionSettings.applying(groupThreshold: settings.threshold)
         Task { [weak self] in
             guard let self else { return }
-            defer { self.proactiveDecision.finish(group: key) }
-            guard (try? self.check(epoch, scope: key, target: target)) != nil else { return }
-            // A missing bearer is passed as a nil scorer value: score() returns nil and the protocol fails closed.
-            let scorer = QQProactiveScorer(context: texts, bearer: try? self.resolveModelKey())
+            guard (try? self.check(epoch, scope: key, target: target)) != nil else {
+                self.logProactiveScoreReason("epoch_invalid", groupKey: key, enforced: true)
+                return
+            }
+            let bearer = try? self.resolveModelKey()
+            let baseScorer = QQProactiveScorer(context: texts, bearer: bearer,
+                                               ordinaryConversation: swiftOrdinary)
+            let scorerState = QQBudgetedScorerState()
+            let scorer = QQBudgetedReplyScorer(base: baseScorer, reserve: { [weak self] in
+                guard let self else { return .rejected("engine_unavailable") }
+                guard bearer?.isEmpty == false else { return .rejected("provider_credential_unavailable") }
+                return await self.reserveV2ProactiveScoreBudget(groupKey: key, dailyBudget: settings.dailyBudget)
+            }, release: { [weak self] in
+                guard let self else { return }
+                await self.proactiveDecision.finish(group: key)
+            }, state: scorerState)
             guard let trace = await self.replyDecisionGate.decide(
-                message: message, context: context, profile: profile, settings: v2, scorer: scorer
+                message: message, context: context, profile: profile, settings: v2, scorer: scorer,
+                skipSoftPrefilters: swiftOrdinary
             ) else {
-                self.logProactiveFunnel("score_skipped", groupKey: key, reason: "parallel_in_flight")
+                self.logProactiveScoreReason("parallel_in_flight", groupKey: key, enforced: true)
                 return
             }
             let elapsed = start.duration(to: .now).components
             let latency = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
             let heuristic = trace.result.heuristicScore.map { String(format: "%.4f", $0) } ?? "-"
-            print("[qq_reply_decision_v2] trace=\(traceID) mode=enforce mention=\(trace.input.mention.rawValue) heuristic=\(heuristic) score=\(String(format: "%.4f", trace.result.score)) reason=\(trace.result.reason.rawValue) source=\(trace.result.source.rawValue) scorer=\(trace.result.scorerCalled) latency_ms=\(latency)")
-            guard trace.result.action == .speak else {
-                self.logProactiveFunnel("score_rejected", groupKey: key, reason: trace.result.reason.rawValue)
+            let scorerStatus = await scorerState.read()
+            let scorerHTTP = scorerStatus == .httpRequestStarted
+            print("[qq_reply_decision_v2] trace=\(traceID) mode=enforce mention=\(trace.input.mention.rawValue) heuristic=\(heuristic) score=\(String(format: "%.4f", trace.result.score)) reason=\(trace.result.reason.rawValue) source=\(trace.result.source.rawValue) scorer_http=\(scorerHTTP) latency_ms=\(latency)")
+            if trace.result.action != .speak {
+                if case let .reservationRejected(reason) = scorerStatus {
+                    self.logProactiveScoreReason(reason, groupKey: key, enforced: true)
+                } else {
+                    self.logProactiveScoreReason(trace.result.reason.rawValue, groupKey: key, enforced: true)
+                }
+                return
+            }
+            guard (try? self.check(epoch, scope: key, target: target)) != nil else {
+                self.logProactiveScoreReason("epoch_invalid_after_score", groupKey: key, enforced: true)
+                return
+            }
+            guard self.proactiveAllowed(for: target),
+                  self.ordinaryReplyAllowed(groupKey: key, requiresSwift: swiftOrdinary) else {
+                self.logProactiveScoreReason("authorization_revoked", groupKey: key, enforced: true)
+                return
+            }
+            guard self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? false else {
+                self.logProactiveScoreReason("profile_eligibility", groupKey: key, enforced: true)
                 return
             }
             self.logProactiveFunnel("score_passed", groupKey: key)
-            guard (try? self.check(epoch, scope: key, target: target)) != nil,
-                  self.proactiveAllowed(for: target),
-                  self.scopedProactiveProfiles[key]?.canSpeak(at: Date(), confirmed: self.proactiveSendHistory[key, default: []]) ?? false,
-                  self.groupRecentMessages[key]?.last?.id == message.id,
-                  Date().timeIntervalSince1970 - message.time <= 120 else {
-                self.logProactiveFunnel("score_after_reject", groupKey: key, reason: "post_score_guard")
+            if let reason = QQProactiveDecisionFreshness.vetoReason(
+                candidate: message,
+                timeline: self.groupRecentMessages[key] ?? [],
+                messages: self.groupRecentInputs[key] ?? [:], freshnessSeconds: settings.freshnessSeconds
+            ) {
+                self.logProactiveFunnel("score_after_reject", groupKey: key, reason: "post_score_\(reason)")
+                print("[qq_reply_decision_v2_veto] trace=\(traceID) reason=post_score_\(reason)")
+                self.record(target.id, .skipped, "主动话题后置复核拒绝[\(reason)]")
+                return
+            }
+            guard Date().timeIntervalSince1970 - message.time <= 120 else {
+                self.logProactiveFunnel("score_rejected", groupKey: key, reason: "candidate_expired")
+                return
+            }
+            guard self.queue.count < Self.queueCapacity else {
+                self.logProactiveFunnel("score_rejected", groupKey: key, reason: "queue_full")
                 return
             }
             self.enqueueReply(work, groupKey: key)
@@ -1336,7 +1671,7 @@ struct QQEngineSharedState: Sendable {
 
     /// Shadow mode must not affect delivery: it only records what v1 would have decided.
     private func logProactiveDecisionShadow(_ message: QQIncoming, context: QQGroupContext,
-                                           settings: QQDecisionSettings) {
+                                           settings: QQDecisionRuntimeSettings) {
         let key = message.key
         guard let profile = scopedProactiveProfiles[key] else { return }
         let texts = QQProactiveDecision.context(context.eventsText())
@@ -1358,13 +1693,61 @@ struct QQEngineSharedState: Sendable {
     private func enqueueReply(_ work: Work, groupKey: String?) {
         guard queue.count < Self.queueCapacity else { return }
         queue.append(work)
-        if case let .reply(message, target, proactive, _, _) = work,
+        if case let .reply(message, target, proactive, _, _, _, _) = work,
            message.group, message.mentionsSelf || (proactive && groupKey == message.key) {
+            // The marker covers native mentions and admitted scoped group replies.
+            // It carries no message ID/text and is intentionally not persisted.
             latestNativeChatIngress = LogEntry(
-                chatID: target.id, state: .queued, detail: "QQ原生聊天已入队")
+                chatID: target.id, state: .queued, detail: Self.nativeChatIngressDetail)
         }
         if let groupKey { countProactive(.queued, groupKey: groupKey) }
         startQueue()
+    }
+
+    private func refreshDecisionSettingsIfNeeded(now: Date = Date(), force: Bool = false) {
+        guard force || now.timeIntervalSince(lastDecisionConfigRead) >= 5 else { return }
+        lastDecisionConfigRead = now
+        let fallback = fallbackDecisionSettings()
+        guard let decisionConfigFile,
+              let size = try? decisionConfigFile.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 16_384,
+              let data = try? Data(contentsOf: decisionConfigFile),
+              let parsed = QQDecisionRuntimeSettings.parse(data, defaults: fallback,
+                                                            defaultThreshold: Double(ProcessInfo.processInfo.environment["DAFEIYU_REPLY_DECISION_THRESHOLD"] ?? "").flatMap { (0...1).contains($0) ? $0 : nil } ?? 0.70) else {
+            if let decisionConfigFile, !FileManager.default.fileExists(atPath: decisionConfigFile.path) {
+                decisionSettings = fallback
+                if decisionConfigRevision != "environment" {
+                    decisionConfigRevision = "environment"
+                    print("[qq_proactive_config] revision=environment")
+                }
+            } else if decisionConfigFile == nil {
+                decisionSettings = fallback
+                if decisionConfigRevision != "environment" {
+                    decisionConfigRevision = "environment"
+                    print("[qq_proactive_config] revision=environment")
+                }
+            }
+            return
+        }
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in data { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        let revision = String(format: "%016llx", hash)
+        decisionSettings = parsed
+        if revision != decisionConfigRevision {
+            decisionConfigRevision = revision
+            print("[qq_proactive_config] revision=\(decisionConfigRevision)")
+        }
+    }
+    private func fallbackDecisionSettings() -> [String: QQDecisionRuntimeSettings] {
+        var result = QQDecisionRuntimeSettings.environment()
+        guard replyDecisionSettings.enforces else { return result }
+        for (key, profile) in scopedProactiveProfiles where result[key] == nil {
+            result[key] = QQDecisionRuntimeSettings(
+                mode: .enforce, threshold: replyDecisionSettings.thresholdOverride ?? 0.70,
+                dailyBudget: replyDecisionSettings.dailyLimitOverride ?? profile.dailyLimit,
+                freshnessSeconds: 3)
+        }
+        return result
     }
     private func startQueue() {
         if worker == nil {
@@ -1382,7 +1765,8 @@ struct QQEngineSharedState: Sendable {
             if case let .persona(command, target) = item {
                 await deliverPersona(command, target: target, epoch: epoch); continue
             }
-            guard case let .reply(message, target, proactive, groupContext, queuedTiming) = item else { continue }
+            guard case let .reply(message, target, proactive, groupContext, queuedTiming, publicQuestionSettings, swiftOrdinary) = item else { continue }
+            let isPublicQuestion = publicQuestionSettings != nil
             var timing = queuedTiming
             timing?.generationStart = ContinuousClock.now
             defer { if let timing { print(timing.logLine) } }
@@ -1393,8 +1777,19 @@ struct QQEngineSharedState: Sendable {
             let submissionID = UUID()
             defer { activeGroupSubmissions.removeValue(forKey: submissionID) }
             do {
-                if proactive, let profile = scopedProactiveProfiles[message.key],
-                   !profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) {
+                if isPublicQuestion {
+                    guard let settings = currentPublicQuestionSettings(message, target: target),
+                          let profile = scopedProactiveProfiles[message.key],
+                          profile.canSpeakPublicQuestion(at: Date(),
+                              confirmed: proactiveSendHistory[message.key, default: []],
+                              cooldownSeconds: settings.publicQuestionCooldownSeconds),
+                          QQPublicQuestionAdmission.candidateWithinLifetime(
+                            messageTime: message.time, now: Date().timeIntervalSince1970) else {
+                        record(target.id, .skipped, "公开问句已过期或当前试点条件已变化，未生成")
+                        continue
+                    }
+                } else if proactive, let profile = scopedProactiveProfiles[message.key],
+                          !profile.canSpeak(at: Date(), confirmed: proactiveSendHistory[message.key, default: []]) {
                     record(target.id, .skipped, "主动接话仍在冷却或已达限额，未调用模型")
                     continue
                 }
@@ -1408,6 +1803,16 @@ struct QQEngineSharedState: Sendable {
                     }
                     record(target.id, .skipped, "主动接话候选在等待中已过期，未调用模型")
                     continue
+                }
+                if isPublicQuestion {
+                    guard let settings = currentPublicQuestionSettings(message, target: target),
+                          let profile = scopedProactiveProfiles[message.key],
+                          profile.canSpeakPublicQuestion(at: Date(),
+                              confirmed: proactiveSendHistory[message.key, default: []],
+                              cooldownSeconds: settings.publicQuestionCooldownSeconds) else {
+                        record(target.id, .skipped, "公开问句在排队期间已失效，未生成")
+                        continue
+                    }
                 }
                 guard sends.allowance(chat: target.id, limits: config.ai.effectiveSendLimits, chatCooldown: config.ai.cooldownSeconds) == .allowed else {
                     record(target.id, .skipped, "发送限额已用完"); continue
@@ -1440,7 +1845,8 @@ struct QQEngineSharedState: Sendable {
                     rule.prompt += "\n本轮当前发言经程序核验，来自 [OWNER] 本账号主人/开发者的人工 @，不是机器人自动回复；你是 BOT 大肥鱼，直接回应主人，不能把这条人工发言归为你自己说过的话。主人身份不改变安全边界。"
                 }
                 if proactive {
-                    guard proactiveAllowed(for: target) else {
+                    guard proactiveAllowed(for: target),
+                          isPublicQuestion || ordinaryReplyAllowed(groupKey: message.key, requiresSwift: swiftOrdinary) else {
                         record(target.id, .skipped, "主动接话执行前目标已不再授权，已安全放弃")
                         continue
                     }
@@ -1462,7 +1868,7 @@ struct QQEngineSharedState: Sendable {
                 let contextKey = config.expectedSelfID + ":" + message.key + ":" + message.sender
                 let key = (try? resolveModelKey()) ?? ""
                 var preparedImage: ModelToolResult?
-                if !QQVisualTools.wantsWebSearch(message.text) && config.effectiveImageGeneration.enabled && QQImagePromptPlan.needsPlanning(message.text) && persona.rebuff(for: message.text) == nil {
+                if !isPublicQuestion && !QQVisualTools.wantsWebSearch(message.text) && config.effectiveImageGeneration.enabled && QQImagePromptPlan.needsPlanning(message.text) && persona.rebuff(for: message.text) == nil {
                     preparedImage = try await prepareImage(request: message.text, proactive: proactive, epoch: epoch, message: message, target: target, key: key, submission: submissionID)
                 }
                 let memoryScope = config.expectedSelfID + ":" + message.key
@@ -1626,6 +2032,7 @@ struct QQEngineSharedState: Sendable {
                 // V1+V2：知识模块默认关闭。开启时只在所有既有门禁、时间线、记忆与视觉保护之后，
                 // 追加一段精简、低信任的第五人格话题提示；不改门禁顺序、次数统计、@ 行为或发信路径。
                 // 禁用时下面整段不执行，行为与 4f8588e 基线完全一致。
+                var publicQuestionKnowledge: [String] = []
                 if identityVConfig.enabled, message.group {
                     let recentTexts = groupContext?.eventsText() ?? []
                     let contextTexts = recentTexts.isEmpty ? [String(message.text.prefix(500))] : recentTexts
@@ -1634,7 +2041,11 @@ struct QQEngineSharedState: Sendable {
                                                         recentBotReplies: Array(replyExamples.suffix(2)),
                                                         proactive: proactive)
                     identityVMetrics.record(idvPlan)
-                    if !idvPlan.promptFragment.isEmpty {
+                    if isPublicQuestion {
+                        if !IdentityVDialogue.containsInjection(message.text), idvPlan.knowledgeMatched {
+                            publicQuestionKnowledge = publicQuestionKnowledgeFacts(from: idvPlan.promptFragment)
+                        }
+                    } else if !idvPlan.promptFragment.isEmpty {
                         rule.prompt += "\n" + idvPlan.promptFragment
                     }
                 }
@@ -1649,14 +2060,14 @@ struct QQEngineSharedState: Sendable {
                 // 第五人格赛程：默认关闭；只在明确赛事提问时追加社区赛程资料。
                 // 与上面的游戏知识分支并列，不改任何既有行。
                 // 数据不可用时也注入明确「不可用」指令，防止主模型凭记忆编造赛事。
-                if let idvFragment = await idvScheduleCoordinator.fragment(
+                if !isPublicQuestion, let idvFragment = await idvScheduleCoordinator.fragment(
                     for: message.text, scope: message.key), !idvFragment.isEmpty {
                     rule.prompt += "\n" + idvFragment
                 }
                 if socialRequested { rule.prompt += "\n" + QQSocialTools.instruction }
                 var socialCalled = false
                 var socialSucceeded = false
-                if let dsfFragment = await dsfPriceCoordinator.fragment(
+                if !isPublicQuestion, let dsfFragment = await dsfPriceCoordinator.fragment(
                     message: message.text,
                     isGroup: message.group,
                     scope: message.key
@@ -1713,10 +2124,34 @@ struct QQEngineSharedState: Sendable {
                     result = ModelResult(text: "", tokens: 0, seconds: 0)
                 } else {
                     defer { clearChatStage(submissionID) }
+                    // 本机 model-hub 的 trace 头与 timing 复用同一个 ID；未开 timing 时也生成一个，
+                    // 同一轮里的重试因此共用同一个值。只作为请求头，不写日志、不改动行为。
+                    let traceID = timing?.trace ?? UUID()
                     timing?.modelStart = ContinuousClock.now
-                    waitingForModel = true
-                    result = try await modelClient.reviewedQQReply(key: key, config: config.ai, rule: rule,
+                    if isPublicQuestion {
+                        guard let settings = currentPublicQuestionSettings(message, target: target),
+                              let profile = scopedProactiveProfiles[message.key],
+                              profile.canSpeakPublicQuestion(at: Date(),
+                                  confirmed: proactiveSendHistory[message.key, default: []],
+                                  cooldownSeconds: settings.publicQuestionCooldownSeconds),
+                              let groupContext else {
+                            record(target.id, .skipped, "公开问句生成前身份或频率条件失效")
+                            continue
+                        }
+                        waitingForModel = true
+                        result = try await modelClient.publicGroupQuestionReply(
+                            key: key, config: config.ai, rule: rule,
+                            context: publicQuestionPriorContext(from: groupContext.eventsText()), text: message.text,
+                            knowledge: publicQuestionKnowledge, traceID: traceID,
+                            reserve: { [weak self] in
+                                guard let self else { throw CancellationError() }
+                                try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
+                            })
+                    } else {
+                        waitingForModel = true
+                        result = try await modelClient.reviewedQQReply(key: key, config: config.ai, rule: rule,
                     history: message.group ? [] : Array((history[contextKey] ?? []).suffix(2)), text: modelInput, images: incomingImages, toolHandler: toolHandler, onlineToolsEnabled: !proactive && config.effectiveOnlineEnabled, socialToolsEnabled: socialRequested, imageGenerationEnabled: !proactive && config.effectiveImageGeneration.enabled, artworkEnabled: !proactive && config.effectiveArtwork.enabled && config.effectiveArtwork.agentEnabled, stickerOptions: stickerOptions, proactive: proactive && preparedImage == nil,
+                    decisionAlreadyScored: swiftOrdinary,
                     // 2026-11-01：单轮快速路径的可达性修正。
                     // userText 传**用户本轮原始发言**，用于判断是否需要回退双阶段；
                     // 原来拿拼装后的 modelInput 去判，而 modelInput 必然带程序加的
@@ -1724,10 +2159,11 @@ struct QQEngineSharedState: Sendable {
                     // toolsMayRun 只在**用户本轮确实要用工具**（明确要求联网搜索）时为真：
                     // 单轮路径本就不给模型下发工具定义，普通闲聊不必多花一次调用；
                     // 而一旦要联网，工具结果仍走原版双阶段校对，不牺牲正确性。
-                    userText: message.text, toolsMayRun: webRequested || socialRequested, reserve: { [weak self] in
+                    userText: message.text, toolsMayRun: webRequested || socialRequested, traceID: traceID, reserve: { [weak self] in
                         guard let self else { throw CancellationError() }
                         try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
                     })
+                    }
                     waitingForModel = false
                 }
                 if timing?.modelStart != nil { timing?.modelEnd = ContinuousClock.now }
@@ -1750,6 +2186,16 @@ struct QQEngineSharedState: Sendable {
                     }
                 }
                 try check(epoch, scope: message.key, target: target)
+                if isPublicQuestion {
+                    guard let settings = currentPublicQuestionSettings(message, target: target),
+                          let profile = scopedProactiveProfiles[message.key],
+                          profile.canSpeakPublicQuestion(at: Date(),
+                              confirmed: proactiveSendHistory[message.key, default: []],
+                              cooldownSeconds: settings.publicQuestionCooldownSeconds) else {
+                        record(target.id, .skipped, "公开问句生成期间目标或频率条件变化，候选作废")
+                        continue
+                    }
+                }
                 usage.tokens += result.tokens
                 let replyExpired = proactive && Date().timeIntervalSince1970 - message.time > 120
                 if proactive && (!result.shouldSend || replyExpired) {
@@ -1765,6 +2211,12 @@ struct QQEngineSharedState: Sendable {
                     try persist(); continue
                 }
                 let reply = persona.decode(result.text, input: !proactive ? message.text : "主动加入群话题")
+                if swiftOrdinary && reply.isFallback {
+                    countProactive(.modelSilent, groupKey: message.key)
+                    logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "invalid_model_decision")
+                    record(target.id, .skipped, "主动接话模型输出格式无效")
+                    try persist(); continue
+                }
                 // PersonaGuard only runs when v1 is enabled; default off keeps the legacy output path.
                 if replyDecisionSettings.enabled, replyDecisionSettings.personaGuard != .off,
                    proactive || replyDecisionSettings.personaGuard == .all {
@@ -1809,11 +2261,25 @@ struct QQEngineSharedState: Sendable {
                 }
                 // Re-check immediately before submission; earlier queued turns cannot bypass cooldown.
                 if proactive {
-                    let permitted = scopedProactiveProfiles[message.key]?.canSpeak(
-                        at: Date(), confirmed: proactiveSendHistory[message.key, default: []])
-                        ?? config.effectiveGroupParticipationEnabled
+                    let permitted: Bool
+                    if isPublicQuestion,
+                       let settings = currentPublicQuestionSettings(message, target: target),
+                       let profile = scopedProactiveProfiles[message.key] {
+                        permitted = profile.canSpeakPublicQuestion(
+                            at: Date(), confirmed: proactiveSendHistory[message.key, default: []],
+                            cooldownSeconds: settings.publicQuestionCooldownSeconds)
+                    } else if isPublicQuestion {
+                        permitted = false
+                    } else {
+                        permitted = ordinaryReplyAllowed(groupKey: message.key, requiresSwift: swiftOrdinary)
+                            && (scopedProactiveProfiles[message.key]?.canSpeak(
+                                at: Date(), confirmed: proactiveSendHistory[message.key, default: []])
+                                ?? config.effectiveGroupParticipationEnabled)
+                    }
                     guard permitted else {
-                        record(target.id, .skipped, "主动接话冷却、夜间静默或每日次数上限，本轮不发送"); continue
+                        record(target.id, .skipped, isPublicQuestion
+                               ? "公开问句试点频率、夜间静默或每日次数限制，本轮不发送"
+                               : "主动接话冷却、夜间静默或每日次数上限，本轮不发送"); continue
                     }
                 }
                 ticket = try sends.reserve(chat: target.id, limits: config.ai.effectiveSendLimits, chatCooldown: config.ai.cooldownSeconds)
@@ -1826,7 +2292,13 @@ struct QQEngineSharedState: Sendable {
                 }
                 try persist() // Durable send reservation AND image cooldown precede submission.
                 let sourceText = result.sources.isEmpty ? "" : "\n来源：\n" + result.sources.joined(separator: "\n")
-                let (action, params) = QQPolicy.sendAction(target: target, text: reply.text + sourceText + (preparedArtwork.map { "\n" + $0.caption } ?? ""), image: image)
+                let (action, baseParams) = QQPolicy.sendAction(target: target, text: reply.text + sourceText + (preparedArtwork.map { "\n" + $0.caption } ?? ""), image: image)
+                // For proactively generated group replies, anchor delivery to the
+                // exact candidate when its OneBot message id is a valid integer.
+                // A failed/uncertain referenced send is never retried as plain text.
+                let params = proactive && message.group
+                    ? (QQProactiveReplyReference.add(messageID: message.id, to: baseParams) ?? baseParams)
+                    : baseParams
                 if message.group { activeGroupSubmissions[submissionID] = message.key }
                 timing?.submitStart = ContinuousClock.now
                 let response: [String: Any]
@@ -1882,12 +2354,16 @@ struct QQEngineSharedState: Sendable {
                 heldOwnerEvents = heldOwnerEvents.filter { !$0.key.hasPrefix(message.key + ":") }
                 if proactive, scopedProactiveProfiles[message.key] != nil {
                     if waitingForReceipt {
-                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "send_unconfirmed")
+                        let reason = error is OneBotExplicitRejection ? "send_rejected" : "send_unconfirmed"
+                        logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: reason)
                     } else if waitingForModel, fence.permits(epoch), !(error is CancellationError) {
                         logProactiveFunnel("after_enqueue_skip", groupKey: message.key, reason: "model_failed")
                     }
                 }
-                if let ticket {
+                if let rejection = error as? OneBotExplicitRejection {
+                    if let ticket { sends.reject(ticket); artworkLedger.reject(ticket) }
+                    record(target.id, .failed, rejection.localizedDescription + "；其他会话继续运行")
+                } else if let ticket {
                     sends.finish(ticket, confirmed: false); artworkLedger.finish(ticket, confirmed: false)
                     if waitingForReceipt, error is OneBotActionTimeout, proactive,
                        scopedProactiveProfiles[message.key] != nil {
@@ -2020,7 +2496,10 @@ struct QQEngineSharedState: Sendable {
             record(target.id, .confirmed, "性格命令已获发送确认；仅作用于本会话，未调用模型")
         } catch {
             heldOwnerEvents = heldOwnerEvents.filter { !$0.key.hasPrefix(target.key + ":") }
-            if let ticket {
+            if let rejection = error as? OneBotExplicitRejection {
+                if let ticket { sends.reject(ticket) }
+                record(target.id, .failed, rejection.localizedDescription + "；其他会话继续运行")
+            } else if let ticket {
                 sends.finish(ticket, confirmed: false)
                 record(target.id, .uncertain, "性格设置以持久化状态为准；回执未知，不重发，已暂停")
                 if fence.permits(epoch) { pause() }
@@ -2091,7 +2570,10 @@ struct QQEngineSharedState: Sendable {
             if singleReply { pause() }
         } catch {
             heldOwnerEvents = heldOwnerEvents.filter { !$0.key.hasPrefix(target.key + ":") }
-            if let ticket {
+            if let rejection = error as? OneBotExplicitRejection {
+                if let ticket { sends.reject(ticket); artworkLedger.reject(ticket) }
+                record(target.id, .failed, rejection.localizedDescription + "；其他会话继续运行")
+            } else if let ticket {
                 sends.finish(ticket, confirmed: false); artworkLedger.finish(ticket, confirmed: false)
                 record(target.id, .uncertain, "插画发送结果未知，不重发；已暂停")
                 if fence.permits(epoch) { pause() }
@@ -2434,7 +2916,7 @@ struct QQEngineSharedState: Sendable {
             recentStickers = recentStickers.mapValues { Array($0.filter { Date().timeIntervalSince($0.at) < 7 * 86400 }.suffix(500)) }.filter { !$0.value.isEmpty }
             if recentStickers.count > 60 { recentStickers = Dictionary(uniqueKeysWithValues: recentStickers.sorted { ($0.value.last?.at ?? .distantPast) > ($1.value.last?.at ?? .distantPast) }.prefix(60).map { ($0.key, $0.value) }) }
             proactiveSendHistory = proactiveSendHistory.mapValues { $0.filter { Date().timeIntervalSince($0) < 2 * 86400 } }.filter { !$0.value.isEmpty }
-            let state = QQStored(config: config, usage: usage, memoryUsage: memoryUsage, sends: sends, logs: logs, seen: seen, memories: nil, memoryBooks: memoryBooks, botMessageIDs: botMessageIDs, ownershipSince: ownershipSince, stickerHistory: recentStickers, stickerLastSentAt: lastStickerAt, artworkLedger: artworkLedger, proactiveSendHistory: proactiveSendHistory, proactiveMetrics: proactiveMetrics, scopedParticipation: scopedParticipation)
+            let state = QQStored(config: config, usage: usage, memoryUsage: memoryUsage, sends: sends, logs: logs, seen: seen, memories: nil, memoryBooks: memoryBooks, botMessageIDs: botMessageIDs, ownershipSince: ownershipSince, stickerHistory: recentStickers, stickerLastSentAt: lastStickerAt, artworkLedger: artworkLedger, proactiveSendHistory: proactiveSendHistory, proactiveMetrics: proactiveMetrics, proactiveScoreBudgets: proactiveScoreBudgets, scopedParticipation: scopedParticipation)
             // QQ uses authenticated network events and may run while the desktop is locked.
             // User-enabled structured memories and bounded/redacted pending excerpts; never image bytes or credentials.
             let data = try JSONEncoder().encode(state)

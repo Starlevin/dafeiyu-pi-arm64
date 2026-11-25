@@ -692,8 +692,7 @@ def _qq_proactive_runtime(qq_adapter, revision: str) -> dict:
     if qq_adapter is None or not revision:
         return unavailable
     try:
-        controller = qq_adapter._controller_instance()
-        state = controller.state() if controller is not None else None
+        state = qq_adapter.group_reply_panel()
     except Exception:
         return unavailable
     policy = state.get("groupReplyPolicy") if isinstance(state, dict) else None

@@ -38,9 +38,11 @@ Verified live surface (read-only reconnaissance, 2026-11-11):
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
+import stat
 import threading
 import time
 import urllib.error
@@ -158,6 +160,9 @@ class QQAdapter:
     # not report which client is attached, so the console only names it when
     # the operator configured it (qqClientName) or a read actually reported it.
     DEFAULT_CLIENT = "NapCat"
+    CONTROL_ENTRY = re.compile(
+        rb"(?m)^QQ_CONTROL_URL=http://127\.0\.0\.1:([0-9]{1,5})/#([0-9A-Za-z_-]{32,128})\r?$"
+    )
 
     def __init__(self, cfg, fixture=None):
         self.cfg = cfg
@@ -279,6 +284,48 @@ class QQAdapter:
             raise AdapterError("QQ 管理模块不可加载", 502) from e
         self._controller = mod.Controller(self.root)
         return self._controller
+
+    def group_reply_panel(self):
+        """Read local QQ status, including on installations without qq-admin."""
+        try:
+            controller = self._controller_instance()
+            if controller is not None:
+                return controller.state()
+        except AdapterError:
+            pass
+        if self.fixture is not None or self.root is None or os.name != "posix":
+            return None
+        path = self.root / "run/qq-bot.log"
+        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as log:
+            metadata = os.fstat(log.fileno())
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                return None
+            limit = 16_384
+            entries = self.CONTROL_ENTRY.findall(log.read(limit))
+            if metadata.st_size > limit:
+                log.seek(max(limit, metadata.st_size - limit))
+                entries.extend(self.CONTROL_ENTRY.findall(log.read(limit)))
+        if not entries:
+            return None
+        raw_port, token = entries[-1]
+        port = int(raw_port)
+        if not 1 <= port <= 65535:
+            return None
+        # A direct loopback connection never forwards the control header to a
+        # proxy or follows a redirect to another endpoint.
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            connection.request("GET", "/api/status", headers={
+                "Origin": f"http://127.0.0.1:{port}", "x-qq-control": token.decode("ascii"),
+            })
+            response = connection.getresponse()
+            if response.status != 200:
+                return None
+            limit = 4_000_000
+            body = response.read(limit + 1)
+            return json.loads(body) if len(body) <= limit else None
+        finally:
+            connection.close()
 
     # ---- overview ---------------------------------------------------------- #
 

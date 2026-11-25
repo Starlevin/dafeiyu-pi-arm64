@@ -14,6 +14,12 @@ public struct QQTarget: Codable, Equatable, Identifiable, Sendable {
 }
 public struct QQConfig: Codable, Equatable, Sendable {
     public var endpoint = "ws://127.0.0.1:3001"
+    /// Opt-in for the known local qq-admin relay contract. Missing in older state files means disabled.
+    public var qqAdminRelayQuotaSentinelEnabled: Bool?
+    public var effectiveQQAdminRelayQuotaSentinelEnabled: Bool {
+        get { qqAdminRelayQuotaSentinelEnabled ?? false }
+        set { qqAdminRelayQuotaSentinelEnabled = newValue }
+    }
     public var expectedSelfID = ""
     public var targets: [QQTarget] = []
     public var ai = BotConfig()

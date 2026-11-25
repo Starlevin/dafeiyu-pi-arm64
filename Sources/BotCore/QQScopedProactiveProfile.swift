@@ -90,10 +90,21 @@ public struct QQScopedProactiveProfile: Sendable {
     /// Conservative: count confirmed sends and refuse further sends during cooldown,
     /// once daily budget is exhausted, or during local quiet hours.
     public func canSpeak(at now: Date, confirmed: [Date]) -> Bool {
+        canSpeak(at: now, confirmed: confirmed, cooldownSeconds: cooldown)
+    }
+
+    /// Public question replies may use a per-group cooldown while retaining the
+    /// profile's quiet-hours and confirmed daily-limit protections.
+    public func canSpeakPublicQuestion(at now: Date, confirmed: [Date], cooldownSeconds: Int) -> Bool {
+        canSpeak(at: now, confirmed: confirmed,
+                 cooldownSeconds: TimeInterval(min(1200, max(30, cooldownSeconds))))
+    }
+
+    private func canSpeak(at now: Date, confirmed: [Date], cooldownSeconds: TimeInterval) -> Bool {
         guard !inQuietHours(now) else { return false }
         let today = confirmed.filter { localCalendar.isDate($0, inSameDayAs: now) }
         guard today.count < dailyLimit else { return false }
-        if let last = confirmed.max(), now.timeIntervalSince(last) < cooldown { return false }
+        if let last = confirmed.max(), now.timeIntervalSince(last) < cooldownSeconds { return false }
         return true
     }
 }

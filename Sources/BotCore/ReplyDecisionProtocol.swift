@@ -236,7 +236,8 @@ public struct ReplyDecisionEngine: Sendable {
     }
 
     public func decide(_ rawInput: ReplyDecisionInput, state rawState: ReplyDecisionState,
-                       now: Int, scorer: (any ReplyScoring)? = nil) async -> (ReplyDecisionResult, ReplyDecisionState) {
+                       now: Int, scorer: (any ReplyScoring)? = nil,
+                       skipSoftPrefilters: Bool = false) async -> (ReplyDecisionResult, ReplyDecisionState) {
         var input = rawInput
         input.normalizeWindow(maxCount: limits.maxWindow, maxCharacters: limits.maxCharactersPerMessage)
         var state = rawState
@@ -266,7 +267,7 @@ public struct ReplyDecisionEngine: Sendable {
         if input.botSpokeRecently && input.secondsSinceBotReply < limits.recentSpeakSuppressSeconds && !input.unansweredQuestion {
             return (skip(.recentlySpoke, state), state)
         }
-        if input.interruptCost >= limits.highInterruptCost {
+        if !skipSoftPrefilters && input.interruptCost >= limits.highInterruptCost {
             return (skip(.highInterruptCost, state), state)
         }
         guard !input.window.isEmpty else {
@@ -276,7 +277,7 @@ public struct ReplyDecisionEngine: Sendable {
         // 3. Local heuristic (no model call).
         let heuristic = heuristicScore(input)
         let gate = round4(limits.threshold - limits.waitBand)
-        if heuristic < gate {
+        if !skipSoftPrefilters && heuristic < gate {
             var result = skip(.heuristicLow, state)
             result.heuristicScore = heuristic
             return (result, state)
@@ -300,6 +301,11 @@ public struct ReplyDecisionEngine: Sendable {
             return (ReplyDecisionResult(action: .wait, score: score, reason: .belowThreshold,
                                         ttlSeconds: limits.waitTTLSeconds, source: .model,
                                         heuristicScore: heuristic, scorerCalled: true), state)
+        }
+
+        if skipSoftPrefilters {
+            return (ReplyDecisionResult(action: .skip, score: 0, reason: .scorerUnavailable,
+                                        ttlSeconds: 0, source: .failClosed, heuristicScore: heuristic), state)
         }
 
         if heuristic >= limits.threshold {

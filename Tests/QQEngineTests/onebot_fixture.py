@@ -86,6 +86,8 @@ with socket.socket() as server:
                 data = {'user_id': 12345}
             elif action == 'get_status':
                 data = {'online': True, 'good': True}
+                if (directory / 'relay-status-sentinel').exists():
+                    data['message_id'] = -1
             elif action == 'get_friend_list':
                 data = [{'user_id': 54321, 'nickname': 'fixture'}]
             elif action == 'get_group_list':
@@ -127,7 +129,10 @@ with socket.socket() as server:
                     assert (directory / 'release-send').exists(), 'send fixture was not released'
                 if (directory / 'drop-send').exists():
                     break
-                data = {'message_id': 99}
+                if (directory / 'generic-error').exists():
+                    send(conn, {'status': 'failed', 'retcode': 204, 'data': {}, 'echo': request['echo']})
+                    continue
+                data = {'message_id': -1 if (directory / 'negative-send').exists() or (directory / 'relay-send-sentinel').exists() else 99}
                 if action == 'send_group_msg' and (directory / 'self-echo').exists():
                     echo_event = {'post_type': 'message_sent', 'time': time.time(), 'self_id': 12345,
                                   'user_id': 12345, 'sender': {'user_id': 12345}, 'message_type': 'group',
