@@ -7,6 +7,7 @@ import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -27,6 +28,7 @@ PRIVATE = ROOT / 'secrets/model-hub'
 ORIGIN = 'http://127.0.0.1:18090'
 GROUP_CHAT_ROUTE_SECONDS = 22.0
 GROUP_CHAT_PRIMARY_SECONDS = 12.0
+WORKBUDDY_BACKUP_SECONDS = 30.0
 WECHAT_SHORT_ROUTE_SECONDS = 15.0
 WECHAT_SHORT_PRIMARY_SECONDS = 9.0
 PANEL_PROXY = 'http://127.0.0.1:18091'
@@ -365,14 +367,21 @@ def _workbuddy_model_state(profile):
 
 
 def cooldown_state():
-    return read_json(COOLDOWN_FILE, {}) or {}
+    try:
+        data = read_json(COOLDOWN_FILE, {})
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: row for key, row in data.items() if isinstance(row, dict)}
 
 
 def cooldown_until(pid):
     item = cooldown_state().get(pid) or {}
     try:
-        return float(item.get('until') or 0)
-    except (TypeError, ValueError):
+        until = float(item.get('until') or 0)
+        return until if math.isfinite(until) else 0.0
+    except (TypeError, ValueError, OverflowError):
         return 0.0
 
 
@@ -943,13 +952,19 @@ def complete(body):
         return result
 
     def attempt_backup():
-        result = invoke_with_deadline(backup, body, route_deadline)
+        deadline = route_deadline
+        if _is_local_workbuddy(profile) and backup.get('protocol') == 'chat':
+            budget = time.monotonic() + WORKBUDDY_BACKUP_SECONDS
+            deadline = budget if deadline is None else min(deadline, budget)
+        result = invoke_with_deadline(backup, body, deadline)
         if not short_wechat_reply or backup.get('id') != 'sensenova-6.8-flash-lite':
             return result
         result = salvage_reply(result, strict_mode, is_proactive, sticker_mode)
         if not short_backup_is_empty(result):
             return result
-        retry_deadline = min(route_deadline, time.monotonic() + 5.0) if route_deadline is not None else None
+        retry_deadline = time.monotonic() + 5.0
+        if deadline is not None:
+            retry_deadline = min(deadline, retry_deadline)
         retry = invoke_with_deadline(backup, {**body, 'max_tokens': 256}, retry_deadline,
                                      False, retry_timeout=(1.25, 3.75))
         retry = salvage_reply(retry, strict_mode, is_proactive, sticker_mode)
@@ -961,7 +976,7 @@ def complete(body):
         try:
             result = attempt_backup()
         except Exception as error:
-            if fast_group_route:
+            if fast_group_route or _is_local_workbuddy(profile):
                 failure = 'backup_' + error.reason if isinstance(error, Fallbackable) else 'backup_failed'
                 route_log({'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'requested': profile['id'],
                            'actual': '', 'fallback': True, 'reason': failure,
@@ -977,7 +992,9 @@ def complete(body):
             return standby_backup(WORKBUDDY_NO_ACCOUNT)
         if cooldown_until(profile['id']) > time.time():
             cooldown = cooldown_state().get(profile['id']) or {}
-            prior = cooldown.get('reason', 'unknown')
+            prior = cooldown.get('reason')
+            if not isinstance(prior, str) or not re.fullmatch(r'[a-z0-9_]{1,50}', prior):
+                prior = 'unknown'
             failed_at = cooldown.get('at')
             recovered = (account_available is True and prior == WORKBUDDY_NO_ACCOUNT
                          and type(failed_at) in (int, float) and observed_at > failed_at)
@@ -988,7 +1005,10 @@ def complete(body):
         result = invoke_with_deadline(primary, body, primary_deadline)
         if empty_reply(result):
             raise Fallbackable('empty_reply')
-        clear_cooldown(profile['id'])
+        try:
+            clear_cooldown(profile['id'])
+        except OSError:
+            pass  # Cooldown persistence must not determine delivery.
         return finish(result, profile['id'])
     except Fallbackable as error:
         if not backup:
@@ -998,8 +1018,11 @@ def complete(body):
             raise UpstreamError(503, '%s 不可用（%s），且没有配置备用模型' % (profile['name'], error.reason))
         if fast_group_route and error.reason == 'timeout':
             return standby_backup('group_primary_timeout')
-        set_cooldown(profile['id'], error.reason)
-        if fast_group_route:
+        try:
+            set_cooldown(profile['id'], error.reason)
+        except OSError:
+            pass  # Cooldown persistence must not determine delivery.
+        if fast_group_route or _is_local_workbuddy(profile):
             return standby_backup(error.reason)
         try:
             result = attempt_backup()

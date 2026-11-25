@@ -144,8 +144,8 @@ def test_short_wechat_reply_has_its_own_budget(hub):
     for platform, limit, tools, expected in (
             ('wechat', 128, None, (109.0, 115.0)),
             ('qq', 128, None, (112.0, 122.0)),
-            ('wechat', 161, None, (None, None)),
-            ('wechat', 128, [{'type': 'function'}], (None, None))):
+            ('wechat', 161, None, (None, 100.0 + hub.WORKBUDDY_BACKUP_SECONDS)),
+            ('wechat', 128, [{'type': 'function'}], (None, 100.0 + hub.WORKBUDDY_BACKUP_SECONDS))):
         deadlines = []
         def invoke(profile, _body, _deadline=None):
             deadlines.append(_deadline)
@@ -208,6 +208,55 @@ def test_short_wechat_reserves_budget_for_the_visible_reply(hub):
                       'messages': [{'role': 'system', 'content': note}]})
     assert observed == ['none', 'high', 'high'] and profile['reasoning'] == 'high'
     print('short_wechat_visible_reply_budget: PASS')
+
+
+def test_cooldown_disk_errors_preserve_model_results(hub):
+    primary = {'id': 'workbuddy-deepseek', 'name': 'WorkBuddy', 'protocol': 'chat',
+               'base_url': hub.GATEWAY_URL, 'fallback_to': 'sensenova-6.8-flash-lite'}
+    backup = {'id': 'sensenova-6.8-flash-lite', 'name': 'SenseNova', 'protocol': 'chat'}
+    calls, routes = [], []
+    hub.profiles = lambda: [primary, backup]
+    hub._workbuddy_model_state = lambda _: (None, 0)
+    hub.route_log = routes.append
+    body = {'model': primary['id'], 'messages': [{'role': 'user', 'content': 'fixture'}]}
+    reply = {'choices': [{'message': {'content': 'fixture-reply'}}]}
+    state = {'fail_primary': False}
+
+    def invoke(profile, _body, **kwargs):
+        calls.append((profile['id'], kwargs.get('_deadline')))
+        if profile == primary and state['fail_primary']:
+            raise hub.Fallbackable('http_503')
+        return reply
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError('fixture storage unavailable')
+
+    hub._invoke = invoke
+    hub.atomic = unavailable
+    with tempfile.TemporaryDirectory() as directory:
+        hub.COOLDOWN_FILE = Path(directory) / 'cooldown.json'
+        # Read errors and unusable JSON leave the real channels available.
+        hub.COOLDOWN_FILE.mkdir()
+        assert hub.complete(body) == reply
+        hub.COOLDOWN_FILE.rmdir()
+        for invalid in ('[', '[1]', '{"workbuddy-deepseek": 1}',
+                        '{"workbuddy-deepseek": {"until": Infinity}}',
+                        '{"workbuddy-deepseek": {"until": ' + '9' * 400 + '}}'):
+            hub.COOLDOWN_FILE.write_text(invalid)
+            assert hub.complete(body) == reply
+        # A stale cooldown has to be cleared, even if the disk is unwritable.
+        hub.COOLDOWN_FILE.write_text(json.dumps({primary['id']: {'until': 0, 'reason': 'http_503'}}))
+        assert hub.complete(body) == reply
+        assert routes[-1]['actual'] == primary['id']
+        # An unavailable cooldown write must not stop the approved fallback.
+        state['fail_primary'] = True
+        before = time.monotonic()
+        assert hub.complete(body) == reply
+        assert [name for name, _ in calls[-2:]] == [primary['id'], backup['id']]
+        assert calls[-2][1] is None
+        assert before < calls[-1][1] <= time.monotonic() + hub.WORKBUDDY_BACKUP_SECONDS
+        assert routes[-1]['actual'] == backup['id'] and routes[-1]['reason'] == 'http_503'
+    print('COOLDOWN_DISK_ERRORS_PASS')
 
 
 def main():
@@ -287,6 +336,7 @@ def main():
     test_workbuddy_account_snapshot_routes(load())
     test_short_wechat_reserves_budget_for_the_visible_reply(load())
     test_short_wechat_reply_has_its_own_budget(load())
+    test_cooldown_disk_errors_preserve_model_results(load())
     print('ALL MODEL-HUB OFFLINE TESTS PASS')
 
 
