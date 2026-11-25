@@ -2623,14 +2623,51 @@ struct QQEngineSharedState: Sendable {
     }
     func clearMemory(_ target: UUID) {
         guard let target = config.targets.first(where: { $0.id == target }) else { return }
+        error = nil
         pause()
         let scope = config.expectedSelfID + ":" + target.key
-        if let store = memoryReliableStores.removeValue(forKey: scope) {
-            do { try store.eraseAll(); memoryStatus = "该会话可靠记忆与待整理片段已清除" }
-            catch { self.error = "可靠记忆清除失败：\(error.localizedDescription)" }
+        do {
+            try withPersistenceLock { file in
+                guard let root = memoryReliableRoot else { throw AppFailure.message("可靠记忆目录不可用") }
+                let store: QQMemoryReliableStore?
+                if let loaded = memoryReliableStores[scope] {
+                    store = loaded
+                } else {
+                    let directory = memoryReliableDirectory(for: scope, root: root)
+                    let exists: Bool
+                    do {
+                        // Clear an existing store even if this process has not
+                        // used it or the reliable-memory feature is disabled.
+                        _ = try FileManager.default.attributesOfItem(atPath: directory.path)
+                        exists = true
+                    } catch let error as NSError where error.domain == NSCocoaErrorDomain
+                        && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) {
+                        exists = false
+                    }
+                    store = exists ? try QQMemoryReliableStore(directory: directory, scope: scope) : nil
+                }
+                defer {
+                    memoryReliableStores.removeValue(forKey: scope)
+                    store?.close()
+                }
+                let previous = memoryBooks.removeValue(forKey: scope)
+                do {
+                    try persistLocked(to: file)
+                } catch {
+                    memoryBooks[scope] = previous
+                    throw error
+                }
+                memoryIndexes.removeValue(forKey: scope)
+                memoryRetryAfter.removeValue(forKey: scope)
+                memoryFailureCounts.removeValue(forKey: scope)
+                try store?.eraseAll()
+            }
+            memoryStatus = "该会话所有记忆和待整理片段已清除"
+            status = "QQ 回复已暂停"
+        } catch {
+            memoryStatus = "该会话记忆清除未完成"
+            self.error = "QQ 记忆清除未完成：\(error.localizedDescription)"
         }
-        memoryBooks.removeValue(forKey: scope); memoryIndexes.removeValue(forKey: scope); memoryRetryAfter.removeValue(forKey: scope)
-        do { try persist(); memoryStatus = "该会话所有记忆和待整理片段已清除"; status = "QQ 回复已暂停" } catch { self.error = error.localizedDescription }
     }
     private func scheduleMemoryLearning() {
         guard running, connected, config.effectiveMemoryEnabled, memoryWorker == nil, storageOK else { return }
@@ -2839,9 +2876,7 @@ struct QQEngineSharedState: Sendable {
             }
             return existing
         }
-        let digest = SHA256.hash(data: Data(scope.utf8)).prefix(8)
-            .map { String(format: "%02x", $0) }.joined()
-        let directory = root.appendingPathComponent("scope-\(digest)", isDirectory: true)
+        let directory = memoryReliableDirectory(for: scope, root: root)
         do {
             let store = try QQMemoryReliableStore(directory: directory, scope: scope)
             // Shadow is an observation path: never import or mutate the legacy
@@ -2862,6 +2897,12 @@ struct QQEngineSharedState: Sendable {
             memoryStatus = "可靠记忆未启用：\(error.localizedDescription)"
             return nil
         }
+    }
+
+    private func memoryReliableDirectory(for scope: String, root: URL) -> URL {
+        let digest = SHA256.hash(data: Data(scope.utf8)).prefix(8)
+            .map { String(format: "%02x", $0) }.joined()
+        return root.appendingPathComponent("scope-\(digest)", isDirectory: true)
     }
 
     /// Authoritative mode: the new WAL/store owns batching and apply. The legacy book
@@ -2911,6 +2952,10 @@ struct QQEngineSharedState: Sendable {
         do { try persist() } catch { self.error = error.localizedDescription }
     }
     private func persist() throws {
+        try withPersistenceLock { try persistLocked(to: $0) }
+    }
+
+    private func withPersistenceLock<T>(_ operation: (URL) throws -> T) throws -> T {
         guard storageOK, let file else { throw AppFailure.message("QQ 本地存储不可用") }
         // A disconnected native panel must not overwrite a running control page's state.
         var writeLock: Int32 = -1
@@ -2924,6 +2969,10 @@ struct QQEngineSharedState: Sendable {
         defer { if writeLock >= 0 { _ = flock(writeLock, LOCK_UN); close(writeLock) } }
         let current = FileManager.default.fileExists(atPath: file.path) ? try Data(contentsOf: file) : nil
         guard current == persistedData else { throw AppFailure.message("QQ 配置已由另一实例更新，请重新打开面板再操作") }
+        return try operation(file)
+    }
+
+    private func persistLocked(to file: URL) throws {
         artworkLedger.trim()
         seen = seen.filter { Date().timeIntervalSince1970 - $0.value < 86400 }
         logs = Array(logs.filter { $0.date > Date().addingTimeInterval(-7 * 86400) }.suffix(1000))

@@ -5,6 +5,11 @@ import FoundationNetworking
 import Testing
 import BotCore
 @testable import WeChatAIBot
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 #if canImport(Darwin)
 import Darwin
 #else
@@ -92,6 +97,64 @@ private final class DelayedModelProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @Suite(.serialized) @MainActor struct QQEngineTests {
+    @Test(arguments: [false, true])
+    func clearMemoryErasesUnloadedScopeAndReportsLockFailure(locked: Bool) throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = QQTarget(number: "99999", name: "合成群甲", group: true)
+        let other = QQTarget(number: "88888", name: "合成群乙", group: true)
+        let seed = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
+        seed.config.expectedSelfID = "12345"
+        seed.config.targets = [target, other]
+        try #require(seed.save())
+        let file = directory.appendingPathComponent("qq-state.json")
+        var stored = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        var books: [String: Any] = [:]
+        var paths: [String: URL] = [:]
+        for group in [target, other] {
+            let scope = "12345:" + group.key
+            let key = SHA256.hash(data: Data(scope.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+            let path = directory.appendingPathComponent("QQMemoryReliable/scope-\(key)", isDirectory: true)
+            var book = QQMemoryBook()
+            book.importLegacy(text: group.name + "的合成记忆", subject: "OWNER", at: Date())
+            book.append(QQMemoryEvent(id: "queued-\(group.number)", subject: "OWNER", text: "待整理合成资料", at: Date()))
+            let store = try QQMemoryReliableStore(directory: path, scope: scope)
+            _ = try store.importLegacy(book)
+            try #require(!store.items.isEmpty && !store.batch().isEmpty)
+            store.close()
+            books[scope] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(book))
+            paths[scope] = path
+        }
+        stored["memoryBooks"] = books
+        try JSONSerialization.data(withJSONObject: stored).write(to: file)
+        let engine = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
+        let wanted = "12345:" + target.key
+        let untouched = "12345:" + other.key
+        let path = try #require(paths[wanted])
+        if locked {
+            let holder = try QQMemoryReliableStore(directory: path, scope: wanted)
+            let before = try Data(contentsOf: file)
+            engine.clearMemory(target.id)
+            #expect(engine.error?.contains("未完成") == true)
+            #expect(engine.memoryStatus == "该会话记忆清除未完成")
+            #expect(try Data(contentsOf: file) == before)
+            #expect(!holder.items.isEmpty && !holder.batch().isEmpty)
+            holder.close()
+        }
+        engine.clearMemory(target.id)
+        #expect(engine.error == nil && !engine.running)
+        #expect(engine.memoryStatus == "该会话所有记忆和待整理片段已清除")
+        let reopened = QQEngine(allowAuthenticationUI: false, storageDirectory: directory)
+        #expect(Set(reopened.memoryBooks.keys) == [untouched])
+        let erased = try QQMemoryReliableStore(directory: path, scope: wanted)
+        defer { erased.close() }
+        #expect(erased.items.isEmpty && erased.recent.isEmpty && erased.batch().isEmpty)
+        let retained = try QQMemoryReliableStore(directory: try #require(paths[untouched]), scope: untouched)
+        defer { retained.close() }
+        #expect(!retained.items.isEmpty && !retained.batch().isEmpty)
+    }
+
     @Test func disconnectReleasesRuntimeLockEvenWhenDescriptorWasDuplicated() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

@@ -257,9 +257,9 @@ public final class QQMemoryJournal {
 
     public func erase() throws {
         closeCurrentHandle()
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: directoryURL.path)) ?? []
+        let names = try FileManager.default.contentsOfDirectory(atPath: directoryURL.path)
         for name in names where name != ".lock" {
-            try? FileManager.default.removeItem(at: directoryURL.appendingPathComponent(name))
+            try FileManager.default.removeItem(at: directoryURL.appendingPathComponent(name))
         }
         cursor = Cursor(); entries = []; seen = []; seenOrder = []; seqCounter = 0
         segments = []; currentIndex = 1; currentBytes = 0; refusedEvents = 0; corruptRecords = 0; prunedSegments = 0

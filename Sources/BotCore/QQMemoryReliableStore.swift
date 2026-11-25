@@ -439,9 +439,12 @@ public final class QQMemoryReliableStore {
 
     public func eraseAll() throws {
         try journal.erase()
-        try? FileManager.default.removeItem(at: stateURL)
-        try? FileManager.default.removeItem(at: backupURL)
-        try? FileManager.default.removeItem(at: archiveURL)
+        do {
+            try FileManager.default.removeItem(at: archiveURL)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code) {
+            // A scope without archived episodes has no archive to remove.
+        }
         state = State(scope: scope)
         archiveRecords = 0
         try persistState()
