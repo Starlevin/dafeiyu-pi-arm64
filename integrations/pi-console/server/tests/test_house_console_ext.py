@@ -829,6 +829,83 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(row["freshnessSeconds"], 1)
         self.assertEqual(row["publicQuestionCooldownSeconds"], 120)
 
+    def test_qq_ordinary_toggle_and_threshold_are_incremental_and_readable(self):
+        self._write_qq_cfg({
+            "group:111": {
+                "mode": "enforce", "threshold": 0.45,
+                "publicQuestionEnabled": True, "dailyBudget": 50,
+            },
+            "group:222": {"mode": "enforce", "threshold": 0.70,
+                           "publicQuestionEnabled": True, "dailyBudget": 30},
+        })
+        st, _ = self._post("/api/proactive/config", {
+            "platform": "qq", "group": "group:111",
+            "ordinaryReplyEnabled": True, "threshold": 0.62,
+        })
+        self.assertEqual(st, 200)
+        row = json.loads(self._get("/api/proactive/config")[1])["qqGroups"]["group:111"]
+        self.assertEqual(row["threshold"], 0.62)
+        self.assertTrue(row["publicQuestionEnabled"])
+        self.assertEqual(row["dailyBudget"], 50)
+        state = json.loads(self._get("/api/proactive/config")[1])["qqOrdinary"]["group:111"]
+        self.assertEqual(state, {"enabled": True, "source": "explicit",
+                                 "explicit": True, "threshold": 0.62})
+
+        st, _ = self._post("/api/proactive/config", {
+            "platform": "qq", "group": "group:111", "ordinaryReplyEnabled": False,
+        })
+        self.assertEqual(st, 200)
+        row = json.loads(self._get("/api/proactive/config")[1])["qqGroups"]["group:111"]
+        self.assertFalse(row["ordinaryReplyEnabled"])
+        self.assertTrue(row["publicQuestionEnabled"])
+        state = json.loads(self._get("/api/proactive/config")[1])["qqOrdinary"]["group:111"]
+        self.assertEqual(state["enabled"], False)
+        self.assertEqual(state["source"], "explicit")
+        legacy = json.loads(self._get("/api/proactive/config")[1])["qqOrdinary"]["group:222"]
+        self.assertEqual(legacy["enabled"], False)
+        self.assertEqual(legacy["source"], "default")
+
+    def test_qq_policy_readback_requires_matching_live_revision(self):
+        group = "group:111"
+        path = self._write_qq_cfg({group: {"mode": "enforce", "threshold": 0.45,
+                                          "ordinaryReplyEnabled": True}})
+        _, before = house_console_ext._read_proactive_document(path)
+        state = {"running": True, "connected": True, "config": {"not_public": "fixture-private"},
+                 "groupReplyPolicy": {"revision": before, "groups": {
+                     group: {"ordinary": True, "publicQuestion": False, "threshold": 0.45, "extra": "private"},
+                     "not_a_group": {"ordinary": True, "publicQuestion": False, "threshold": 0.45},
+                 }}}
+        with patch.object(self.app.console.qq, "_controller_instance",
+                          return_value=SimpleNamespace(state=lambda: state)):
+            initial = json.loads(self._get("/api/proactive/config")[1])["qqRuntime"]
+            self.assertEqual(initial, {"verification": "applied", "running": True, "groups": {
+                group: {"ordinary": True, "publicQuestion": False, "threshold": 0.45}
+            }})
+            status, result = self._post("/api/proactive/config", {
+                "platform": "qq", "group": group, "ordinaryReplyEnabled": False, "threshold": 0.61,
+            })
+            self.assertEqual(status, 200)
+            self.assertEqual(result["verification"], "persisted")
+            current = json.loads(self._get("/api/proactive/config")[1])
+            self.assertEqual(current["qqGroups"][group]["threshold"], 0.61)
+            self.assertEqual(current["qqRuntime"], {"verification": "pending", "running": None, "groups": {}})
+
+            _, after = house_console_ext._read_proactive_document(path)
+            self.assertNotEqual(after, before)
+            state["groupReplyPolicy"] = {"revision": after, "groups": {
+                group: {"ordinary": False, "publicQuestion": False, "threshold": 0.61}
+            }}
+            state["running"] = False
+            applied = json.loads(self._get("/api/proactive/config")[1])["qqRuntime"]
+            self.assertEqual(applied["verification"], "applied")
+            self.assertFalse(applied["running"])
+            self.assertFalse(applied["groups"][group]["ordinary"])
+
+        with patch.object(self.app.console.qq, "_controller_instance", side_effect=OSError()):
+            current = json.loads(self._get("/api/proactive/config")[1])
+            self.assertEqual(current["qqRuntime"]["verification"], "unavailable")
+            self.assertEqual(current["qqGroups"][group]["threshold"], 0.61)
+
     def test_wechat_save_persists_and_get_readback(self):
         document = self._wx_doc()
         document["group"]["proactiveJudge"]["publicQuestionCooldowns"] = {"试点群B": 120}

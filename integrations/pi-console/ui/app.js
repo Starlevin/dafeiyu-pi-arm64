@@ -92,6 +92,9 @@
     reset: false,       // #reset=1
     lastLoadedAt: null, // 最近一次成功读取 overview 的时间（Date）
     overviewStale: false,
+    proactive: null,
+    proactiveStale: true,
+    proactiveRead: 0,
     lastVerify: {},     // platform -> {state, observed} 模型切换回读结果
     filter: 'all',      // 会话平台筛选：all | qq | wechat
     expanded: {},       // 手机卡片展开状态：conversation id -> true
@@ -610,12 +613,118 @@
     state.overview = normOverview(o);
     state.lastLoadedAt = new Date();
     renderAll();
+    loadQQOrdinaryConfig();
     if (!silent) {
       const partial = ['qq', 'wechat'].some((key) => state.overview[key].lastRead === null);
       setStatus(partial ? '部分状态未读到' : '状态已更新', partial ? 'warning' : 'ok',
                 { at: state.lastLoadedAt });
     }
     return true;
+  }
+
+  async function loadQQOrdinaryConfig() {
+    const read = ++state.proactiveRead;
+    try {
+      const raw = await apiGet('/api/proactive/config');
+      if (read !== state.proactiveRead) return null;
+      if (!raw || raw.ok !== true) throw new Error('策略响应无效');
+      state.proactive = raw;
+      if (state.proactiveStale && $('qqOrdinaryStatus')) $('qqOrdinaryStatus').textContent = '';
+      state.proactiveStale = false;
+      renderQQOrdinaryConfig();
+      return raw;
+    } catch (e) {
+      if (read !== state.proactiveRead) return null;
+      state.proactiveStale = true;
+      if (e.status === 401) { handleUnauthorized(); return null; }
+      renderQQOrdinaryConfig();
+      const status = $('qqOrdinaryStatus');
+      if (status) status.textContent = '读取失败，当前显示上次读取的设置。';
+      return null;
+    }
+  }
+
+  function renderQQOrdinaryConfig() {
+    const host = $('qqOrdinaryRows');
+    if (!host) return;
+    clear(host);
+    const data = state.proactive || {};
+    const groups = data.qqGroups && typeof data.qqGroups === 'object' ? data.qqGroups : {};
+    const ordinary = data.qqOrdinary && typeof data.qqOrdinary === 'object' ? data.qqOrdinary : {};
+    const runtime = data.qqRuntime || {};
+    const editable = !state.proactiveStale && data.qqConfigState === 'available';
+    const names = Object.keys(groups).filter((id) => /^group:\d{1,20}$/.test(id)).sort();
+    if (!names.length) {
+      host.appendChild(node('p', 'card-note', '暂无已登记的 QQ 群策略。'));
+      return;
+    }
+    names.forEach((id) => {
+      const row = groups[id] && typeof groups[id] === 'object' ? groups[id] : {};
+      const effective = ordinary[id] && ordinary[id].enabled === true;
+      const line = node('div', 'memory-toolbar');
+      line.appendChild(node('span', 'cell-name', id));
+      const applied = runtime.verification === 'applied' && !state.proactiveStale
+        ? (runtime.groups || {})[id] : null;
+      const runtimeLabel = !applied ? '核心状态待确认'
+        : !runtime.running ? '核心已读入 · 回复未运行'
+        : applied.ordinary ? '普通接话已生效'
+        : applied.publicQuestion ? '仅公开提问自动回复' : '普通接话关闭';
+      line.appendChild(node('span', 'cell-sub', runtimeLabel));
+      const toggleLabel = node('label', 'switch');
+      const toggle = document.createElement('input');
+      toggle.type = 'checkbox'; toggle.checked = effective;
+      toggle.setAttribute('aria-label', id + ' 普通聊天');
+      enable(toggle, editable);
+      toggleLabel.appendChild(toggle); toggleLabel.appendChild(node('span', 'track'));
+      toggleLabel.appendChild(node('span', 'state', effective ? '开' : '关'));
+      line.appendChild(toggleLabel);
+      const threshold = document.createElement('input');
+      threshold.type = 'number'; threshold.className = 'input compact';
+      threshold.min = '0.30'; threshold.max = '0.95'; threshold.step = '0.01';
+      threshold.value = (typeof row.threshold === 'number' && Number.isFinite(row.threshold))
+        ? row.threshold.toFixed(2) : '0.70';
+      threshold.setAttribute('aria-label', id + ' 普通聊天阈值');
+      enable(threshold, editable);
+      line.appendChild(threshold);
+      const save = node('button', 'btn btn-primary btn-sm', '保存');
+      save.type = 'button';
+      enable(save, editable);
+      save.addEventListener('click', () => {
+        const enabled = toggle.checked;
+        const value = Number(threshold.value);
+        if (!Number.isFinite(value) || value < 0.30 || value > 0.95) {
+          $('qqOrdinaryStatus').textContent = '阈值须在 0.30 到 0.95 之间。'; return;
+        }
+        run('正在保存 QQ 普通聊天设置…', async () => {
+          const result = await apiPost('/api/proactive/config', {
+            platform: 'qq', group: id, ordinaryReplyEnabled: enabled,
+            threshold: value,
+          });
+          const observed = result && result.observed;
+          if (!result || result.verification !== 'persisted' || result.group !== id
+              || !observed || observed.ordinaryReplyEnabled !== enabled || observed.threshold !== value) {
+            throw new Error('保存后的磁盘值未确认。');
+          }
+          const loaded = await loadQQOrdinaryConfig();
+          const saved = loaded && (loaded.qqGroups || {})[id];
+          const live = loaded && loaded.qqRuntime;
+          const liveRow = live && live.verification === 'applied' && (live.groups || {})[id];
+          const status = $('qqOrdinaryStatus');
+          if (!saved || saved.ordinaryReplyEnabled !== enabled || saved.threshold !== value) {
+            status.textContent = id + ' 已写入，页面回读未确认。';
+          } else if (!liveRow || liveRow.threshold !== value || liveRow.ordinary !== enabled) {
+            status.textContent = id + ' 已保存，核心生效未确认。';
+          } else {
+            status.textContent = id + (live.running ? ' 已保存，核心生效已确认。' : ' 已保存，核心已读入。');
+          }
+        }).catch((e) => {
+          if (e.status === 401) { handleUnauthorized(); return; }
+          $('qqOrdinaryStatus').textContent = e.message;
+        });
+      });
+      line.appendChild(save);
+      host.appendChild(line);
+    });
   }
 
   // ---- 机器采样：只在已认证、可见的总览读取 ----------------------------------

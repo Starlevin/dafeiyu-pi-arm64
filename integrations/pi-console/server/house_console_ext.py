@@ -80,6 +80,9 @@ PUBLIC_QUESTION_COOLDOWN_MIN = 30
 PUBLIC_QUESTION_COOLDOWN_MAX = 1200
 COOLDOWN_KEY = "publicQuestionCooldownSeconds"
 COOLDOWN_MAP_KEY = "publicQuestionCooldowns"
+ORDINARY_REPLY_KEY = "ordinaryReplyEnabled"
+ORDINARY_THRESHOLD_MIN = 0.30
+ORDINARY_THRESHOLD_MAX = 0.95
 
 
 def _fish_house_web_dir(cfg: dict) -> Path | None:
@@ -335,15 +338,24 @@ def _proactive_path(cfg: dict) -> Path | None:
     return root / "data-qq" / "qq-decision-config.json" if root else None
 
 
-def _read_proactive_groups(path: Path | None) -> dict:
+def _read_proactive_document(path: Path | None) -> tuple[dict, str]:
     if path is None or not path.is_file():
-        return {}
-    with path.open(encoding="utf-8") as source:
-        data = json.loads(source.read(16_385))
+        return {}, ""
+    with path.open("rb") as source:
+        raw = source.read(16_385)
+    if len(raw) > 16_384:
+        raise ValueError("QQ 决策策略文件超过 16 KiB")
+    data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, dict):
         raise ValueError("策略文件格式无效")
-    return {key: row for key, row in data.items()
-            if PROACTIVE_GROUP.fullmatch(key) and isinstance(row, dict)}
+    groups = {key: row for key, row in data.items()
+              if PROACTIVE_GROUP.fullmatch(key) and isinstance(row, dict)}
+    # The Swift control endpoint reports this revision of the exact bytes it
+    # loaded. A retained last-good policy must never confirm a different file.
+    revision = 0xcbf29ce484222325
+    for byte in raw:
+        revision = ((revision ^ byte) * 0x100000001b3) & 0xffffffffffffffff
+    return groups, f"{revision:016x}"
 
 
 # --- WeChat authoritative config helpers ---------------------------------
@@ -506,6 +518,17 @@ def _validate_cooldown(value) -> tuple[bool, str]:
     return True, ""
 
 
+def _ordinary_reply_state(row: dict) -> tuple[bool, str]:
+    """Return effective ordinary-reply state and its compatibility source."""
+    explicit = row.get(ORDINARY_REPLY_KEY)
+    if type(explicit) is bool:
+        return explicit, "explicit"
+    legacy = (row.get("mode") == "enforce"
+              and row.get("publicQuestionEnabled") is True
+              and row.get("threshold") == 0.45)
+    return legacy, "legacy" if legacy else "default"
+
+
 def _proactive_funnel(root: Path | None) -> dict:
     now = time.time()
     counts = dict.fromkeys(PROACTIVE_EVENTS, 0)
@@ -598,10 +621,21 @@ def _update_proactive_config(cfg: dict, body: dict,
             return 400, {"error": message}
     if not isinstance(group, str) or not PROACTIVE_GROUP.fullmatch(group):
         return 400, {"error": "请选择有效的 QQ 群"}
+    ordinary_given = ORDINARY_REPLY_KEY in body
+    ordinary_enabled = body.get(ORDINARY_REPLY_KEY)
+    threshold_given = "threshold" in body
+    threshold = body.get("threshold")
     if platform == "qq":
-        # Incremental save: do not require or accept threshold/freshness changes.
-        if not cooldown_given:
-            return 400, {"error": "请提供公开提问自动聊天间隔"}
+        # Incremental save: each supplied field is written independently; all
+        # existing per-group limits and unrelated fields remain untouched.
+        if not cooldown_given and not ordinary_given and not threshold_given:
+            return 400, {"error": "请提供 QQ 普通聊天设置"}
+        if ordinary_given and type(ordinary_enabled) is not bool:
+            return 400, {"error": "普通聊天开关须为布尔值"}
+        if threshold_given and (type(threshold) not in (int, float)
+                                or isinstance(threshold, bool)
+                                or not ORDINARY_THRESHOLD_MIN <= threshold <= ORDINARY_THRESHOLD_MAX):
+            return 400, {"error": "QQ 普通聊天阈值须在 0.30 到 0.95 之间"}
     else:
         # Legacy save keeps its original validation contract.
         threshold = body.get("threshold")
@@ -614,12 +648,18 @@ def _update_proactive_config(cfg: dict, body: dict,
         return 503, {"error": "QQ 决策策略文件不可用"}
     try:
         with PROACTIVE_CONFIG_LOCK:
-            groups = _read_proactive_groups(path)
+            groups, _ = _read_proactive_document(path)
             if group not in groups:
                 return 404, {"error": "该群没有已登记的主动发言策略"}
             if platform == "qq":
-                # Write only the cooldown key; keep every other row/field intact.
-                groups[group][COOLDOWN_KEY] = cooldown
+                # Write only supplied keys; never replace the row or mutate the
+                # legacy public-question switch when ordinary chat is toggled.
+                if cooldown_given:
+                    groups[group][COOLDOWN_KEY] = cooldown
+                if ordinary_given:
+                    groups[group][ORDINARY_REPLY_KEY] = ordinary_enabled
+                if threshold_given:
+                    groups[group]["threshold"] = threshold
             else:
                 groups[group].update(threshold=threshold, freshnessSeconds=freshness)
                 if cooldown_given:
@@ -638,7 +678,8 @@ def _update_proactive_config(cfg: dict, body: dict,
                     os.replace(temporary, path)
                 finally:
                     temporary.unlink(missing_ok=True)
-            observed = _read_proactive_groups(path).get(group)
+            observed_groups, _ = _read_proactive_document(path)
+            observed = observed_groups.get(group)
         if observed != groups[group]:
             return 409, {"error": "QQ 决策策略回读不一致"}
         return 200, {"ok": True, "verification": "persisted", "group": group, "observed": observed}
@@ -646,17 +687,52 @@ def _update_proactive_config(cfg: dict, body: dict,
         return 503, {"error": "QQ 决策策略读取或写入失败"}
 
 
-def _build_proactive_config(cfg: dict) -> dict:
+def _qq_proactive_runtime(qq_adapter, revision: str) -> dict:
+    unavailable = {"verification": "unavailable", "running": None, "groups": {}}
+    if qq_adapter is None or not revision:
+        return unavailable
+    try:
+        controller = qq_adapter._controller_instance()
+        state = controller.state() if controller is not None else None
+    except Exception:
+        return unavailable
+    policy = state.get("groupReplyPolicy") if isinstance(state, dict) else None
+    if not isinstance(policy, dict) or not isinstance(policy.get("groups"), dict):
+        return unavailable
+    if policy.get("revision") != revision:
+        return {**unavailable, "verification": "pending"}
+    groups = {}
+    for group, row in policy["groups"].items():
+        if (not isinstance(group, str) or not PROACTIVE_GROUP.fullmatch(group)
+                or not isinstance(row, dict) or type(row.get("ordinary")) is not bool
+                or type(row.get("publicQuestion")) is not bool):
+            continue
+        threshold = row.get("threshold")
+        if type(threshold) not in (int, float) or not 0 <= threshold <= 1:
+            continue
+        groups[group] = {"ordinary": row["ordinary"], "publicQuestion": row["publicQuestion"],
+                         "threshold": threshold}
+    return {"verification": "applied", "running": state.get("running") is True
+            and state.get("connected") is True, "groups": groups}
+
+
+def _build_proactive_config(cfg: dict, qq_adapter=None) -> dict:
     # Derive WeChat state exclusively from the local authoritative config.json:
     # offline fixtures need no network, and this is the same file the WeChat
     # bridge reads. Never trust a secondary HTTP view over the authoritative file.
     wx_cooldowns, wx_enabled, wx_groups = _read_wechat_cooldown_state(cfg)
     qq_cooldowns = {}
+    qq_ordinary = {}
+    qq_revision = ""
     try:
-        groups = _read_proactive_groups(_proactive_path(cfg))
+        groups, qq_revision = _read_proactive_document(_proactive_path(cfg))
         for name, row in groups.items():
             if type(row.get(COOLDOWN_KEY)) is int:
                 qq_cooldowns[name] = row[COOLDOWN_KEY]
+            enabled, source = _ordinary_reply_state(row)
+            qq_ordinary[name] = {"enabled": enabled, "source": source,
+                                 "explicit": type(row.get(ORDINARY_REPLY_KEY)) is bool,
+                                 "threshold": row.get("threshold")}
         config_state = "available" if groups else "pending"
     except (OSError, ValueError):
         groups = {}
@@ -669,12 +745,14 @@ def _build_proactive_config(cfg: dict) -> dict:
         "wechatEnabledGroups": wx_groups,
         "qqConfigState": config_state,
         "qqGroups": groups,
+        "qqRuntime": _qq_proactive_runtime(qq_adapter, qq_revision),
         "qqFunnel": _proactive_funnel(_qq_root(cfg)),
         "publicQuestionCooldownDefault": PUBLIC_QUESTION_COOLDOWN_DEFAULT,
         COOLDOWN_MAP_KEY: {
             "qq": qq_cooldowns,
             "wechat": wx_cooldowns,
         },
+        "qqOrdinary": qq_ordinary,
     }
 
 
@@ -1284,7 +1362,7 @@ def resolve(handler, method: str, path: str) -> bool:
         if path == "/api/proactive/config":
             if not handler.need_auth():
                 return True
-            handler.json(200, _build_proactive_config(cfg))
+            handler.json(200, _build_proactive_config(cfg, handler.app.console.qq))
             return True
 
         if path == "/api/trace/summary":
