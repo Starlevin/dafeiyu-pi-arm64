@@ -677,15 +677,14 @@ class BotSnapshot:
         if core:
             wechat.update(derive_wechat(core))
 
-        working = qq["busy"] is True
         return {
             "ok": True,
             "timestamp": int(time.time()),
             "qq": qq,
             "wechat": wechat,
-            "activity": {"phase": "working" if working else "idle",
-                         "source": "qq" if working else None,
-                         "verified": working},
+            # Connection and busy flags cannot establish an active chat.
+            # The verified event feed is served separately by house_state().
+            "activity": {"phase": "idle", "source": None, "verified": False},
             "mode": "live-readonly",
             "persona": persona_snapshot.get(),
         }

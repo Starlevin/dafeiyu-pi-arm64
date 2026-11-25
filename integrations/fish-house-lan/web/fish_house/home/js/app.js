@@ -154,9 +154,11 @@
     wsUrl: parseQueryParam("wsUrl") || "",
     onStatusData: function (data) {
       apiAdapter.updateLiveStatus(data);
-      applyLiveStatusDots(data);
-      if (drawerOpen && activeTab === "console" && !apiAdapter.state.overview) {
-        renderConsoleUI();
+      var snap = eventEngine.getState();
+      applyLiveStatusDots(data, snap);
+      if (drawerOpen && activeTab === "console") {
+        if (apiAdapter.state.overview) renderQQOverview(snap);
+        else renderConsoleUI();
       }
     },
     onConnectionChange: function (conn) {
@@ -736,16 +738,21 @@
   }
 
   // ---- Unified 9-Module Console UI Binding ----
-  function qqReplyStatus(info) {
+  function qqReplyStatus(info, snap) {
     if (!info || info.connected !== true) {
       return info && info.connected === false ? "离线" : "待确认";
     }
     if (info.running === false) return "在线 · 回复暂停";
-    if (info.running === true) return "在线 · 回复中";
+    if (snap && snap.source === "real" && snap.verified === true && snap.platform === "qq") {
+      if (snap.state === "thinking") return "在线 · 思考中";
+      if (snap.state === "tool") return "在线 · 使用工具";
+      if (snap.state === "replying") return "在线 · 正在回复";
+    }
+    if (info.running === true) return "在线 · 自动回复已开启";
     return "在线";
   }
 
-  function applyLiveStatusDots(data) {
+  function applyLiveStatusDots(data, snap) {
     if (!data) return;
     var qqDot = $("fh-qq-dot");
     var qqText = $("fh-qq-text");
@@ -753,7 +760,7 @@
     var wxText = $("fh-wx-text");
     if (data.qq) {
       var qc = data.qq.connected;
-      if (qqText) qqText.textContent = qqReplyStatus(data.qq);
+      if (qqText) qqText.textContent = qqReplyStatus(data.qq, snap);
       if (qqDot) qqDot.className = "fh-dot " + (qc === true
         ? (data.qq.running === false ? "paused" : "")
         : (qc === false ? "off" : "busy"));
@@ -763,6 +770,17 @@
       if (wxText) wxText.textContent = wc === true ? "在线" : (wc === false ? "离线" : "待确认");
       if (wxDot) wxDot.className = "fh-dot " + (wc === true ? "" : (wc === false ? "off" : "busy"));
     }
+  }
+
+  function renderQQOverview(snap) {
+    var st = apiAdapter.state;
+    var overview = st.overview && st.overview.qq;
+    var live = st.liveStatus && st.liveStatus.qq;
+    var qq = live && st.lastStatusAt >= st.lastOverviewAt ? live : overview || live;
+    var model = (overview && overview.model) || (live && live.model);
+    $("fh-ov-qq").textContent = qq
+      ? qqReplyStatus(qq, snap) + (model ? (" · " + model) : "")
+      : "未连接";
   }
 
   function renderSaveBar() {
@@ -872,11 +890,8 @@
     // Module 1: Platform & Transport
     var ov = st.overview;
     var live = st.liveStatus;
-    var qqInfo = (ov && ov.qq) || (live && live.qq) || null;
     var wxInfo = (ov && ov.wechat) || (live && live.wechat) || null;
-    $("fh-ov-qq").textContent = qqInfo
-      ? qqReplyStatus(qqInfo) + (qqInfo.model ? (" · " + qqInfo.model) : "")
-      : "未连接";
+    renderQQOverview(eventEngine.getState());
     $("fh-ov-wx").textContent = wxInfo
       ? (wxInfo.connected === true ? "在线" : (wxInfo.connected === false ? "未连接" : "未确认")) +
         (wxInfo.model ? (" · " + wxInfo.model) : "")
@@ -1520,6 +1535,8 @@
   eventEngine.subscribe(function (snap) {
     renderer.setState(snap.state);
     syncTopHud(snap);
+    applyLiveStatusDots(apiAdapter.state.liveStatus, snap);
+    if (drawerOpen && activeTab === "console") renderQQOverview(snap);
     wakeHud();
     if (snap.bubble) showBubble(snap.bubble, 3600);
     else showBubble("", 0);

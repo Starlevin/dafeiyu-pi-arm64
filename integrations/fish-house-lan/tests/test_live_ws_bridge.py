@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import socket
 import struct
 import sys
@@ -20,6 +21,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1629,6 +1631,31 @@ class ReviewRegressionTests(unittest.TestCase):
         read_body = bot_snapshot.split("def read(self):", 1)[1].split("class PersonaSnapshot", 1)[0]
         self.assertNotIn("_controller_panel", read_body)
         self.assertNotIn("runtimeRecords", read_body)
+
+    def test_busy_status_keeps_qq_connection_but_does_not_verify_chat_activity(self):
+        spec = importlib.util.spec_from_file_location("fh_busy_status_fixture", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        adapter = SimpleNamespace(
+            status=lambda: ({"connected": True, "running": True}, None),
+            _panel=lambda: {"busy": True},
+            _cache_clear=lambda: None,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp)
+            (src / "adapters.py").touch()
+            (src / "config.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {"FISH_HOUSE_QQ_SRC": tmp}), \
+                 patch.dict(sys.modules, {"adapters": SimpleNamespace(QQAdapter=lambda _: adapter)}), \
+                 patch.object(sys, "path", list(sys.path)), \
+                 patch.object(mod, "services_active", return_value={}), \
+                 patch.object(mod, "core_status", return_value=None), \
+                 patch.object(mod.persona_snapshot, "get", return_value={}):
+                data = mod.BotSnapshot().get()
+        self.assertTrue(data["qq"]["connected"])
+        self.assertTrue(data["qq"]["running"])
+        self.assertTrue(data["qq"]["busy"])
+        self.assertEqual(data["activity"], {"phase": "idle", "source": None, "verified": False})
 
     # ------------------------------------- 2. client keys never collide ----
     def test_client_keys_are_unique_for_concurrent_clients(self):
