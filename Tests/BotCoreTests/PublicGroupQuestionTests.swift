@@ -150,4 +150,14 @@ struct PublicGroupQuestionTests {
         #expect(PublicGroupQuestion.matches("各位，刚才那局打到一半断网了，压机到底是什么意思？"))
         #expect(PublicGroupQuestion.matches("各位,刚才那局打到一半断网了,压机到底是什么意思?"))
     }
+
+    @Test func wechatGameDataQuestionsNeedAnExplicitGameTopic() {
+        #expect(PublicGroupQuestion.matchesForWeChat("各位，今晚第五人格 IVL 几点开打？"))
+        #expect(PublicGroupQuestion.matchesForWeChat("今晚IVL几点开打？"))
+        #expect(PublicGroupQuestion.matchesForWeChat("三角洲老式钢盔多少钱？"))
+        #expect(!PublicGroupQuestion.matchesForWeChat("今晚几点开打？"))
+        #expect(!PublicGroupQuestion.matchesForWeChat("明晚打谁？"))
+        #expect(!PublicGroupQuestion.matchesForWeChat("今晚IVL开打"))
+        #expect(!PublicGroupQuestion.matchesForWeChat("三角洲老式钢盔涨价了"))
+    }
 }

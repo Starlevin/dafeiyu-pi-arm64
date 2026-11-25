@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import BotCore
 #if canImport(CryptoKit)
 import CryptoKit
@@ -38,6 +41,7 @@ public struct UnifiedGenerationRequest: Sendable {
     public var contextualParticipation: Bool = false
     public var publicQuestionContext: [String] = []
     public var publicQuestionKnowledge: [String] = []
+    public var publicQuestionGameData: String = ""
     public var publicQuestionGroupMemory: String = ""
     /// Stable opaque correlation ID derived from the pilot's session-scoped idempotency key.
     public var modelTraceID: UUID? = nil
@@ -73,6 +77,7 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
                 key: request.modelKey, config: request.config, rule: request.rule,
                 context: request.publicQuestionContext, text: request.currentUserText,
                 knowledge: request.publicQuestionKnowledge,
+                gameData: request.publicQuestionGameData,
                 groupMemory: request.publicQuestionGroupMemory,
                 participation: request.contextualParticipation,
                 traceID: request.modelTraceID, reserve: {}
@@ -423,11 +428,12 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                 identityVConfig: IdentityVConfig = .fromEnvironment(),
                 sharedState: SharedStateProviding? = nil,
                 proactiveScorerFactory: (@Sendable ([String], String) -> any ReplyScoring)? = nil,
-                publicQuestionMatcher: @escaping @Sendable (String) -> Bool = { PublicGroupQuestion.matches($0) },
+                publicQuestionMatcher: @escaping @Sendable (String) -> Bool = { PublicGroupQuestion.matchesForWeChat($0) },
                 journal: UnifiedIdempotencyJournal? = nil,
                 proactiveBudgetURL: URL? = nil,
                 idvScheduleConfig: IdvScheduleConfig = .fromEnvironment(),
-                dsfPriceConfig: DsfPriceConfig = .fromEnvironment()) {
+                dsfPriceConfig: DsfPriceConfig = .fromEnvironment(),
+                gameDataSession: URLSession? = nil) {
         self.config = config
         self.generator = generator
         let budgetFile = proactiveBudgetURL ?? (journal == nil ? Self.defaultJournalFile()?.appendingPathExtension("proactive-budget.json") : nil)
@@ -450,10 +456,10 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         // IdentityVDialogue 是值类型；单进程下仍按每轮 identityVConfig 新建，
         // 不共享 QQEngine 的 lazy 实例，也不碰它的可变 identityVMetrics。
         self.identityVDialogueCache = IdentityVDialogue(config: identityVConfig)
-        self.idvScheduleCoordinator = IdvScheduleTool.Coordinator(config: idvScheduleConfig)
+        self.idvScheduleCoordinator = IdvScheduleTool.Coordinator(config: idvScheduleConfig, session: gameDataSession)
         self.dsfPriceCoordinator = DsfPriceTool.Coordinator(
             config: dsfPriceConfig,
-            session: DsfPriceTool.makeSession(timeout: 8)
+            session: gameDataSession ?? DsfPriceTool.makeSession(timeout: 8)
         )
     }
 
@@ -746,16 +752,25 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                                      recentBotReplies: Array(recentReplies.suffix(2)), proactive: false)
             if !plan.promptFragment.isEmpty { rule.prompt += "\n" + plan.promptFragment }
         }
-        // 共享工具注入：第五人格赛程与三角洲物价，同样默认关闭且按会话 key 隔离。
-        if !singleTurn,
-           let idvFragment = await idvScheduleCoordinator.fragment(for: body, scope: session),
-           !idvFragment.isEmpty {
-            rule.prompt += "\n" + idvFragment
-        }
-        if !singleTurn, let dsfFragment = await dsfPriceCoordinator.fragment(
-            message: body, isGroup: inbound.chatType == "group", scope: session),
-           !dsfFragment.isEmpty {
-            rule.prompt += "\n" + dsfFragment
+        // 快路径只给已确认的公开问题取一次资料，普通群聊接话保持本地。
+        var publicQuestionGameData = ""
+        if publicQuestionFast {
+            if IdvSchedulePlanner.namesIdentityVEvent(body), IdvSchedulePlanner.plan(message: body) != nil {
+                publicQuestionGameData = await idvScheduleCoordinator.fragment(for: body, scope: session)
+                    ?? "[第五人格赛事·数据不可用] 本轮未取得可核实的资料，不得猜测赛程或赛果。"
+            } else if DsfPricePlanner.intent(body) == .price {
+                publicQuestionGameData = await dsfPriceCoordinator.fragment(message: body, isGroup: true, scope: session)
+                    ?? DsfPriceTool.Prompt.unavailable(reason: "本轮没有可核实的物品报价")
+            }
+        } else if !singleTurn {
+            if let idvFragment = await idvScheduleCoordinator.fragment(for: body, scope: session) {
+                rule.prompt += "\n" + idvFragment
+            }
+            if let dsfFragment = await dsfPriceCoordinator.fragment(
+                message: body, isGroup: inbound.chatType == "group", scope: session
+            ) {
+                rule.prompt += "\n" + dsfFragment
+            }
         }
 
         var modelInput = String(body.prefix(config.maxInputCharacters))
@@ -801,6 +816,7 @@ public final class UnifiedReplyCore: @unchecked Sendable {
                                                 publicQuestionContext: singleTurn
                                                     ? Array(inbound.groupAutoReplyContext.dropLast().suffix(3)) : [],
                                                 publicQuestionKnowledge: publicQuestionKnowledge,
+                                                publicQuestionGameData: publicQuestionGameData,
                                                 publicQuestionGroupMemory: singleTurn ? groupMemory : "",
                                                 modelTraceID: modelTraceID)
 

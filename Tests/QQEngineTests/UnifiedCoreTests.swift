@@ -107,6 +107,38 @@ private final class PublicQuestionHTTPFixture: URLProtocol, @unchecked Sendable 
     }
 }
 
+private final class GameDataHTTPFixture: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var responses: [URL: Data] = [:]
+    nonisolated(unsafe) private static var requested: [URL] = []
+
+    static func reset(responses: [URL: Data]) {
+        lock.lock(); defer { lock.unlock() }
+        self.responses = responses
+        requested = []
+    }
+
+    static var requests: [URL] { lock.lock(); defer { lock.unlock() }; return requested }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func stopLoading() {}
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        Self.lock.lock()
+        Self.requested.append(url)
+        let payload = Self.responses[url]
+        Self.lock.unlock()
+        let response = HTTPURLResponse(url: url, statusCode: payload == nil ? 503 : 200,
+                                       httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: payload ?? Data())
+        client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
 private struct FixedProactiveScorer: ReplyScoring {
     let value: Double?
     var calls: CallCounter
@@ -1607,5 +1639,82 @@ private func inbound(_ text: String = "合成消息",
         #expect(dsfPrivate.reply.action == "reply")
         let dsfPrompt = await capture.lastPrompt()
         #expect(!dsfPrompt.contains("三角洲物价"))
+    }
+
+    @Test func wechatPublicGameQuestionUsesVerifiedDataInOneModelRequest() async throws {
+        let modelConfig = URLSessionConfiguration.ephemeral
+        modelConfig.protocolClasses = [PublicQuestionHTTPFixture.self]
+        let dataConfig = URLSessionConfiguration.ephemeral
+        dataConfig.protocolClasses = [GameDataHTTPFixture.self]
+        let modelSession = URLSession(configuration: modelConfig)
+        let dataSession = URLSession(configuration: dataConfig)
+        defer {
+            modelSession.invalidateAndCancel()
+            dataSession.invalidateAndCancel()
+        }
+        let provider = LLMProvider(kind: .custom,
+                                   baseURL: URL(string: "http://127.0.0.1:18090/v1")!, maxRetries: 3)
+        let generator = DeepSeekReplyGenerator(client: DeepSeekClient(provider: provider, session: modelSession))
+        let groups = ["schedule", "price", "chat", "clarify", "unavailable", "unrelated"]
+        var config = makeConfig(allowed: groups, requireAt: false, maxPerMinute: groups.count)
+        config.allowedAccounts = ["fixture-account"]
+        config.publicQuestionFastEnabled = true
+        config.contextualParticipationEnabled = true
+        config.proactiveAllowedChats = groups
+        var idv = IdvScheduleConfig()
+        idv.enabled = true
+        let core = UnifiedReplyCore(config: config, generator: generator, modelKey: "synthetic-key", journal: freshJournal(),
+                                   idvScheduleConfig: idv, dsfPriceConfig: DsfPriceConfig(enabled: true),
+                                   gameDataSession: dataSession)
+        let stamp = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-60))
+        let market = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 2, "priceVersion": stamp, "currency": "gameCurrency",
+            "source": ["fetchedAt": stamp, "capturedFrom": stamp, "capturedTo": stamp],
+            "prices": ["13020000167": 23456],
+        ])
+        let names = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 3, "kind": "itemLocalization", "items": ["13020000167": "老式钢盔"],
+        ])
+        GameDataHTTPFixture.reset(responses: [
+            IdvScheduleTool.sourceURL: Data("<span class=\"wiki-bot\">2026年11月26日 IVL：18:00</span>".utf8),
+            DsfPriceTool.marketURL: market, DsfPriceTool.itemsURL: names,
+        ])
+
+        let cases = [
+            ("schedule", "2026年11月26日第五人格IVL几点开打？", "18:00", 2),
+            ("price", "三角洲老式钢盔多少钱？", "23456", 4),
+            ("chat", "三角洲老式钢盔的价格最近变动很大", "[QQ_PARTICIPATION]", 4),
+            ("clarify", "第五人格IVL赛程？", "需追问", 4),
+            ("unavailable", "三角洲合成未收录物品多少钱？", "没有可核实的物品报价", 4),
+            ("unrelated", "各位，今晚的世界杯比赛什么时候开打？", "当前公开问题", 4),
+        ]
+        for (group, question, expected, dataCount) in cases {
+            var candidate = inbound(question, chatId: group, atMe: false, msgId: "game-fixture-\(group)")
+            candidate.groupAutoReply = true
+            candidate.groupAutoReplyWindowOK = true
+            candidate.groupAutoReplySuperseded = false
+            candidate.groupAutoReplyPublicQuestionSettled = true
+            candidate.groupAutoReplyPublicQuestionCooldownSeconds = 30
+            candidate.groupAutoReplyContext = ["三角洲老式钢盔的价格一直在变", question]
+            let ordinary = group == "chat"
+            PublicQuestionHTTPFixture.reset(content: ordinary
+                ? #"{"participate":true,"text":"合成短回复","emotion":"neutral","intensity":0}"#
+                : validJSON("合成短回复"))
+            let result = await core.handle(candidate)
+            #expect(result.reply.action == "reply", "\(group): \(result.gate)")
+            #expect(GameDataHTTPFixture.requests.count == dataCount)
+            let calls = PublicQuestionHTTPFixture.bodies
+            #expect(calls.count == 1)
+            let call = try #require(calls.first)
+            #expect(call["tools"] == nil)
+            let messages = try #require(call["messages"] as? [[String: Any]])
+            let system = try #require(messages.first?["content"] as? String)
+            if group == "unrelated" {
+                #expect(messages.contains { ($0["content"] as? String)?.contains(expected) == true })
+            } else {
+                #expect(system.contains(expected), "\(group)")
+            }
+            #expect(system.contains("只读游戏资料") == (!ordinary && group != "unrelated"))
+        }
     }
 }

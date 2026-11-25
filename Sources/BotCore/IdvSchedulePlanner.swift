@@ -69,6 +69,12 @@ public enum IdvSchedulePlanner {
         words.contains { text.range(of: $0, options: .caseInsensitive) != nil }
     }
 
+    /// 微信快路径只根据本轮明确的游戏名或联赛取数，不从泛指的“今晚比赛”推断。
+    public static func namesIdentityVEvent(_ text: String) -> Bool {
+        contains(["第五人格", "身份V", "Identity V", "深渊的呼唤"], text)
+            || text.range(of: #"(?i)(?<![a-z])(?:ivl|ijl|coa)(?![a-z])"#, options: .regularExpression) != nil
+    }
+
     /// 是否在说第五人格。无游戏线索时，只有带时间词的赛程/赛果提问才算；
     /// 命中其它游戏或无关话题一律返回 false（防误命中）。
     public static func isIdentityVQuestion(_ text: String) -> Bool {

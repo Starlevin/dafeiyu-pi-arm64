@@ -69,8 +69,7 @@ public enum IdvScheduleTool {
 
     /// 明确不可用：没有任何可核实来源提供当日比分。答案里必须照实说。
     public static let scoreUnavailableText =
-        "无法核实：《第五人格》当日比分/赛果没有可核实来源。社区赛程页只列赛前安排，"
-        + "官网赛事子路径实测 404、网易电竞站 502，所以实时比分不支持，我不会编造。"
+        "无法核实：《第五人格》当日比分或赛果。当前接入的社区赛程页只列赛前安排，不提供可核实的实时比分。"
 
     public static func makeSession(timeout: TimeInterval) -> URLSession {
         let config = URLSessionConfiguration.ephemeral
@@ -374,7 +373,7 @@ extension IdvScheduleTool {
                 message: message, now: now, defaultLeague: defaultLeague) else {
                 return nil
             }
-            if query.asksResults {
+            if !query.usable {
                 return IdvScheduleTool.promptFragment(
                     query: query, pageText: nil as String?,
                     meta: IdvPageMeta.unknown, fetchedAt: now)

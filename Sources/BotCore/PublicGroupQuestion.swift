@@ -22,6 +22,19 @@ public enum PublicGroupQuestion {
         return matchesNormalized(body) || isExplicitTechnicalHelp(body)
     }
 
+    public static func matchesForWeChat(_ text: String) -> Bool {
+        let body = normalize(text)
+        if matchesNormalized(body) { return true }
+        guard !isExcluded(body), isBareQuestion(body) else { return false }
+        if DsfPricePlanner.intent(body) == .price,
+           containsAny(body, ["多少钱", "值多少", "卖多少", "价格多少", "物价多少"]) {
+            return true
+        }
+        guard IdvSchedulePlanner.namesIdentityVEvent(body),
+              containsAny(body, ["几点", "赛程", "打谁", "谁打谁", "比分", "谁赢", "几比几"]) else { return false }
+        return IdvSchedulePlanner.plan(message: body) != nil
+    }
+
     private static func matchesNormalized(_ body: String) -> Bool {
         guard !body.isEmpty else { return false }
         guard !isExcluded(body) else { return false }
@@ -195,12 +208,15 @@ public enum PublicGroupQuestion {
     ]
 
     private static func isUnaddressedFactualQuestion(_ body: String) -> Bool {
+        guard isBareQuestion(body), containsAny(body, factualQuestionForms) else { return false }
+        return hasConcreteContent(removing(body, factualQuestionForms))
+    }
+
+    private static func isBareQuestion(_ body: String) -> Bool {
         // A comma or colon can introduce a named person's question. Bare
         // questions use a single clause and cannot address the second person.
-        guard body.hasSuffix("?"), !body.contains(where: { "，,、:；;。!\n\r".contains($0) }),
-              !body.contains("你"), !body.split(whereSeparator: { !$0.isLetter }).contains("you"),
-              containsAny(body, factualQuestionForms) else { return false }
-        return hasConcreteContent(removing(body, factualQuestionForms))
+        body.hasSuffix("?") && !body.contains(where: { "，,、:；;。!\n\r".contains($0) })
+            && !body.contains("你") && !body.split(whereSeparator: { !$0.isLetter }).contains("you")
     }
 
     private static let technicalHelpTopics: Set<String> = [

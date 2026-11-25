@@ -32,7 +32,7 @@ struct IdvScheduleToolTests {
             meta: .unknown, fetchedAt: tonight)
         #expect(fragment.contains("无法核实"))
         #expect(fragment.contains("不支持"))
-        #expect(fragment.contains("不") && fragment.contains("编造"))
+        #expect(fragment.contains("不得推测胜负或比分"))
     }
 
     // MARK: 第 4 条：取数失败（pageText == nil）—— 返回诚实降级，绝不返回 nil
