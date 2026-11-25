@@ -1796,12 +1796,9 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
         return "composer_changed"
     pre_return_timing["post_click_validation_ms"] = int(
         (time.monotonic() - stage_started) * 1000)
-    # The durable reservation must be committed BEFORE adding the draft.
-    # If the ledger is unavailable, fail without leaving unsent text in the
-    # composer, where a later operator or bot action might accidentally send it.
-    # Settled public-question candidates defer their durable submission mark
-    # until the existing pre-Return message snapshot has passed freshness.
-    # Other replies retain the original reserve-before-draft ordering.
+    # Direct replies keep the original reserve-before-draft ordering.
+    # Automatic replies reserve only after the pre-Return snapshot proves
+    # freshness; a superseded draft never becomes an unknown submission.
     if on_submit and auto_ctx is None:
         stage_started = time.monotonic()
         on_submit()
@@ -1834,9 +1831,9 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
             (time.monotonic() - stage_started) * 1000)
         if not g.allow:
             return "tx_denied:" + g.reason
-        # The evidence baseline belongs immediately before Return. Its failure
-        # disables confirmation only; it must not veto a send that passed all
-        # existing target and draft guards.
+        # The evidence baseline belongs immediately before Return. Direct
+        # replies can still send after the target and draft checks; automatic
+        # replies also use the same read to prove they have not been overtaken.
         prior_viewport_available = False
         stage_started = time.monotonic()
         try:
@@ -1858,7 +1855,7 @@ def send_reply(target, text, on_submit=None, auto_ctx=None, *, trace=None, memor
                 return "auto_reply_stale:" + recheck.reason
         pre_return_timing["receipt_baseline_ms"] = int(
             (time.monotonic() - stage_started) * 1000)
-        # Keep the settled candidate's reservation immediately before Return.
+        # Reserve an automatic reply only after the final context check.
         if auto_ctx is not None and on_submit:
             stage_started = time.monotonic()
             on_submit()
@@ -2558,8 +2555,6 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
                              and auto_candidate
                              and trace == public_question_settled_trace
                              and image_rect is None and photo is None)
-        if settled_candidate and auto_ctx is not None:
-            auto_ctx["settled_public_question"] = True
         if public_question_settled_trace is not None and not settled_candidate:
             return False
         swift_candidate = False
@@ -2899,11 +2894,8 @@ def deliver_ready(replies, args, health=None, *, token=""):
                 status = pm.send_media(target, media, getattr(args, "media_dir", ""),
                                        mark_submitting, sys.modules[__name__], xi)
             else:
-                settled_auto_ctx = (
-                    auto_ctx if isinstance(auto_ctx, dict)
-                    and auto_ctx.get("settled_public_question") is True else None)
                 status = send_reply(target, reply, mark_submitting,
-                                    auto_ctx=settled_auto_ctx, trace=trace, memory_account=memory_account)
+                                    auto_ctx=auto_ctx, trace=trace, memory_account=memory_account)
         except _ProactivePolicyDisabled:
             record(health, "submit", "auto_policy_disabled", trace)
             continue

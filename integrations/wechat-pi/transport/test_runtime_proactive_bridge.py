@@ -784,6 +784,14 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                 self.assertEqual(call.call_args.args[:2], (bridge.CORE_URL, "/webhook/wechat"))
                 self.assertEqual(call.call_args.args[2]["bridge_style"], "温柔")
 
+    def test_ordinary_automatic_text_carries_its_context_into_the_send_transaction(self):
+        self.configure(True)
+        context = {"target": GROUP, "rows": ("digest",), "index": 0, "trace": "fixture"}
+        send = Mock(return_value="auto_reply_stale:new_rows_or_viewport_shift")
+        self.deliver(context, send)
+        send.assert_called_once()
+        self.assertIs(send.call_args.kwargs["auto_ctx"], context)
+
     def test_turning_off_before_draft_reservation_prevents_submission(self):
         self.configure(True)
         writes = []
@@ -805,6 +813,7 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
 
         def send(target, reply, reserve, *, auto_ctx, trace, memory_account):
             self.assertEqual(trace, "fixture-trace")
+            self.assertIsNone(auto_ctx)
             reserve()
             writes.append(target)
             return "visible_outgoing"
