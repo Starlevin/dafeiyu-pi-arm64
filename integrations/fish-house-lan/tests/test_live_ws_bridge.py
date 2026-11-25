@@ -1635,7 +1635,6 @@ class ReviewRegressionTests(unittest.TestCase):
     def test_busy_status_keeps_qq_connection_but_does_not_verify_chat_activity(self):
         spec = importlib.util.spec_from_file_location("fh_busy_status_fixture", ROOT / "server.py")
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
         adapter = SimpleNamespace(
             status=lambda: ({"connected": True, "running": True}, None),
             _panel=lambda: {"busy": True},
@@ -1645,13 +1644,14 @@ class ReviewRegressionTests(unittest.TestCase):
             src = Path(tmp)
             (src / "adapters.py").touch()
             (src / "config.json").write_text("{}", encoding="utf-8")
-            with patch.dict(os.environ, {"FISH_HOUSE_QQ_SRC": tmp}), \
-                 patch.dict(sys.modules, {"adapters": SimpleNamespace(QQAdapter=lambda _: adapter)}), \
-                 patch.object(sys, "path", list(sys.path)), \
-                 patch.object(mod, "services_active", return_value={}), \
-                 patch.object(mod, "core_status", return_value=None), \
-                 patch.object(mod.persona_snapshot, "get", return_value={}):
-                data = mod.BotSnapshot().get()
+            with patch.dict(os.environ, {"FISH_HOUSE_QQ_SRC": tmp}):
+                spec.loader.exec_module(mod)
+                with patch.dict(sys.modules, {"adapters": SimpleNamespace(QQAdapter=lambda _: adapter)}), \
+                     patch.object(sys, "path", list(sys.path)), \
+                     patch.object(mod, "services_active", return_value={}), \
+                     patch.object(mod, "core_status", return_value=None), \
+                     patch.object(mod.persona_snapshot, "get", return_value={}):
+                    data = mod.BotSnapshot().get()
         self.assertTrue(data["qq"]["connected"])
         self.assertTrue(data["qq"]["running"])
         self.assertTrue(data["qq"]["busy"])
