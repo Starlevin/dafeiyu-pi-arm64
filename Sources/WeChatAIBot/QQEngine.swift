@@ -2060,14 +2060,14 @@ struct QQEngineSharedState: Sendable {
                 // 第五人格赛程：默认关闭；只在明确赛事提问时追加社区赛程资料。
                 // 与上面的游戏知识分支并列，不改任何既有行。
                 // 数据不可用时也注入明确「不可用」指令，防止主模型凭记忆编造赛事。
-                if !isPublicQuestion, let idvFragment = await idvScheduleCoordinator.fragment(
+                if !isPublicQuestion, !swiftOrdinary, let idvFragment = await idvScheduleCoordinator.fragment(
                     for: message.text, scope: message.key), !idvFragment.isEmpty {
                     rule.prompt += "\n" + idvFragment
                 }
                 if socialRequested { rule.prompt += "\n" + QQSocialTools.instruction }
                 var socialCalled = false
                 var socialSucceeded = false
-                if !isPublicQuestion, let dsfFragment = await dsfPriceCoordinator.fragment(
+                if !isPublicQuestion, !swiftOrdinary, let dsfFragment = await dsfPriceCoordinator.fragment(
                     message: message.text,
                     isGroup: message.group,
                     scope: message.key
@@ -2127,7 +2127,6 @@ struct QQEngineSharedState: Sendable {
                     // 本机 model-hub 的 trace 头与 timing 复用同一个 ID；未开 timing 时也生成一个，
                     // 同一轮里的重试因此共用同一个值。只作为请求头，不写日志、不改动行为。
                     let traceID = timing?.trace ?? UUID()
-                    timing?.modelStart = ContinuousClock.now
                     if isPublicQuestion {
                         guard let settings = currentPublicQuestionSettings(message, target: target),
                               let profile = scopedProactiveProfiles[message.key],
@@ -2138,16 +2137,28 @@ struct QQEngineSharedState: Sendable {
                             record(target.id, .skipped, "公开问句生成前身份或频率条件失效")
                             continue
                         }
+                        let gameData = await PublicGameQuestionData.lookup(
+                            message.text, scope: message.key, schedule: idvScheduleCoordinator, prices: dsfPriceCoordinator)
+                        try check(epoch, scope: message.key, target: target)
+                        guard let liveSettings = currentPublicQuestionSettings(message, target: target),
+                              profile.canSpeakPublicQuestion(at: Date(),
+                                confirmed: proactiveSendHistory[message.key, default: []],
+                                cooldownSeconds: liveSettings.publicQuestionCooldownSeconds) else {
+                            record(target.id, .skipped, "公开问句取数后已失效")
+                            continue
+                        }
+                        timing?.modelStart = ContinuousClock.now
                         waitingForModel = true
                         result = try await modelClient.publicGroupQuestionReply(
                             key: key, config: config.ai, rule: rule,
                             context: publicQuestionPriorContext(from: groupContext.eventsText()), text: message.text,
-                            knowledge: publicQuestionKnowledge, traceID: traceID,
+                            knowledge: publicQuestionKnowledge, gameData: gameData, traceID: traceID,
                             reserve: { [weak self] in
                                 guard let self else { throw CancellationError() }
                                 try await self.reserveReplyModel(epoch, scope: message.key, target: target, submission: submissionID)
                             })
                     } else {
+                        timing?.modelStart = ContinuousClock.now
                         waitingForModel = true
                         result = try await modelClient.reviewedQQReply(key: key, config: config.ai, rule: rule,
                     history: message.group ? [] : Array((history[contextKey] ?? []).suffix(2)), text: modelInput, images: incomingImages, toolHandler: toolHandler, onlineToolsEnabled: !proactive && config.effectiveOnlineEnabled, socialToolsEnabled: socialRequested, imageGenerationEnabled: !proactive && config.effectiveImageGeneration.enabled, artworkEnabled: !proactive && config.effectiveArtwork.enabled && config.effectiveArtwork.agentEnabled, stickerOptions: stickerOptions, proactive: proactive && preparedImage == nil,

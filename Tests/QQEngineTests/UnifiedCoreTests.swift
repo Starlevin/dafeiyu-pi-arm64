@@ -1702,6 +1702,17 @@ private func inbound(_ text: String = "合成消息",
                 : validJSON("合成短回复"))
             let result = await core.handle(candidate)
             #expect(result.reply.action == "reply", "\(group): \(result.gate)")
+            let text = try #require(result.reply.reply)
+            if group == "schedule" {
+                #expect(text.contains("BWIKI 第五人格社区赛程"))
+                #expect(text.contains("抓取时间："))
+            } else if group == "price" {
+                #expect(text.contains("dfttk.com 三角洲第三方快照"))
+                #expect(text.contains("上游抓取时间："))
+            } else {
+                #expect(!text.contains("抓取时间："))
+            }
+            #expect(text.components(separatedBy: "\n来源：\n").count == (group == "schedule" || group == "price" ? 2 : 1))
             #expect(GameDataHTTPFixture.requests.count == dataCount)
             let calls = PublicQuestionHTTPFixture.bodies
             #expect(calls.count == 1)
@@ -1716,5 +1727,48 @@ private func inbound(_ text: String = "合成消息",
             }
             #expect(system.contains("只读游戏资料") == (!ordinary && group != "unrelated"))
         }
+    }
+
+    @Test func cachedScheduleRetainsTheFirstFetchTimeAcrossGroups() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [GameDataHTTPFixture.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        GameDataHTTPFixture.reset(responses: [
+            IdvScheduleTool.sourceURL: Data("<span class=\"wiki-bot\">2026年11月27日 IVL：18:00</span>".utf8),
+        ])
+        var config = IdvScheduleConfig()
+        config.enabled = true
+        let coordinator = IdvScheduleTool.Coordinator(config: config, session: session)
+        let message = "2026年11月27日第五人格IVL几点开打？"
+        let start = Date()
+        let first = await coordinator.gameData(for: message, scope: "one", now: start)
+        let cached = await coordinator.gameData(for: message, scope: "two", now: start.addingTimeInterval(90))
+        let source = try #require(first?.source)
+        #expect(source.contains(IdvScheduleTool.formatBeijing(start)))
+        #expect(cached?.source == source)
+        #expect(GameDataHTTPFixture.requests.count == 2)
+    }
+
+    @Test func longGameDataKeepsVerifiedSourceOutsideThePromptLimit() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [PublicQuestionHTTPFixture.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let provider = LLMProvider(kind: .custom, baseURL: URL(string: "http://127.0.0.1:18090/v1")!)
+        PublicQuestionHTTPFixture.reset()
+        let source = "dfttk.com；上游抓取时间：2026-11-25 21:06:59（北京时间）；数据已过期，不作现价。"
+        let data = PublicGameQuestionData(String(repeating: "甲", count: 1_000) + "超出截断", source: source)
+        let result = try await DeepSeekClient(provider: provider, session: session).publicGroupQuestionReply(
+            key: "synthetic-key", config: BotConfig(), rule: ChatRule(name: "fixture"), context: [],
+            text: "三角洲老式钢盔多少钱？", gameData: data, traceID: nil, reserve: {})
+
+        let requests = PublicQuestionHTTPFixture.bodies
+        #expect(requests.count == 1)
+        let messages = try #require(requests.first?["messages"] as? [[String: Any]])
+        let system = try #require(messages.first?["content"] as? String)
+        #expect(system.contains(source))
+        #expect(!system.contains("超出截断"))
+        #expect(result.sources == [source])
     }
 }

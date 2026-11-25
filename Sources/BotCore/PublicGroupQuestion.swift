@@ -19,12 +19,15 @@ public enum PublicGroupQuestion {
     /// Additional question forms for QQ's opt-in public-question lane.
     public static func matchesForQQ(_ text: String) -> Bool {
         let body = normalize(text)
-        return matchesNormalized(body) || isExplicitTechnicalHelp(body)
+        return matchesNormalized(body) || isExplicitTechnicalHelp(body) || isExplicitGameDataQuestion(body)
     }
 
     public static func matchesForWeChat(_ text: String) -> Bool {
         let body = normalize(text)
-        if matchesNormalized(body) { return true }
+        return matchesNormalized(body) || isExplicitGameDataQuestion(body)
+    }
+
+    private static func isExplicitGameDataQuestion(_ body: String) -> Bool {
         guard !isExcluded(body), isBareQuestion(body) else { return false }
         if DsfPricePlanner.intent(body) == .price,
            containsAny(body, ["多少钱", "值多少", "卖多少", "价格多少", "物价多少"]) {

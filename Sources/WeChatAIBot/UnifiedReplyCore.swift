@@ -41,7 +41,7 @@ public struct UnifiedGenerationRequest: Sendable {
     public var contextualParticipation: Bool = false
     public var publicQuestionContext: [String] = []
     public var publicQuestionKnowledge: [String] = []
-    public var publicQuestionGameData: String = ""
+    public var publicQuestionGameData: PublicGameQuestionData? = nil
     public var publicQuestionGroupMemory: String = ""
     /// Stable opaque correlation ID derived from the pilot's session-scoped idempotency key.
     public var modelTraceID: UUID? = nil
@@ -82,7 +82,7 @@ struct DeepSeekReplyGenerator: ReplyGenerating {
                 participation: request.contextualParticipation,
                 traceID: request.modelTraceID, reserve: {}
             )
-            return UnifiedGenerationResult(text: result.text, tokens: result.tokens,
+            return UnifiedGenerationResult(text: result.text, tokens: result.tokens, sources: result.sources,
                                            shouldSend: result.shouldSend,
                                            proactiveSkipReason: result.proactiveSkipReason)
         }
@@ -753,15 +753,10 @@ public final class UnifiedReplyCore: @unchecked Sendable {
             if !plan.promptFragment.isEmpty { rule.prompt += "\n" + plan.promptFragment }
         }
         // 快路径只给已确认的公开问题取一次资料，普通群聊接话保持本地。
-        var publicQuestionGameData = ""
+        var publicQuestionGameData: PublicGameQuestionData?
         if publicQuestionFast {
-            if IdvSchedulePlanner.namesIdentityVEvent(body), IdvSchedulePlanner.plan(message: body) != nil {
-                publicQuestionGameData = await idvScheduleCoordinator.fragment(for: body, scope: session)
-                    ?? "[第五人格赛事·数据不可用] 本轮未取得可核实的资料，不得猜测赛程或赛果。"
-            } else if DsfPricePlanner.intent(body) == .price {
-                publicQuestionGameData = await dsfPriceCoordinator.fragment(message: body, isGroup: true, scope: session)
-                    ?? DsfPriceTool.Prompt.unavailable(reason: "本轮没有可核实的物品报价")
-            }
+            publicQuestionGameData = await PublicGameQuestionData.lookup(
+                body, scope: session, schedule: idvScheduleCoordinator, prices: dsfPriceCoordinator)
         } else if !singleTurn {
             if let idvFragment = await idvScheduleCoordinator.fragment(for: body, scope: session) {
                 rule.prompt += "\n" + idvFragment
@@ -827,6 +822,11 @@ public final class UnifiedReplyCore: @unchecked Sendable {
         // 9) 调用实际 LLMProvider（生产）/ 假模型（fixture）
         // 占位已持久化：此后**任何**出口都必须把最终状态写回账本，避免重启后
         // 看到 pending 被判「不确定」而丢掉一条本可正常回复的输入。
+        if publicQuestionFast, await state.currentGeneration() != generation {
+            let stale = UnifiedReply.ignore("generation_stale", scope: scope, trace: trace)
+            await journal.complete(idemKey, reply: stale, ok: false, at: Date().timeIntervalSince1970)
+            return finish(stale, modelCalled: false, gate: "generation_stale")
+        }
         do {
             let result = try await generator.generate(request)
             if proactive && !publicQuestionFast && !result.shouldSend {

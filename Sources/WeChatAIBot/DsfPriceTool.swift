@@ -104,6 +104,10 @@ enum DsfPriceTool {
         func currentNames() -> [String: String] { names }
 
         func fragment(message: String, isGroup: Bool, scope: String, now: Date = Date()) async -> String? {
+            await gameData(message: message, isGroup: isGroup, scope: scope, now: now)?.prompt
+        }
+
+        func gameData(message: String, isGroup: Bool, scope: String, now: Date = Date()) async -> PublicGameQuestionData? {
             guard config.enabled, isGroup else { return nil }
             guard DsfPricePlanner.intent(message) == .price else { return nil }
 
@@ -119,7 +123,7 @@ enum DsfPriceTool {
                         names = snapshot.itemNames
                     } catch {
                         guard await budget.take(scope, day: today) else { return nil }
-                        return Prompt.unavailable(reason: DsfPriceTool.reason(error))
+                        return PublicGameQuestionData(Prompt.unavailable(reason: DsfPriceTool.reason(error)))
                     }
                 }
                 guard let planned = DsfPricePlanner.plan(message: message, isGroup: isGroup, names: names) else {
@@ -132,24 +136,25 @@ enum DsfPriceTool {
 
             if request.itemID.hasPrefix("AMBIGUOUS:") {
                 let ids = request.itemID.dropFirst("AMBIGUOUS:".count).split(separator: ",").map(String.init)
-                return Prompt.ambiguous(candidateIDs: ids)
+                return PublicGameQuestionData(Prompt.ambiguous(candidateIDs: ids))
             }
 
             do {
                 let snapshot = try await getOrFetchSnapshot(now: now)
                 names = snapshot.itemNames
                 try DsfPriceTool.verifyFreshness(snapshot, maxAgeMinutes: config.maxAgeMinutes, now: now)
-                return DsfPriceTool.promptFragment(request: request, snapshot: snapshot,
-                                                   now: now, maxAgeMinutes: config.maxAgeMinutes)
+                return PublicGameQuestionData(
+                    DsfPriceTool.promptFragment(request: request, snapshot: snapshot,
+                                                now: now, maxAgeMinutes: config.maxAgeMinutes),
+                    source: DsfPriceTool.sourceNote(fetchedAt: snapshot.fetchedAt, expired: false))
             } catch let stale as StaleError {
-                return Prompt.stale(capturedAt: stale.capturedAt,
-                                    ageMinutes: Int(stale.ageSeconds / 60),
-                                    limitMinutes: config.maxAgeMinutes,
-                                    capturedFrom: stale.capturedFrom,
-                                    capturedTo: stale.capturedTo,
-                                    captureStale: stale.captureStale)
+                return PublicGameQuestionData(
+                    Prompt.stale(capturedAt: stale.capturedAt, ageMinutes: Int(stale.ageSeconds / 60),
+                                 limitMinutes: config.maxAgeMinutes, capturedFrom: stale.capturedFrom,
+                                 capturedTo: stale.capturedTo, captureStale: stale.captureStale),
+                    source: DsfPriceTool.sourceNote(fetchedAt: stale.capturedAt, expired: true))
             } catch {
-                return Prompt.unavailable(reason: DsfPriceTool.reason(error))
+                return PublicGameQuestionData(Prompt.unavailable(reason: DsfPriceTool.reason(error)))
             }
         }
 
@@ -164,6 +169,12 @@ enum DsfPriceTool {
             cached = (snapshot, now)
             return snapshot
         }
+    }
+
+    private static func sourceNote(fetchedAt: String, expired: Bool) -> String? {
+        guard let date = isoDate(fetchedAt) else { return nil }
+        return "dfttk.com 三角洲第三方快照（非实时）；上游抓取时间：\(IdvScheduleTool.formatBeijing(date))（北京时间）"
+            + (expired ? "；数据已过期，不作现价。" : "。")
     }
 
     /// 只读会话：无缓存、无 Cookie、不跟随重定向、整体超时。

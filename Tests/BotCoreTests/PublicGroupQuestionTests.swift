@@ -159,5 +159,9 @@ struct PublicGroupQuestionTests {
         #expect(!PublicGroupQuestion.matchesForWeChat("明晚打谁？"))
         #expect(!PublicGroupQuestion.matchesForWeChat("今晚IVL开打"))
         #expect(!PublicGroupQuestion.matchesForWeChat("三角洲老式钢盔涨价了"))
+        #expect(PublicGroupQuestion.matchesForQQ("今晚IVL几点开打？"))
+        #expect(PublicGroupQuestion.matchesForQQ("三角洲老式钢盔多少钱？"))
+        #expect(!PublicGroupQuestion.matchesForQQ("今晚几点开打？"))
+        #expect(!PublicGroupQuestion.matchesForQQ("三角洲老式钢盔涨价了"))
     }
 }

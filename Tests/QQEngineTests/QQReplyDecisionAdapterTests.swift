@@ -227,6 +227,13 @@ import Testing
         #expect(route("group:10001", hasUnansweredContext: false) == .ignore(.noUnansweredContext))
         #expect(route("group:10002") == .ignore(.notPublicQuestion))
         #expect(route("group:10002", text: question) == .publicQuestion)
+        for gameQuestion in ["今晚IVL几点开打？", "三角洲老式钢盔多少钱？"] {
+            #expect(route("group:10002", text: gameQuestion) == .publicQuestion)
+            #expect(route("group:10001", text: gameQuestion) == .ordinary)
+            #expect(route("group:10002", text: gameQuestion, authorized: false) == .ignore(.notPublicQuestion))
+            #expect(route("group:10002", text: gameQuestion, otherMentions: ["20003"]) == .ignore(.mentionPresent))
+            #expect(route("group:10002", text: gameQuestion, quote: "m0") == .ignore(.quotedReply))
+        }
         #expect(route("group:10003", text: question) == .publicQuestion)
         #expect(route("group:10003") == .ordinary)
         #expect(route("group:10004") == .ignore(.notPublicQuestion))

@@ -179,40 +179,45 @@ public enum IdvScheduleTool {
     public static func promptFragment(query: IdvScheduleQuery, pageText: String?,
                                       meta: IdvPageMeta, fetchedAt: Date,
                                       failure: String? = nil) -> String {
-        let stamp = formatBeijing(fetchedAt)
+        scheduleData(query: query, pageText: pageText, meta: meta, fetchedAt: fetchedAt, failure: failure).prompt
+    }
 
+    private static func scheduleData(query: IdvScheduleQuery, pageText: String?,
+                                     meta: IdvPageMeta, fetchedAt: Date,
+                                     failure: String? = nil) -> PublicGameQuestionData {
         if query.asksResults {
-            return "[第五人格赛事·如实回答] " + scoreUnavailableText
-                + "必须明确说无法核实、不支持实时比分，不得推测胜负或比分。"
+            return PublicGameQuestionData("[第五人格赛事·如实回答] " + scoreUnavailableText
+                + "必须明确说无法核实、不支持实时比分，不得推测胜负或比分。")
         }
 
         guard query.usable, let day = query.eventDate, let league = query.league else {
             var ask: [String] = []
             if query.eventDate == nil { ask.append("是今天、明天，还是具体某天（如 11月14日）") }
             if query.league == nil { ask.append("IVL 还是 IJL（或 COA）") }
-            if ask.isEmpty { return "[第五人格赛事·如实回答] 没有足够信息，不得猜测赛事安排。" }
-            return "[第五人格赛事·需追问] 请先用一句话问清：" + ask.joined(separator: "、")
-                + "。在用户说清之前，不得给出任何具体对阵或时间。"
+            if ask.isEmpty { return PublicGameQuestionData("[第五人格赛事·如实回答] 没有足够信息，不得猜测赛事安排。") }
+            return PublicGameQuestionData("[第五人格赛事·需追问] 请先用一句话问清：" + ask.joined(separator: "、")
+                + "。在用户说清之前，不得给出任何具体对阵或时间。")
         }
 
         // 取数失败 / 结构变了：明确「本赛事数据不可用」，禁止编造（第 4 条核心）。
         guard let pageText else {
             let reason = failure ?? "未能取得赛程数据"
-            return "[第五人格赛事·数据不可用] \(reason)。本次没有可用的《第五人格》赛程数据；"
+            return PublicGameQuestionData("[第五人格赛事·数据不可用] \(reason)。本次没有可用的《第五人格》赛程数据；"
                 + "必须直接告诉用户「暂时取不到赛程，请以官方渠道为准」，"
-                + "严禁凭记忆或推测给出任何对阵、时间或比分。"
+                + "严禁凭记忆或推测给出任何对阵、时间或比分。")
         }
 
         guard let block = lineFor(day: day, league: league, in: pageText) else {
-            return "[第五人格赛事·数据不可用] 来源里没有 \(day) \(league.uppercased()) 的赛程条目。"
-                + "必须如实说「来源里没有这一天的赛程」，不得用其它日期或其它联赛的内容顶替。"
+            return PublicGameQuestionData("[第五人格赛事·数据不可用] 来源里没有 \(day) \(league.uppercased()) 的赛程条目。"
+                + "必须如实说「来源里没有这一天的赛程」，不得用其它日期或其它联赛的内容顶替。")
         }
 
+        let source = "BWIKI 第五人格社区赛程（非官方公告）；抓取时间：\(formatBeijing(fetchedAt))（北京时间）"
         var lines = [
             "[第五人格赛事｜低信任资料] 以下是社区赛程页的**赛前安排**，不是实时比分也不是赛果；"
             + "只能按事实转述，不得延伸推测。",
             "【社区赛程·非赛果】" + block,
-            "来源：BWIKI 第五人格赛事页（社区维护，非官方公告）；抓取时间：\(stamp)（北京时间）",
+            "来源：" + source,
         ]
         // 第 3 条：只陈述「页面编辑时间」，核验不到就明说未知，绝不伪造。
         if meta.verified, let revision = meta.revisionDate {
@@ -222,7 +227,7 @@ public enum IdvScheduleTool {
             lines.append("来源内容更新时间未知（未能核验页面元数据）")
         }
         lines.append("赛程不是赛果；实时比分不支持，不得编造。")
-        return lines.joined(separator: "\n")
+        return PublicGameQuestionData(lines.joined(separator: "\n"), source: source)
     }
 
     static func formatBeijing(_ date: Date) -> String {
@@ -367,6 +372,10 @@ extension IdvScheduleTool {
         }
 
         public func fragment(for message: String, scope: String, now: Date = Date()) async -> String? {
+            await gameData(for: message, scope: scope, now: now)?.prompt
+        }
+
+        func gameData(for message: String, scope: String, now: Date = Date()) async -> PublicGameQuestionData? {
             guard config.enabled else { return nil }
             let defaultLeague = await leagueMemory.get(scope, now: now)
             guard let query = IdvSchedulePlanner.plan(
@@ -374,22 +383,24 @@ extension IdvScheduleTool {
                 return nil
             }
             if !query.usable {
-                return IdvScheduleTool.promptFragment(
+                return IdvScheduleTool.scheduleData(
                     query: query, pageText: nil as String?,
                     meta: IdvPageMeta.unknown, fetchedAt: now)
             }
             guard await budget.take(scope, day: IdvScheduleTool.day(now)) else {
-                return "[第五人格赛事·额度用尽] 本会话今日赛程查询次数已达上限，"
-                    + "请如实说明稍后再问，不得凭记忆给出对阵或时间。"
+                return PublicGameQuestionData("[第五人格赛事·额度用尽] 本会话今日赛程查询次数已达上限，"
+                    + "请如实说明稍后再问，不得凭记忆给出对阵或时间。")
             }
 
             var pageText: String?
             var meta = IdvPageMeta.unknown
             var failure: String?
+            var fetchedAt = now
             if let cached = pageCache,
-               now.timeIntervalSince(cached.fetchedAt) < config.pageCacheSeconds {
+               (0..<config.pageCacheSeconds).contains(now.timeIntervalSince(cached.fetchedAt)) {
                 pageText = cached.text
                 meta = cached.meta
+                fetchedAt = cached.fetchedAt
             } else {
                 do {
                     let html = try await IdvScheduleTool.load(session: session, config: config)
@@ -408,9 +419,9 @@ extension IdvScheduleTool {
             if query.usable, let league = query.league {
                 await leagueMemory.set(league, scope: scope, now: now)
             }
-            return IdvScheduleTool.promptFragment(
+            return IdvScheduleTool.scheduleData(
                 query: query, pageText: pageText,
-                meta: meta, fetchedAt: now, failure: failure)
+                meta: meta, fetchedAt: fetchedAt, failure: failure)
         }
     }
 }
