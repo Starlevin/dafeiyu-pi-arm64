@@ -179,6 +179,17 @@ class Store {
     }
   }
 
+  /** 允许模型失败后重投，同时保留已归档的入站消息。 */
+  unmarkSeen(key, msgId) {
+    if (!msgId) return;
+    const chat = this.chatStore.ensureChat(key);
+    const index = chat.meta.seenIds.indexOf(String(msgId));
+    if (index !== -1) {
+      chat.meta.seenIds.splice(index, 1);
+      this.chatStore.saveMeta(chat, { immediate: true });
+    }
+  }
+
   redactLastMessage(key, replacement = '（已隐藏）') {
     const chat = this.chatStore.ensureChat(key);
     return this.chatStore.redactLast(chat, replacement);
@@ -495,9 +506,10 @@ class Store {
 
   /* ------------------------------ 人物卡 ------------------------------ */
 
-  profile(key, uid, name) {
+  profile(key, uid, name, { touch = true } = {}) {
     const chat = this.chatStore.ensureChat(key);
-    const card = this.chatStore.ensurePerson(chat, uid, name);
+    const existing = touch ? null : this.chatStore.getCard(chat, uid);
+    const card = existing || this.chatStore.ensurePerson(chat, uid, name);
     return this._profileView(card);
   }
 

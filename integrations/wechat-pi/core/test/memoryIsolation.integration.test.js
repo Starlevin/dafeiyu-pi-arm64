@@ -290,6 +290,54 @@ test('Moments reads require a verified owner in a private WeChat chat', async (t
   assert.equal(accesses, 0);
 });
 
+test('retry after model failure and restart reuses the archived input in the same account and group', async (t) => {
+  const account = 'a'.repeat(64);
+  const otherAccount = 'b'.repeat(64);
+  const text = '雨停之后再去看海的回归样本';
+  const laterText = '同群后续消息的回归样本';
+  const prompts = [];
+  const { dir, store, gateway } = gatewayFixture(t, {
+    complete: async ({ turns }) => {
+      prompts.push(turns);
+      if (prompts.length === 1) throw new Error('synthetic transient model failure');
+      return '雨停之后一起去吧';
+    },
+  });
+  const { config, llm, logger } = gateway.bot;
+  config.wechat = { memoryAccountBinding: account };
+  const options = { local: true, trustedLocal: true };
+  const input = { ...inbound(GROUP_A, text), memory_account: account };
+  const first = await gateway.handleInbound(input, options);
+  assert.equal(first.action, 'reply');
+  assert.notEqual(first.reply, '雨停之后一起去吧');
+  const [key] = store.sessions.keys();
+  assert.equal(store.isDuplicate(key, MSG_ID), false);
+  assert.equal(oneMessageWithId(store, key).length, 1);
+  const count = store.sessions.get(key).profiles[SENDER_ID].count;
+  store.appendMessage(key, { role: 'user', uid: 'fixture-other-sender', text: laterText });
+  store.close();
+
+  const cold = new Store({ dir });
+  t.after(() => cold.close());
+  const restarted = new Gateway({ platform: 'wechat', bot: new Bot({ config, store: cold, llm, logger }), logger });
+  const retry = await restarted.handleInbound(input, options);
+  assert.equal(retry.action, 'reply');
+  assert.equal(retry.reply, '雨停之后一起去吧');
+  assert.equal(oneMessageWithId(cold, key).length, 1);
+  assert.equal(cold.sessions.get(key).profiles[SENDER_ID].count, count);
+  assert.equal(prompts[1].filter((turn) => String(turn.content).includes(text)).length, 1);
+  assert.ok(prompts[1].some((turn) => String(turn.content).includes(laterText)));
+  assert.equal((await restarted.handleInbound(input, options)).reason, 'duplicate');
+
+  const otherGroup = { ...inbound(GROUP_B, '另一个群使用同一个消息编号'), memory_account: account };
+  assert.equal((await restarted.handleInbound(otherGroup, options)).action, 'reply');
+  config.wechat.memoryAccountBinding = otherAccount;
+  const otherLogin = { ...inbound(GROUP_A, '另一个账号使用同一个消息编号'), memory_account: otherAccount };
+  assert.equal((await restarted.handleInbound(otherLogin, options)).action, 'reply');
+  assert.equal(cold.sessions.size, 3);
+  for (const scope of cold.sessions.keys()) assert.equal(oneMessageWithId(cold, scope).length, 1);
+});
+
 test('same sender and platform message id are deduplicated per group and stay isolated after cold rebuild', async (t) => {
   const { dir, store, gateway } = gatewayFixture(t);
 

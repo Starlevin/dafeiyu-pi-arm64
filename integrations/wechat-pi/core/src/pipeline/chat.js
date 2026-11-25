@@ -520,6 +520,7 @@ class Bot {
     this._lastTraceState = session.state;
 
     // 1) 去重
+    const rawMsgId = String(msg.msgId || '').trim();
     if (msg.msgId && this.store.isDuplicate(key, msg.msgId)) {
       return { action: 'ignore', reason: 'duplicate', key, msg };
     }
@@ -572,8 +573,13 @@ class Bot {
     }
 
     const hasText = Boolean(clean.text);
-    let appended = null;
-    if (hasText && !msg.recycled) {
+    // 模型失败可以释放发送去重标记。重投仍沿用该会话已落盘的原始消息，
+    // 免得再抽取一次人物记忆，也保留这条消息原来的顺序。
+    const archivedInput = hasText && !msg.recycled && rawMsgId
+      ? session.messages?.findLast((row) => row.role === 'user' && String(row.msgId || '').trim() === rawMsgId)
+      : null;
+    let appended = archivedInput || null;
+    if (hasText && !msg.recycled && !appended) {
       // 落库失败不能拖死这一轮：记忆/原文是加分项，回复本身要继续。
       // 以前这里没兜底，磁盘满 / 文件被占用时整条消息直接变成「不回话」。
       try {
@@ -600,7 +606,7 @@ class Bot {
     // 以前这里没兜底，记忆目录一坏（文件损坏 / 权限 / 迁移中）就直接抛到 _handleOnce。
     let profile = null;
     try {
-      profile = this.store.profile(key, msg.senderId, msg.senderName);
+      profile = this.store.profile(key, msg.senderId, msg.senderName, { touch: !archivedInput });
     } catch (err) {
       if (this.logger) this.logger.error('读取人物卡失败（按空卡继续回复）：' + describeError(err));
       profile = { uid: msg.senderId, name: msg.senderName, nickname: '', notes: [], count: 0 };
@@ -933,11 +939,11 @@ class Bot {
         this.store.touchNotes(key, msg.senderId, notes, nowMs);
       } catch { /* 「提过几次」没记上不影响这轮回复 */ }
     }
-    // mem.recent 已经按 3,200 token 预算裁过；刚写入的当前消息先去掉，由 buildTurns 统一拼一次
+    // buildTurns 统一拼当前消息。重投的原文可能在后续消息之前。
     const history = mem.recent || [];
     const currentSeq = appended && appended.seq;
-    const historyForTurns = (currentSeq && history.length && history[history.length - 1].seq === currentSeq)
-      ? history.slice(0, -1)
+    const historyForTurns = currentSeq
+      ? history.filter((row) => row.seq !== currentSeq)
       : history;
     const groupParticipants = isGroup
       ? [...new Set(history.filter((m) => m.role === 'user' && m.name).map((m) => String(m.name)))].slice(-16)
@@ -1107,9 +1113,8 @@ class Bot {
         try {
           const plain = this.recentOnlyContext(key, { isGroup });
           const recent = plain.recent || [];
-          const curSeq = appended && appended.seq;
-          const plainHistory = (curSeq && recent.length && recent[recent.length - 1].seq === curSeq)
-            ? recent.slice(0, -1)
+          const plainHistory = currentSeq
+            ? recent.filter((row) => row.seq !== currentSeq)
             : recent;
           const plainTurns = this.buildTurns({ ...msg, ts: nowMs }, plainHistory, '', tail);
           retried = memoryBudget.assertWithinHardLimit(buildBudgetFor(plainTurns, false));
@@ -2323,6 +2328,10 @@ class Bot {
       if (retried) {
         text = retried;
       } else {
+        // 保留已存入站消息，只释放失败回复的重投标记。
+        if (decision.msg?.msgId && typeof this.store.unmarkSeen === 'function') {
+          try { this.store.unmarkSeen(decision.key, decision.msg.msgId); } catch { /* ignore */ }
+        }
         const friendly = blocked
           ? '这话我不敢接，换个说法'
           : (err instanceof LlmError ? err.userMessage : '呜…深海线路打结了，等会儿再来找人家嘛');
@@ -2333,7 +2342,12 @@ class Bot {
     text = String(text == null ? '' : text).trim();
     this.recordUsage(decision, this.usageSince(usageMark));
     const bubbles = this.finalize(decision, text);
-    if (!bubbles.length) return { action: 'ignore', reason: 'empty_reply' };
+    if (!bubbles.length) {
+      if (decision.msg?.msgId && typeof this.store.unmarkSeen === 'function') {
+        try { this.store.unmarkSeen(decision.key, decision.msg.msgId); } catch { /* ignore */ }
+      }
+      return { action: 'ignore', reason: 'empty_reply' };
+    }
     // 群里骂人时要真 @ 到对方：优先用靶子，其次看正文开头有没有 @名字
     const finalText = (decision.finalText || text) + (Array.isArray(decision.msg?.socialSources) && decision.msg.socialSources.length
       ? '\n来源：\n' + decision.msg.socialSources.join('\n') : '');
