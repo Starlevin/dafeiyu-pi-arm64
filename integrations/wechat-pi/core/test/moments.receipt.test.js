@@ -36,3 +36,26 @@ test('unconfirmed automatic like stops the batch and stays an attempt', async (t
   assert.equal(restored.reserveAutoLikeAttempt('first'), false);
   assert.equal(restored.reserveAutoLikeAttempt('next'), true);
 });
+
+test('scheduled Moments operations cannot be claimed after Beijing midnight', () => {
+  const account = 'fixture-account';
+  let timestamp = Date.UTC(2026, 10, 26, 15, 59, 59);
+  const svc = new MomentsService({
+    now: () => timestamp, config: { moments: { autoReadEveryHours: 4, nightSilence: false } },
+  });
+  const scheduled = svc.request({ account }, { scheduled: true });
+  timestamp += 1000;
+  assert.equal(svc.claim(account), null);
+  assert.equal(svc.result(scheduled.id).status, 'failed');
+  assert.throws(() => svc.request({ account }, { scheduled: true }), { statusCode: 409 });
+  const manual = svc.request({ account });
+  assert.equal(svc.claim(account).id, manual.id);
+  svc.complete({ id: manual.id, account, items: [] });
+
+  timestamp = Date.UTC(2026, 10, 26, 15, 59, 59);
+  const like = svc.action({ action: 'like', publisher: 'fixture', keyword: 'fixture', account },
+                          { automatic: true });
+  timestamp += 1000;
+  assert.equal(svc.claim(account), null);
+  assert.equal(svc.result(like.id).status, 'failed');
+});

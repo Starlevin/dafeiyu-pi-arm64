@@ -18,6 +18,7 @@ module.exports = function register(router) {
       autoLike: m.autoLike === true,
       autoLikeMaxPerDay: Number(m.autoLikeMaxPerDay) || 0,
       autoReadEveryHours: Number(m.autoReadEveryHours) || 0,
+      nightSilence: true,
     };
   };
   router.get('/api/moments/settings', (runtime, req, res) => {
@@ -27,6 +28,9 @@ module.exports = function register(router) {
   router.post('/api/moments/settings', async (runtime, req, res) => {
     local(req);
     const body = await readBody(req) || {};
+    if (Object.hasOwn(body, 'nightSilence') && body.nightSilence !== true) {
+      throw Object.assign(new Error('朋友圈夜间静默必须启用'), { statusCode: 400 });
+    }
     const patch = {};
     if (typeof body.autoLike === 'boolean') patch['moments.autoLike'] = body.autoLike;
     if (body.autoLikeMaxPerDay !== undefined) patch['moments.autoLikeMaxPerDay'] = Number(body.autoLikeMaxPerDay);

@@ -57,6 +57,12 @@ function setByPath(obj, dotted, value) {
 
 /** 按现有配置的类型把接口送来的值转成正确类型（数字/开关/数组/JSON） */
 function coerceValue(config, dotted, value) {
+  if (dotted === 'moments.nightSilence') {
+    if (![true, 'true', 1, '1'].includes(value)) {
+      throw Object.assign(new Error('朋友圈夜间静默必须启用'), { statusCode: 400 });
+    }
+    return true;
+  }
   const cur = getByPath(config, dotted);
   if (typeof cur === 'number') {
     const n = typeof value === 'number' ? value : Number(String(value == null ? '' : value).trim());
@@ -84,6 +90,7 @@ function coerceValue(config, dotted, value) {
 function publicConfig(config) {
   const internal = new Set(['env', 'paths', 'root', 'configExists', 'configError']);
   const out = JSON.parse(JSON.stringify(config, (k, v) => (internal.has(k) ? undefined : v)));
+  if (isPlainObject(out.moments)) out.moments.nightSilence = true;
   const secrets = {};
   for (const p of SECRET_PATHS) {
     const v = getByPath(config, p);

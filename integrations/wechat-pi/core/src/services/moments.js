@@ -47,6 +47,11 @@ function dayKey(ms) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+function isNightSilence(ms) {
+  const hour = new Date(Number(ms) + 8 * 3600 * 1000).getUTCHours();
+  return hour >= 0 && hour < 7;
+}
+
 function fail(message, statusCode = 400) {
   return Object.assign(new Error(message), { statusCode });
 }
@@ -264,7 +269,7 @@ class MomentsService {
   // 读完后延迟执行，先让启动器把结果拿走，避免自动点赞覆盖掉读取任务。
   scheduleAutoLike(job) {
     const on = Boolean(this.config && this.config.moments && this.config.moments.autoLike === true);
-    if (!on || !this.llm || this.llm.isMock) return;
+    if (!on || !this.llm || this.llm.isMock || isNightSilence(this.now())) return;
     if (job.action || job.query.own || job.query.username || job.query.keyword) return;
     const timer = setTimeout(() => {
       this.autoLike(job).catch((err) => {
@@ -325,7 +330,7 @@ class MomentsService {
   }
 
   async autoLike(job) {
-    if (this.autoBusy || this.autoLikeRemaining() <= 0) return;
+    if (this.autoBusy || isNightSilence(this.now()) || this.autoLikeRemaining() <= 0) return;
     const items = (job.items || []).filter((x) => x && x.id && !x.own && !x.likedByMe
       && !this.state.liked.has(x.id) && !this.state.attempted[x.id]
       && String(x.text || '').trim().length >= 6 && !AUTO_LIKE_SKIP_RE.test(x.text || ''));
@@ -336,7 +341,7 @@ class MomentsService {
       const byId = new Map(items.map((x) => [x.id, x]));
       let outcome = 'skipped';
       for (const pick of picks) {
-        if (this.autoLikeRemaining() <= 0) break;
+        if (isNightSilence(this.now()) || this.autoLikeRemaining() <= 0) break;
         if (Object.hasOwn(this.state.attempted, pick.id)) continue;
         const item = byId.get(pick.id);
         if (!item) continue;
@@ -349,7 +354,8 @@ class MomentsService {
         try {
           this.idle();
           if (!this.reserveAutoLikeAttempt(item.id)) break;
-          queued = this.action({ action: 'like', publisher: item.nickname, keyword, account: job.account });
+          queued = this.action({ action: 'like', publisher: item.nickname, keyword, account: job.account },
+                               { automatic: true });
         } catch (err) {
           break;
         }
@@ -369,14 +375,12 @@ class MomentsService {
   // 可选的定时读取由服务自己管理，设置接口改完可以立即重排，不用重启内核。
   startAutoRead() {
     this.stopAutoRead();
-    const hours = Number(this.config && this.config.moments && this.config.moments.autoReadEveryHours) || 0;
+    const hours = this.autoReadHours();
     if (hours <= 0) return;
     const timer = setInterval(() => {
-      // 夜间不自动翻朋友圈，避免无人运行时半夜操作微信窗口。
-      const hour = new Date().getHours();
-      if (hour >= 0 && hour < 7) return;
       try {
-        this.request({ limit: 20, account: String((this.config.wechat && this.config.wechat.account) || '') });
+        this.request({ limit: 20, account: String((this.config.wechat && this.config.wechat.account) || '') },
+                     { scheduled: true });
       } catch { /* 有任务或桥接未就绪，下一轮再说 */ }
     }, hours * 3600 * 1000);
     timer.unref?.();
@@ -385,6 +389,9 @@ class MomentsService {
   stopAutoRead() {
     if (this.autoTimer) clearInterval(this.autoTimer);
     this.autoTimer = null;
+  }
+  autoReadHours() {
+    return Number(this.config?.moments?.autoReadEveryHours) || 0;
   }
   snapshot() {
     if (!this.latest) return null;
@@ -419,12 +426,16 @@ class MomentsService {
     this.expiry.unref?.();
     return this.result(this.job.id);
   }
-  request(body = {}) {
+  request(body = {}, { scheduled = false } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail('读取参数格式无效');
+    if (scheduled && (isNightSilence(this.now()) || this.autoReadHours() <= 0)) {
+      throw fail('定时读取当前不可用', 409);
+    }
     this.idle();
     const limit = body.limit === undefined ? 20 : Number(body.limit);
     if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw fail('读取条数应为 1～50');
     return this.start({
+      scheduledRead: scheduled,
       query: { limit, keyword: clean(body.keyword, 100), username: clean(body.username, 120), own: body.own === true },
     }, body.account);
   }
@@ -436,12 +447,18 @@ class MomentsService {
     const claimed = clean(account, 120);
     // 双开时两个桥接都会轮询；如果启动器点名了账号，其他账号不能把任务领走。
     if (job.expectedAccount && claimed !== job.expectedAccount) return null;
+    if ((job.scheduledRead && this.autoReadHours() <= 0)
+        || ((job.scheduledRead || job.automatic) && isNightSilence(this.now()))) {
+      job.status = 'failed';
+      job.error = '自动操作已关闭或进入夜间静默，任务未执行。';
+      return null;
+    }
     job.status = 'reading';
     job.account = claimed;
     job.startedAt = this.now();
     return { id: job.id, query: job.query, action: job.action || 'read' };
   }
-  action(body = {}) {
+  action(body = {}, { automatic = false } = {}) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail('互动参数格式无效');
     if (!['like', 'unlike', 'comment', 'reply'].includes(body.action)) throw fail('不支持的朋友圈操作');
     const publisher = clean(body.publisher, 120), keyword = clean(body.keyword, 100);
@@ -452,6 +469,7 @@ class MomentsService {
     this.idle();
     return this.start({
       action: body.action,
+      automatic,
       query: { publisher, keyword, content, replyTo },
     }, body.account);
   }
