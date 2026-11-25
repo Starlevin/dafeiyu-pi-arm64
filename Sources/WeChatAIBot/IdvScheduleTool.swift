@@ -12,10 +12,10 @@ import BotCore
 ///   即使拿到修订时间，也只描述为「页面编辑时间」，明确声明它不是赛程内容刷新时间。
 /// * 第 4 条：区分「取数成功」与「不可用」。本层只负责诚实的*数据*表达；
 ///   是否要让模型改写由上层决定（见 `promptFragment` 的 `degraded` 语义）。
-/// * 第 5 条：默认上限高于实测页面大小（约 436 KiB），避免必然截断。
+/// * 第 5 条：默认上限高于实测近期赛程页大小，留出页面增长余量。
 public struct IdvScheduleConfig: Sendable, Equatable {
     public var enabled: Bool = false
-    /// 实测页面约 436 KiB；默认 1 MiB 留足余量（仍远低于 2 MiB 硬上限）。
+    /// 默认 1 MiB 留足余量（仍低于 2 MiB 硬上限）。
     public var maxBytes: Int = 1024 * 1024
     public var timeout: TimeInterval = 6.0
     public var perChatDaily: Int = 6
@@ -43,7 +43,7 @@ public struct IdvScheduleConfig: Sendable, Equatable {
     public var canHoldMeasuredPage: Bool { maxBytes > Self.measuredPageBytes }
 
     /// 实测页面大小（2026-11-14 多次实测 436,632 字节）。仅作预算校验基准。
-    public static let measuredPageBytes = 436_632
+    public static let measuredPageBytes = 258_523
 }
 
 /// 页面元数据核验结果。`revisionDate == nil` 表示**未能核验**，调用方必须如实说未知。
@@ -61,11 +61,11 @@ public struct IdvPageMeta: Sendable, Equatable {
 
 public enum IdvScheduleTool {
     /// 写死的来源；用户输入永远不能改变它。
-    public static let sourceURL = URL(string: "https://wiki.biligame.com/dwrg/%E8%B5%9B%E4%BA%8B")!
+    public static let sourceURL = URL(string: "https://wiki.biligame.com/dwrg/%E8%BF%91%E6%9C%9F%E8%B5%9B%E7%A8%8B")!
     /// 同一站点的 MediaWiki API，用于运行时核验页面修订时间（无需凭据）。
     public static let revisionsURL = URL(string:
         "https://wiki.biligame.com/dwrg/api.php?action=query&format=json"
-        + "&prop=revisions&rvprop=timestamp&rvlimit=1&titles=%E8%B5%9B%E4%BA%8B")!
+        + "&prop=revisions&rvprop=timestamp&rvlimit=1&titles=%E8%BF%91%E6%9C%9F%E8%B5%9B%E7%A8%8B")!
 
     /// 明确不可用：没有任何可核实来源提供当日比分。答案里必须照实说。
     public static let scoreUnavailableText =
@@ -187,16 +187,25 @@ public enum IdvScheduleTool {
                                      failure: String? = nil) -> PublicGameQuestionData {
         if query.asksResults {
             return PublicGameQuestionData("[第五人格赛事·如实回答] " + scoreUnavailableText
-                + "必须明确说无法核实、不支持实时比分，不得推测胜负或比分。")
+                + "必须明确说无法核实、不支持实时比分，不得推测胜负或比分。",
+                localReply: "我能查第五人格赛程，但这边没有可核实的实时比分或赛果，先看赛事官方战报吧。")
         }
 
         guard query.usable, let day = query.eventDate, let league = query.league else {
             var ask: [String] = []
             if query.eventDate == nil { ask.append("是今天、明天，还是具体某天（如 11月14日）") }
             if query.league == nil { ask.append("IVL 还是 IJL（或 COA）") }
-            if ask.isEmpty { return PublicGameQuestionData("[第五人格赛事·如实回答] 没有足够信息，不得猜测赛事安排。") }
+            let clarification: String
+            if query.eventDate == nil && query.league == nil {
+                clarification = "想查哪天、哪个联赛的赛程？IVL、IJL 或 COA 都可以。"
+            } else if query.eventDate == nil {
+                clarification = "想查哪天的赛程？说今天、明天或具体日期都行。"
+            } else {
+                clarification = "想看 IVL、IJL，还是 COA 的赛程？"
+            }
             return PublicGameQuestionData("[第五人格赛事·需追问] 请先用一句话问清：" + ask.joined(separator: "、")
-                + "。在用户说清之前，不得给出任何具体对阵或时间。")
+                + "。在用户说清之前，不得给出任何具体对阵或时间。",
+                localReply: clarification)
         }
 
         // 取数失败 / 结构变了：明确「本赛事数据不可用」，禁止编造（第 4 条核心）。
@@ -204,12 +213,14 @@ public enum IdvScheduleTool {
             let reason = failure ?? "未能取得赛程数据"
             return PublicGameQuestionData("[第五人格赛事·数据不可用] \(reason)。本次没有可用的《第五人格》赛程数据；"
                 + "必须直接告诉用户「暂时取不到赛程，请以官方渠道为准」，"
-                + "严禁凭记忆或推测给出任何对阵、时间或比分。")
+                + "严禁凭记忆或推测给出任何对阵、时间或比分。",
+                localReply: "暂时取不到第五人格的社区赛程，先以赛事官方公告为准吧。")
         }
 
         guard let block = lineFor(day: day, league: league, in: pageText) else {
             return PublicGameQuestionData("[第五人格赛事·数据不可用] 来源里没有 \(day) \(league.uppercased()) 的赛程条目。"
-                + "必须如实说「来源里没有这一天的赛程」，不得用其它日期或其它联赛的内容顶替。")
+                + "必须如实说「来源里没有这一天的赛程」，不得用其它日期或其它联赛的内容顶替。",
+                localReply: "社区赛程页没有列出 \(day) 的 \(league.uppercased()) 场次，不能据此确定当天有没有比赛。")
         }
 
         let source = "BWIKI 第五人格社区赛程（非官方公告）；抓取时间：\(formatBeijing(fetchedAt))（北京时间）"
@@ -227,7 +238,8 @@ public enum IdvScheduleTool {
             lines.append("来源内容更新时间未知（未能核验页面元数据）")
         }
         lines.append("赛程不是赛果；实时比分不支持，不得编造。")
-        return PublicGameQuestionData(lines.joined(separator: "\n"), source: source)
+        return PublicGameQuestionData(lines.joined(separator: "\n"), source: source,
+                                      localReply: block)
     }
 
     static func formatBeijing(_ date: Date) -> String {
@@ -247,19 +259,25 @@ public enum IdvScheduleTool {
               let year = Int(parts[0]), let month = Int(parts[1]), let dayOfMonth = Int(parts[2]),
               (2000...2099).contains(year) else { return nil }
         let leagueToken = league.uppercased()
+        guard ["IVL", "IJL", "COA"].contains(leagueToken) else { return nil }
+        let leaguePattern = "(?<![A-Za-z0-9])\(leagueToken)(?![A-Za-z0-9])"
+        var slots: [String] = []
 
         for rawLine in pageText.split(separator: "\n") {
             let line = String(rawLine)
-            guard line.contains(leagueToken) else { continue }
+            guard line.range(of: leaguePattern, options: [.regularExpression, .caseInsensitive]) != nil else { continue }
             guard lineMentions(date: (year, month, dayOfMonth), in: line) else { continue }
-            guard let colon = line.firstIndex(of: "：") ?? line.firstIndex(of: ":") else { continue }
-            let tail = String(line[line.index(after: colon)...])
-            let times = extractTimes(tail)
-            guard !times.isEmpty else { continue }
-            let zone = league == "ijl" ? "日本时间/JST(UTC+9)" : "北京时间/UTC+8"
-            return "\(day) \(leagueToken)（\(zone)）：" + times.joined(separator: "、")
+            guard let colon = line.firstIndex(where: { $0 == "：" || $0 == ":" }) else { continue }
+            let tail = line[line.index(after: colon)...]
+            for rawSlot in tail.split(whereSeparator: { $0 == "；" || $0 == ";" }) {
+                if let slot = scheduleSlot(String(rawSlot)), !slots.contains(slot) {
+                    slots.append(slot)
+                }
+            }
         }
-        return nil
+        guard !slots.isEmpty else { return nil }
+        let zone = leagueToken == "IJL" ? "日本时间/JST(UTC+9)" : "北京时间/UTC+8"
+        return "\(day) \(leagueToken)（\(zone)）：" + slots.joined(separator: "；")
     }
 
     /// 行内日期是否**完整匹配**（年+月+日）。支持两种真实写法：
@@ -280,20 +298,25 @@ public enum IdvScheduleTool {
         return false
     }
 
-    static func extractTimes(_ text: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: "([01]?\\d|2[0-3])\\s*[:：]\\s*([0-5]\\d)") else {
-            return []
-        }
-        let range = NSRange(text.startIndex..., in: text)
-        var found: [String] = []
-        for match in regex.matches(in: text, options: [], range: range) {
-            guard let hr = Range(match.range(at: 1), in: text),
-                  let mn = Range(match.range(at: 2), in: text),
-                  let hour = Int(text[hr]), let minute = Int(text[mn]) else { continue }
-            let value = String(format: "%02d:%02d", hour, minute)
-            if !found.contains(value) { found.append(value) }
-        }
-        return found
+    static func scheduleSlot(_ text: String) -> String? {
+        let pattern = #"^\s*([01]?\d|2[0-3])\s*[:：]\s*([0-5]\d)(?:\s*[:：]\s*(.*))?\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let hr = Range(match.range(at: 1), in: text), let mn = Range(match.range(at: 2), in: text),
+              let hour = Int(text[hr]), let minute = Int(text[mn]) else { return nil }
+        let time = String(format: "%02d:%02d", hour, minute)
+        guard let details = Range(match.range(at: 3), in: text) else { return time }
+        let teams = text[details]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"(?i)\s+VS\.?\s+"#, with: "\n", options: .regularExpression)
+            .components(separatedBy: "\n")
+        // Only recognizable team codes are copied. Never treat page prose or
+        // an attached score as an opponent.
+        let teamCode = #"^[A-Za-z][A-Za-z0-9._-]{0,19}$"#
+        guard teams.count == 2, teams.allSatisfy({
+            $0.range(of: teamCode, options: .regularExpression) != nil
+        }) else { return time }
+        return "\(time) \(teams[0]) vs \(teams[1])"
     }
 }
 
@@ -389,7 +412,8 @@ extension IdvScheduleTool {
             }
             guard await budget.take(scope, day: IdvScheduleTool.day(now)) else {
                 return PublicGameQuestionData("[第五人格赛事·额度用尽] 本会话今日赛程查询次数已达上限，"
-                    + "请如实说明稍后再问，不得凭记忆给出对阵或时间。")
+                    + "请如实说明稍后再问，不得凭记忆给出对阵或时间。",
+                    localReply: "今天在这里查赛程的次数用完了，你可以先看 BWIKI 的近期赛程页。")
             }
 
             var pageText: String?

@@ -138,7 +138,7 @@ enum DsfPriceTool {
                 let ids = request.itemID.dropFirst("AMBIGUOUS:".count).split(separator: ",").map(String.init)
                 return PublicGameQuestionData(
                     Prompt.ambiguous(candidateIDs: ids),
-                    unavailableReply: "这个名字对应多件物品，给个物品 ID 才能查准。")
+                    localReply: "这个名字对应多件物品，给个物品 ID 才能查准。")
             }
 
             do {
@@ -152,14 +152,14 @@ enum DsfPriceTool {
                     DsfPriceTool.promptFragment(request: request, snapshot: snapshot,
                                                 now: now, maxAgeMinutes: config.maxAgeMinutes),
                     source: DsfPriceTool.sourceNote(fetchedAt: snapshot.fetchedAt, expired: false),
-                    unavailableReply: hasPrice ? nil : "这份快照里没有这件物品可核实的报价。")
+                    localReply: hasPrice ? nil : "这份快照里没有这件物品可核实的报价。")
             } catch let stale as StaleError {
                 return PublicGameQuestionData(
                     Prompt.stale(capturedAt: stale.capturedAt, ageMinutes: Int(stale.ageSeconds / 60),
                                  limitMinutes: config.maxAgeMinutes, capturedFrom: stale.capturedFrom,
                                  capturedTo: stale.capturedTo, captureStale: stale.captureStale),
                     source: DsfPriceTool.sourceNote(fetchedAt: stale.capturedAt, expired: true),
-                    unavailableReply: "这份三角洲行情已经过期，暂时查不到现价。")
+                    localReply: "这份三角洲行情已经过期，暂时查不到现价。")
             } catch {
                 return DsfPriceTool.unavailableGameData(reason: DsfPriceTool.reason(error))
             }
@@ -180,7 +180,7 @@ enum DsfPriceTool {
 
     static func unavailableGameData(reason: String) -> PublicGameQuestionData {
         PublicGameQuestionData(Prompt.unavailable(reason: reason),
-                               unavailableReply: "这次没查到三角洲行情（\(reason)）。")
+                               localReply: "这次没查到三角洲行情（\(reason)）。")
     }
 
     private static func sourceNote(fetchedAt: String, expired: Bool) -> String? {

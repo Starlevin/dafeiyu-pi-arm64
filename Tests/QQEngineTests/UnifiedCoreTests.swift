@@ -1677,7 +1677,7 @@ private func inbound(_ text: String = "合成消息",
         #expect(!dsfPrompt.contains("三角洲物价"))
     }
 
-    @Test func wechatPublicGameQuestionUsesVerifiedDataInOneModelRequest() async throws {
+    @Test func wechatPublicGameQuestionUsesVerifiedDataWithoutUnneededModelRequests() async throws {
         let modelConfig = URLSessionConfiguration.ephemeral
         modelConfig.protocolClasses = [PublicQuestionHTTPFixture.self]
         let dataConfig = URLSessionConfiguration.ephemeral
@@ -1691,7 +1691,7 @@ private func inbound(_ text: String = "合成消息",
         let provider = LLMProvider(kind: .custom,
                                    baseURL: URL(string: "http://127.0.0.1:18090/v1")!, maxRetries: 3)
         let generator = DeepSeekReplyGenerator(client: DeepSeekClient(provider: provider, session: modelSession))
-        let groups = ["schedule", "price", "chat", "clarify", "unavailable", "unrelated"]
+        let groups = ["schedule", "price", "chat", "clarify", "score", "notlisted", "unavailable", "unrelated"]
         var config = makeConfig(allowed: groups, requireAt: false, maxPerMinute: groups.count)
         config.allowedAccounts = ["fixture-account"]
         config.publicQuestionFastEnabled = true
@@ -1712,15 +1712,17 @@ private func inbound(_ text: String = "合成消息",
             "schemaVersion": 3, "kind": "itemLocalization", "items": ["13020000167": "老式钢盔"],
         ])
         GameDataHTTPFixture.reset(responses: [
-            IdvScheduleTool.sourceURL: Data("<span class=\"wiki-bot\">2026年11月26日 IVL：18:00</span>".utf8),
+            IdvScheduleTool.sourceURL: Data("<span class=\"wiki-bot\">2026年11月26日 IVL：16:00：MRC VS GR；18:00：FPX.ZQ VS TE</span>".utf8),
             DsfPriceTool.marketURL: market, DsfPriceTool.itemsURL: names,
         ])
 
         let cases = [
-            ("schedule", "2026年11月26日第五人格IVL几点开打？", "18:00", 2),
+            ("schedule", "2026年11月26日第五人格IVL几点开打？", "18:00 FPX.ZQ vs TE", 2),
             ("price", "三角洲老式钢盔多少钱？", "23456", 4),
             ("chat", "三角洲老式钢盔的价格最近变动很大", "[QQ_PARTICIPATION]", 4),
-            ("clarify", "第五人格IVL赛程？", "需追问", 4),
+            ("clarify", "第五人格IVL赛程？", "想查哪天", 4),
+            ("score", "第五人格IVL昨天比分多少？", "没有可核实的实时比分", 4),
+            ("notlisted", "2026年11月29日第五人格IVL几点开打？", "不能据此确定", 4),
             ("unavailable", "三角洲合成未收录物品多少钱？", "没有可核实的物品报价", 4),
             ("unrelated", "各位，今晚的世界杯比赛什么时候开打？", "当前公开问题", 4),
         ]
@@ -1742,6 +1744,7 @@ private func inbound(_ text: String = "合成消息",
             if group == "schedule" {
                 #expect(text.contains("BWIKI 第五人格社区赛程"))
                 #expect(text.contains("抓取时间："))
+                #expect(text.contains("16:00 MRC vs GR"))
             } else if group == "price" {
                 #expect(text.contains("dfttk.com 三角洲第三方快照"))
                 #expect(text.contains("上游抓取时间："))
@@ -1751,9 +1754,10 @@ private func inbound(_ text: String = "合成消息",
             #expect(text.components(separatedBy: "\n来源：\n").count == (group == "schedule" || group == "price" ? 2 : 1))
             #expect(GameDataHTTPFixture.requests.count == dataCount)
             let calls = PublicQuestionHTTPFixture.bodies
-            if group == "unavailable" {
+            if ["schedule", "clarify", "score", "notlisted", "unavailable"].contains(group) {
                 #expect(text.contains(expected))
                 #expect(!result.modelCalled)
+                #expect(result.reply.memoryReceipt == nil)
                 #expect(calls.isEmpty)
                 continue
             }

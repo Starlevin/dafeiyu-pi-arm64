@@ -94,7 +94,8 @@ struct IdvScheduleToolTests {
             meta: .unknown, fetchedAt: tonight)
         #expect(fragment.contains("BWIKI"))
         #expect(fragment.contains("抓取时间"))
-        #expect(fragment.contains("14:00"))
+        #expect(fragment.contains("14:00 MRC vs GR"))
+        #expect(fragment.contains("16:00 Wolves vs FPX.ZQ"))
         #expect(fragment.contains("非赛果"))
         // 赛程段里不得出现「比分」字样（赛程 ≠ 赛果）
         #expect(!fragment.contains("比分："))
@@ -108,6 +109,19 @@ struct IdvScheduleToolTests {
         #expect(IdvScheduleTool.lineFor(day: "2026-11-14", league: "ivl", in: page) == nil)
         // 问 2025 才命中
         #expect(IdvScheduleTool.lineFor(day: "2025-11-14", league: "ivl", in: page) != nil)
+    }
+
+    @Test func scheduleKeepsNamedOpponentsAndDoesNotMixLeaguesOrScores() throws {
+        let page = """
+        11月14日 2026 IJL 秋季赛-近期赛程：14:00：ZETA VS FL；16:00：AXIZ vs QTD；18:00
+        11月14日 2026 IJL 秋季赛-近期赛程：14:00：ZETA VS FL
+        11月14日 2026 IJL 秋季赛-近期赛程：20:00：RC VS SZ（比分 2:0）
+        11月14日 2026 IVL 秋季赛-近期赛程：19:00：TE VS GR
+        """
+        let line = try #require(IdvScheduleTool.lineFor(day: "2026-11-14", league: "ijl", in: page))
+        #expect(line == "2026-11-14 IJL（日本时间/JST(UTC+9)）：14:00 ZETA vs FL；16:00 AXIZ vs QTD；18:00；20:00")
+        #expect(!line.contains("比分"))
+        #expect(!line.contains("TE"))
     }
 
     // MARK: 缺日期 / 缺分类 → 追问，不臆造
@@ -143,10 +157,10 @@ struct IdvScheduleToolTests {
         #expect(await memory.get("wx:room:X", now: tonight) == nil)
     }
 
-    // MARK: 第 5 条：默认字节预算高于实测页面（约 436 KiB）
+    // MARK: 第 5 条：默认字节预算高于近期赛程页
 
     @Test func defaultBudgetExceedsMeasuredPage() {
-        #expect(IdvScheduleConfig.measuredPageBytes == 436_632)
+        #expect(IdvScheduleConfig.measuredPageBytes == 258_523)
         #expect(IdvScheduleConfig().maxBytes > IdvScheduleConfig.measuredPageBytes)
         #expect(IdvScheduleConfig().canHoldMeasuredPage)
     }
