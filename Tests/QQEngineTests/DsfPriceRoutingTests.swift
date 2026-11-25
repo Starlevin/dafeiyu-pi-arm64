@@ -137,6 +137,19 @@ private final class MockDsfProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
+    @Test func priceOutsideIntegerRangeIsRejectedWithoutTrapping() async {
+        let market = marketData(prices: ["13020000167": UInt64(Int.max) + 1])
+        let items = itemsData()
+        MockDsfProtocol.reset { request in
+            (200, request.url == DsfPriceTool.marketURL ? market : items)
+        }
+        let session = mockSession()
+        defer { session.invalidateAndCancel() }
+        await #expect(throws: URLError.self) {
+            try await DsfPriceTool.loadSnapshot(session: session, now: fixtureNow())
+        }
+    }
+
     @Test func disabledOrPrivateChatNeverTouchesNetwork() async {
         MockDsfProtocol.reset(standardHandler())
         let session = mockSession()

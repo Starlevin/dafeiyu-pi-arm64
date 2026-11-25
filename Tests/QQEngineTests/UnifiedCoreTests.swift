@@ -1746,6 +1746,8 @@ private func inbound(_ text: String = "合成消息",
                 #expect(text.contains("抓取时间："))
                 #expect(text.contains("16:00 MRC vs GR"))
             } else if group == "price" {
+                #expect(text.contains("23456 游戏币"))
+                #expect(text.contains("单件更新时间未知"))
                 #expect(text.contains("dfttk.com 三角洲第三方快照"))
                 #expect(text.contains("上游抓取时间："))
             } else {
@@ -1754,7 +1756,7 @@ private func inbound(_ text: String = "合成消息",
             #expect(text.components(separatedBy: "\n来源：\n").count == (group == "schedule" || group == "price" ? 2 : 1))
             #expect(GameDataHTTPFixture.requests.count == dataCount)
             let calls = PublicQuestionHTTPFixture.bodies
-            if ["schedule", "clarify", "score", "notlisted", "unavailable"].contains(group) {
+            if ["schedule", "price", "clarify", "score", "notlisted", "unavailable"].contains(group) {
                 #expect(text.contains(expected))
                 #expect(!result.modelCalled)
                 #expect(result.reply.memoryReceipt == nil)

@@ -10,7 +10,7 @@ import BotCore
 /// * 默认关闭，`DsfPriceConfig.fromEnvironment` 未开启时整段不执行；
 /// * 只 GET 写死的 `https://dfttk.com/data/v3/...` 只读地址；不跟随重定向、不读 Cookie；
 /// * 只给**一件**物品报价，名称精确匹配，歧义/缺失/过期/超时一律诚实失败、不猜；
-/// * 不参与任何门禁、不改变回复概率、不新增发送路径——只往既有 prompt 里追加一段低信任说明。
+/// * 不改变发言权限或回复概率。公开问题可直接用已校验的快照作答，其他入口保留事实提示。
 enum DsfPriceTool {
     static let host = "dfttk.com"
     static let marketURL = URL(string: "https://dfttk.com/data/v3/economy/market-prices.json")!
@@ -146,13 +146,18 @@ enum DsfPriceTool {
                 names = snapshot.itemNames
                 try DsfPriceTool.verifyFreshness(snapshot, maxAgeMinutes: config.maxAgeMinutes, now: now)
                 let status = snapshot.availability[request.itemID]?.status
-                let hasPrice = snapshot.prices[request.itemID] != nil
-                    && (status == nil || status == "available")
+                let reply: String
+                if let price = snapshot.prices[request.itemID], status == nil || status == "available" {
+                    let unit = snapshot.currency == "gameCurrency" ? " 游戏币" : "（币种未核实）"
+                    reply = "这件物品的快照报价是 \(price)\(unit)。单件更新时间未知。"
+                } else {
+                    reply = "这份快照里没有这件物品可核实的报价。"
+                }
                 return PublicGameQuestionData(
                     DsfPriceTool.promptFragment(request: request, snapshot: snapshot,
                                                 now: now, maxAgeMinutes: config.maxAgeMinutes),
                     source: DsfPriceTool.sourceNote(fetchedAt: snapshot.fetchedAt, expired: false),
-                    localReply: hasPrice ? nil : "这份快照里没有这件物品可核实的报价。")
+                    localReply: reply)
             } catch let stale as StaleError {
                 return PublicGameQuestionData(
                     Prompt.stale(capturedAt: stale.capturedAt, ageMinutes: Int(stale.ageSeconds / 60),
@@ -252,9 +257,9 @@ enum DsfPriceTool {
     private static func parseNonNegativeInt(_ value: Any) -> Int? {
         if value is Bool { return nil }
         guard let number = value as? NSNumber else { return nil }
-        let dbl = number.doubleValue
-        guard dbl.isFinite, floor(dbl) == dbl, dbl >= 0, dbl <= Double(Int.max) else { return nil }
-        return Int(dbl)
+        guard let price = Int(number.stringValue) ?? Int(exactly: number.doubleValue),
+              price >= 0 else { return nil }
+        return price
     }
 
     /// 拉取并解析行情与本地化表（不做新鲜度判定，供规划层与新鲜度校验分离调用）。
