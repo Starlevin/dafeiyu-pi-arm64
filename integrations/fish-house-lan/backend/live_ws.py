@@ -323,6 +323,14 @@ def _age(event: Any, now: float) -> float | None:
     return age if age >= 0 else None
 
 
+def receipt_evidence(source: str, at: Any, *, now: float) -> EvidenceSnapshot | None:
+    """Return a send receipt only until its original observation window ends."""
+    if type(at) not in (int, float) or not 0 < at <= now < at + SENT_WINDOW_SEC:
+        return None
+    return EvidenceSnapshot(source, "sent", EVIDENCE_VERIFIED,
+                            reason="chat_receipt", at=at, expires_at=at + SENT_WINDOW_SEC)
+
+
 def wechat_evidence(live: dict[str, Any], *, now: float) -> EvidenceSnapshot:
     """WeChat is authorized: reuse the bridge-health adapter as-is.
 
@@ -334,6 +342,9 @@ def wechat_evidence(live: dict[str, Any], *, now: float) -> EvidenceSnapshot:
     activity_state = str(wx.get("activity_state") or "idle")
     diag = wx.get("diagnostics") if isinstance(wx.get("diagnostics"), dict) else {}
     phase = phase_for_source_snapshot(activity_state)
+    if phase == "sent":
+        return receipt_evidence("wechat", wx.get("activity_at"), now=now) or EvidenceSnapshot(
+            "wechat", "idle", EVIDENCE_VERIFIED, reason="receipt_not_recent", at=now)
     if phase != "idle":
         # Only stages already normalized by the adapter are trusted.
         at = wx.get("activity_at")
@@ -469,12 +480,13 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
                 return EvidenceSnapshot("qq", phase, EVIDENCE_VERIFIED,
                                         reason="active_chat", at=float(latest["timestamp"]),
                                         expires_at=float(latest["timestamp"]) + window)
-        if age is not None and age <= SENT_WINDOW_SEC:
+        if age is not None and age < SENT_WINDOW_SEC:
             if state == "confirmed":
                 # confirmed splits in two: only a chat receipt counts as sent.
                 if qq_confirmed_chat(latest):
-                    return EvidenceSnapshot("qq", "sent", EVIDENCE_VERIFIED,
-                                            reason="chat_receipt", at=float(latest["timestamp"]))
+                    receipt = receipt_evidence("qq", latest["timestamp"], now=now)
+                    if receipt is not None:
+                        return receipt
                 return EvidenceSnapshot("qq", "idle", EVIDENCE_DEGRADED,
                                         reason="non_chat_confirm", at=now)
         if degraded:
@@ -484,7 +496,13 @@ def qq_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
     diag = qq.get("bridge_diagnostics")
     if isinstance(diag, dict):
         normalized = normalize_bridge_health(diag, now=now)
-        if normalized in PHASES and normalized != "idle":
+        if normalized == "sent":
+            marker = diag.get("last_success")
+            receipt = receipt_evidence(
+                "qq", marker.get("time") if isinstance(marker, dict) else None, now=now)
+            if receipt is not None:
+                return receipt
+        elif normalized in PHASES and normalized != "idle":
             return EvidenceSnapshot("qq", normalized, EVIDENCE_VERIFIED,
                                     reason="bridge_health", at=now)
 
@@ -502,16 +520,14 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
     retained_delivery = False
     wechat = live.get("wechat") if isinstance(live, dict) else None
     if last_sent_at is not None and isinstance(wechat, dict):
-        delivery_at = wechat.get("delivery_at")
-        if (type(delivery_at) in (int, float)
-                and 0 <= now - delivery_at <= SENT_WINDOW_SEC
-                and delivery_at > last_sent_at.get("wechat", 0.0)):
-            # A later diagnostic or generation can replace last_event before
-            # the next tick. This timestamp is a separate proven send.
-            retained_delivery = wx.phase != "sent" or wx.at != delivery_at
-            if retained_delivery:
-                wx = EvidenceSnapshot("wechat", "sent", EVIDENCE_VERIFIED,
-                                      reason="chat_receipt", at=delivery_at)
+        delivery = receipt_evidence("wechat", wechat.get("delivery_at"), now=now)
+        if delivery is not None and (wx.phase != "sent" or wx.at != delivery.at):
+            # A later diagnostic can replace last_event before the next tick.
+            # A reconnect may see the same receipt, but it cannot supersede newer activity.
+            retained_delivery = delivery.at > last_sent_at.get("wechat", 0.0)
+            current_receipt = current_event == ("wechat", "sent", delivery.at)
+            if retained_delivery or (current_receipt and (wx.phase == "idle" or wx.at <= delivery.at)):
+                wx = delivery
     active = [candidate for candidate in (wx, qq)
               if candidate.evidence == EVIDENCE_VERIFIED and candidate.phase != "idle"]
     if last_sent_at is not None:

@@ -207,6 +207,39 @@ class BubbleTests(unittest.TestCase):
 
 # ---------------------------------------------------------------- evidence
 class EvidenceTests(unittest.TestCase):
+    def test_chat_receipt_deadline_is_the_same_on_push_and_reconnect(self):
+        delivered = NOW - 7.25
+        deadline = delivered + live_ws.SENT_WINDOW_SEC
+        router = FlowRouter(ThemeFlow(THEME))
+        cases = (
+            ("qq", {}, {"runtimeRecords": [{
+                "state": "confirmed", "timestamp": delivered, "_chat": True,
+            }]}),
+            ("wechat", {"activity_state": "sent", "activity_at": delivered}, None),
+            ("wechat", {"activity_state": "idle", "delivery_at": delivered}, None),
+        )
+        for source, wechat, panel in cases:
+            with self.subTest(source=source, retained="delivery_at" in wechat):
+                bridge = live_ws.LiveBridge(
+                    lambda: router, lambda: {"wechat": wechat}, lambda: panel,
+                )
+                with patch.object(live_ws.time, "time", return_value=NOW):
+                    frames = bridge.produce()
+                    self.assertEqual([f["type"] for f in frames], ["flow_goto", "state"])
+                    for frame in frames:
+                        self.assertEqual((frame["source"], frame["phase"]), (source, "sent"))
+                        self.assertEqual(frame["event_at"], delivered)
+                        self.assertEqual(frame.get("expires_at"), deadline)
+                        self.assertEqual(frame["ttl_ms"], 750)
+                with patch.object(live_ws.time, "time", return_value=NOW + 0.5):
+                    snapshot = bridge.state_snapshot()
+                    self.assertEqual(snapshot["event_at"], delivered)
+                    self.assertEqual(snapshot["expires_at"], deadline)
+                    self.assertEqual(snapshot["ttl_ms"], 250)
+                with patch.object(live_ws.time, "time", return_value=deadline):
+                    self.assertEqual(bridge.state_snapshot()["phase"], "idle")
+                    self.assertEqual(bridge.produce()[-1]["phase"], "idle")
+
     def test_qq_client_ttl_tracks_remaining_verified_generation(self):
         panel = {"runtimeRecords": [{
             "state": "generating", "timestamp": NOW, "detail": "QQ聊天模型请求中",
@@ -679,6 +712,7 @@ class LoopbackWebSocketTests(unittest.TestCase):
                 event = next_data()
             self.assertGreater(event["seq"], state["seq"])
             self.assertIn(event["type"], ("flow_goto", "state"))
+            self.assertEqual(event["expires_at"], event["event_at"] + live_ws.SENT_WINDOW_SEC)
         deadline = time.monotonic() + 3
         while self.server.bridge.client_count and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -783,6 +817,8 @@ class LoopbackWebSocketTests(unittest.TestCase):
             sent_state, seen = self.wait_for(
                 reader, lambda m: m.get("type") == "state" and m.get("phase") == "sent")
             self.assertEqual(sent_state["source"], "wechat")
+            self.assertEqual(sent_state["expires_at"],
+                             sent_state["event_at"] + live_ws.SENT_WINDOW_SEC)
             # state 的 node_id = 这一段落到哪儿（放下后回到等待），
             # 而换片的起点由 flow_goto 给出，两者语义不同。
             self.assertEqual(sent_state["node_id"], "w1")
@@ -1683,10 +1719,12 @@ class ReviewRegressionTests(unittest.TestCase):
     def _bridge(self, phase_box, theme=None):
         from backend.flow_bridge import FlowRouter, ThemeFlow
         router = FlowRouter(ThemeFlow(theme or THEME))
+        observed_at = time.time()
 
         def getter():
             return {"ok": True, "qq": {"service_running": True},
                     "wechat": {"activity_state": phase_box["phase"],
+                               "activity_at": observed_at,
                                "diagnostics": {"fresh": True, "reason": "x"}}}
 
         return live_ws.LiveBridge(router_factory=lambda: router,
