@@ -84,6 +84,9 @@ async function main() {
     cdp = new CDPClient(targets.find(t => t.type === "page").webSocketDebuggerUrl); await cdp.connect();
     await cdp.send("Page.enable"); await cdp.send("Runtime.enable"); await cdp.send("Log.enable");
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: `
+      const wallClock = Date.now;
+      window.fhClockOffset = 120000;
+      Date.now = () => wallClock() + window.fhClockOffset;
       window.fhHoldFrame = !location.search;
       window.fhHeldFrames = [];
       const nativeFrame = HTMLVideoElement.prototype.requestVideoFrameCallback;
@@ -132,6 +135,24 @@ async function main() {
       await fetch(`http://127.0.0.1:${PORT}/inject`, { method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(msg) });
     };
     let seq = 2;
+    const sendClockProbe = async (name, deadline) => {
+      const number = seq++;
+      await fetch(`http://127.0.0.1:${PORT}/inject`, {method:"POST", headers:{"content-type":"application/json"},
+        body:JSON.stringify({type:"bubble",seq:number,ts:Math.floor(Date.now()/1000),source:"wechat",
+          phase:"sent",node_id:"",bubble_text:name,ttl_ms:800,expires_at:deadline})});
+      await until(() => cdp.js(`window.__fishHouseLive.getState().lastSeq === ${number}`), name + " frame arrived");
+    };
+    await sendClockProbe("clock-fresh", Date.now()/1000+3);
+    check("fresh receipt remains visible when device clock is two minutes fast",
+      await cdp.js("document.getElementById('bubble').textContent === 'clock-fresh' && !document.getElementById('bubble').classList.contains('hidden')"),
+      "event deadline comes from the same-origin server clock");
+    await until(() => cdp.js("document.getElementById('bubble').classList.contains('hidden')"), "fresh receipt expires");
+    await cdp.js("window.fhClockOffset=-120000");
+    await sendClockProbe("clock-expired", Date.now()/1000-3);
+    check("expired receipt stays hidden when device clock moves two minutes back",
+      await cdp.js("document.getElementById('bubble').classList.contains('hidden')"),
+      "a client clock change cannot revive a stale event");
+    await cdp.js("window.fhClockOffset=0");
     await cdp.js("window.__fhLiveNodes=[];window.__fhLivePrevious='';window.__fhLiveTraceTimer=setInterval(function(){var n=window.__fishHouseLive.getState().currentNode;if(n&&n!==window.__fhLivePrevious){window.__fhLiveNodes.push(n);window.__fhLivePrevious=n;}},40)");
     const preloadResourceCount = await cdp.js(`performance.getEntriesByType('resource').filter(e=>e.name===${JSON.stringify(defaultPickupUrl)}).length`);
     await cdp.js(`(function () {

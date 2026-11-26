@@ -7,6 +7,7 @@
   var lastOrderEvent = "";
   var expiry = 0, bubbleExpiry = 0, transitionTimer = 0, phoneExitTimer = 0, startedAt = 0, presentedAt = 0;
   var streamExpiry = 0;
+  var serverClock = null;
   var idleDelay = 0, showBubble = true, bubbleOverride = null, themeBase = "", idleNode = "", phoneNode = "";
   var pickupPreload = null, themeEpoch = 0, pendingTheme = null;
   var fadeMs = 450, maxPhoneLoopSeconds = 9, phoneEndWindowMs = 1000, mediaEndGraceMs = 200;
@@ -336,7 +337,7 @@
     if (!Array.isArray(orders) || !orders.length) return false;
     orders = orders.map(function (order) { return typeof order === "string" ? order : order && order.node_id; });
     if (orders.some(function (id) { return typeof id !== "string" || !validNode(id); })) return false;
-    var signature = orders.join(","), now = Date.now();
+    var signature = orders.join(","), now = performance.now();
     if (eventKey ? eventKey === lastOrderEvent : signature === lastOrders && now - lastOrdersAt < 1500) return true;
     var hadQueue = queue.length > 0;
     var anchor = hadQueue ? queue[queue.length - 1] : (pendingNode || currentNode || idleNode);
@@ -359,6 +360,24 @@
     } else driveQueue();
     return true;
   }
+  function observeServerClock(header, requestAt) {
+    var serverDate = Date.parse(header), observedAt = performance.now();
+    var roundTrip = observedAt - requestAt;
+    if (!Number.isFinite(serverDate) || roundTrip > 5000) return;
+    // HTTP Date has whole-second precision. Keep the local reading if it
+    // falls within the server's possible time range; otherwise use its middle.
+    var latest = serverDate + 1000 + roundTrip;
+    var local = Date.now();
+    serverClock = {
+      observedAt: observedAt,
+      unixMs: local >= serverDate && local <= latest ? local : (serverDate + latest) / 2
+    };
+  }
+  function serverTimeAt(receivedAt, frameTime) {
+    if (!serverClock) return Date.now();
+    var estimate = serverClock.unixMs + receivedAt - serverClock.observedAt;
+    return Math.max(estimate, Number(frameTime) * 1000);
+  }
   function apply(message, isSnapshot) {
     if (!message || typeof message !== "object") return;
     if (message.type !== "state" && message.type !== "flow_goto" && message.type !== "bubble" && message.type !== "config") return;
@@ -372,9 +391,9 @@
       if (Number.isFinite(Number(config.idle_timeout_ms))) idleDelay = Math.max(0, Number(config.idle_timeout_ms));
       return;
     }
-    var receivedAt = Date.now();
+    var receivedAt = performance.now();
     if (Number.isFinite(message.expires_at) && message.expires_at > 0) {
-      var remaining = Math.min(Number(message.ttl_ms), message.expires_at * 1000 - receivedAt);
+      var remaining = Math.min(Number(message.ttl_ms), message.expires_at * 1000 - serverTimeAt(receivedAt, message.ts));
       if (remaining <= 0) return;
       message = Object.assign({}, message, { ttl_ms: remaining });
     }
@@ -412,7 +431,7 @@
     var targetPath = phaseWaypoints(phase, requested, message.type === "flow_goto");
     if (!targetPath.length || targetPath.some(function (id) { return !validNode(id); })) return;
     var signature = phase + ":" + targetPath.join(",");
-    var now = Date.now();
+    var now = performance.now();
     if (signature === lastTransition && now - lastTransitionAt < 900) return;
     lastTransition = signature; lastTransitionAt = now;
     clearTimeout(expiry);
@@ -501,7 +520,7 @@
       lastOrders = ""; lastOrdersAt = 0; lastOrderEvent = "";
       lastTransition = ""; lastTransitionAt = 0;
       var frame = request.frame, ttl = frame ? Number(frame.ttl_ms) : 0;
-      var remaining = ttl - (Date.now() - request.frameAt);
+      var remaining = ttl - (performance.now() - request.frameAt);
       var resume = frame && (ttl === 0 || remaining > 0);
       var epoch = themeEpoch;
       if (idleNode) playNode(idleNode, keepFrame).then(function (ok) {
@@ -533,8 +552,10 @@
   if (bubbleOverride === "1") showBubble = true;
   window.__fishHouseLive = { apply: apply, playNode: playNode, getState: function () { return { currentNode: currentNode, pendingNode: pendingNode, lastSeq: lastSeq, queued: queue.slice(), themeId: theme && theme.meta && theme.meta.id, idleNode: idleNode, phoneNode: phoneNode }; } };
   var defaultThemeUrl = "/fish_house/themes/default/theme.json";
+  var selectorRequestedAt = performance.now();
   fetch("/fish_house/live.theme.json", { cache: "no-store" }).then(function (r) {
     if (!r.ok) throw new Error("live theme selector HTTP " + r.status);
+    observeServerClock(r.headers.get("Date"), selectorRequestedAt);
     return r.json();
   }).then(function (selector) {
     var chosen = selector && safeThemeUrl(selector.theme_url);
