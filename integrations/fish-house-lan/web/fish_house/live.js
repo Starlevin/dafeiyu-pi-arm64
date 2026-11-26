@@ -12,6 +12,7 @@
   var pickupPreload = null, themeEpoch = 0, pendingTheme = null;
   var fadeMs = 450, maxPhoneLoopSeconds = 9, phoneEndWindowMs = 1000, mediaEndGraceMs = 200;
   var phoneMinVisibleMs = 650, phoneCrossfadeMs = 650;
+  var themeRequestMs = 2500;
   var embedded = new URLSearchParams(location.search).get("mode") === "home";
   var allowedSources = { qq: true, wechat: true };
   var allowedPhases = { idle: true, received: true, thinking: true, tool: true, replying: true, sent: true, error: true };
@@ -378,6 +379,33 @@
     var estimate = serverClock.unixMs + receivedAt - serverClock.observedAt;
     return Math.max(estimate, Number(frameTime) * 1000);
   }
+  function fetchThemeJson(url) {
+    var requestedAt = performance.now();
+    var controller = typeof window.AbortController === "function" ? new window.AbortController() : null;
+    var options = { cache: "no-store" };
+    if (controller) options.signal = controller.signal;
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        timer = 0;
+        var timeout = new Error("Theme request timed out");
+        timeout.name = "TimeoutError";
+        reject(timeout);
+        if (controller) controller.abort();
+      }, themeRequestMs);
+      fetch(url, options).then(function (response) {
+        if (!timer) return null;
+        if (!response.ok) throw new Error("Theme HTTP " + response.status);
+        observeServerClock(response.headers.get("Date"), requestedAt);
+        return response.json();
+      }).then(function (data) {
+        clearTimeout(timer);
+        resolve(data);
+      }, function (error) {
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+  }
   function apply(message, isSnapshot) {
     if (!message || typeof message !== "object") return;
     if (message.type !== "state" && message.type !== "flow_goto" && message.type !== "bubble" && message.type !== "config") return;
@@ -489,7 +517,7 @@
     if (theme && themeBase && new URL("theme.json", themeBase).href === absolute.href) return Promise.resolve(true);
     var request = { url: absolute.href, frame: null, frameAt: 0, promise: null };
     pendingTheme = request;
-    request.promise = fetch(absolute.href, { cache: "no-store" }).then(function (r) { if (!r.ok) throw new Error("theme HTTP " + r.status); return r.json(); }).then(function (data) {
+    request.promise = fetchThemeJson(absolute.href).then(function (data) {
       if (pendingTheme !== request) return false;
       if (!data || !data.config || !data.config.videos || !data.config.flow || !Array.isArray(data.config.flow.nodes) || !Array.isArray(data.config.flow.edges)) throw new Error("unsupported theme");
       pendingTheme = null;
@@ -505,7 +533,7 @@
         && previous.videoWidth > 0 && Boolean(srcFor(node(idleNode)));
       var coverFile = assetUrl(data.meta && data.meta.cover, "cover");
       if (cover && coverFile) {
-        cover.src = coverFile;
+        if (cover.src !== coverFile) cover.src = coverFile;
         if (!keepFrame) cover.classList.remove("cover-hidden");
       }
       videos.forEach(function (video) {
@@ -541,7 +569,7 @@
     }).catch(function (error) {
       if (pendingTheme === request) {
         pendingTheme = null;
-        console.error("Fish House theme load failed", error);
+        if (error.name !== "TimeoutError") console.error("Fish House theme load failed", error);
       }
       return false;
     });
@@ -552,13 +580,9 @@
   if (bubbleOverride === "1") showBubble = true;
   window.__fishHouseLive = { apply: apply, playNode: playNode, getState: function () { return { currentNode: currentNode, pendingNode: pendingNode, lastSeq: lastSeq, queued: queue.slice(), themeId: theme && theme.meta && theme.meta.id, idleNode: idleNode, phoneNode: phoneNode }; } };
   var defaultThemeUrl = "/fish_house/themes/default/theme.json";
-  var selectorRequestedAt = performance.now();
-  fetch("/fish_house/live.theme.json", { cache: "no-store" }).then(function (r) {
-    if (!r.ok) throw new Error("live theme selector HTTP " + r.status);
-    observeServerClock(r.headers.get("Date"), selectorRequestedAt);
-    return r.json();
-  }).then(function (selector) {
+  fetchThemeJson("/fish_house/live.theme.json").then(function (selector) {
     var chosen = selector && safeThemeUrl(selector.theme_url);
-    return loadTheme(chosen ? chosen.href : defaultThemeUrl).then(function (ok) { return ok || loadTheme(defaultThemeUrl); });
+    if (!chosen || chosen.pathname === defaultThemeUrl) return loadTheme(defaultThemeUrl);
+    return loadTheme(chosen.href).then(function (ok) { return ok || loadTheme(defaultThemeUrl); });
   }).catch(function () { return loadTheme(defaultThemeUrl); }).then(connect);
 })();

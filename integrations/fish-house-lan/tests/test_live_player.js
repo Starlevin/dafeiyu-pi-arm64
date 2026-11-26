@@ -9,6 +9,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const py = String.raw`import asyncio,json,os
 from aiohttp import web
 root=os.environ['LIVE_WEB_ROOT']; clients=set(); quiet_reconnect=[False]
+startup_case=['normal']
 with open(os.path.join(root,'fish_house/themes/default/theme.json'),encoding='utf-8') as f: clone=json.load(f)
 clone['meta']['id']='live-test-clone'
 retry_theme=json.loads(json.dumps(clone)); retry_theme['meta']['id']='live-test-retry'
@@ -54,13 +55,34 @@ async def retry_asset(req):
 async def retry_count(req): return web.json_response({'count':retry_asset_count[0]})
 async def theme_poison(req): return web.json_response(poison)
 async def theme_rekeyed(req): return web.json_response(rekeyed)
-async def theme_selection(req): return web.json_response({'theme_url':'/fish_house/themes/default/theme.json'})
+async def set_startup_case(req):
+ case=(await req.json())['case']
+ if case not in ('normal','selector-hangs','theme-body-hangs'): raise web.HTTPBadRequest()
+ startup_case[0]=case
+ return web.json_response({'case':case})
+async def theme_selection(req):
+ case=startup_case[0]
+ if case=='selector-hangs':
+  await asyncio.sleep(6.5)
+  return web.json_response({'theme_url':'/fish_house/themes/cloned/theme.json'})
+ theme='slow' if case=='theme-body-hangs' else 'default'
+ return web.json_response({'theme_url':f'/fish_house/themes/{theme}/theme.json'})
+async def theme_body_hang(req):
+ response=web.StreamResponse(headers={'Content-Type':'application/json'})
+ await response.prepare(req)
+ await asyncio.sleep(6.5)
+ if req.transport and not req.transport.is_closing():
+  await response.write(json.dumps(clone).encode())
+ return response
 async def clone_asset(req):
  name=req.match_info['name']; file=os.path.realpath(os.path.join(root,'fish_house/themes/default',name))
  base=os.path.realpath(os.path.join(root,'fish_house/themes/default'))
  if not file.startswith(base+os.sep) or not os.path.isfile(file): raise web.HTTPNotFound()
  return web.FileResponse(file)
-app=web.Application(); app.router.add_get('/live',live); app.router.add_get('/ws',ws_route); app.router.add_get('/ws-stats',ws_stats); app.router.add_get('/retry-count',retry_count); app.router.add_get('/favicon.ico',favicon); app.router.add_post('/inject',inject); app.router.add_post('/disconnect',disconnect); app.router.add_get('/fish_house/live.theme.json',theme_selection); app.router.add_get('/fish_house/themes/cloned/theme.json',theme_clone); app.router.add_get('/fish_house/themes/retry/theme.json',theme_retry); app.router.add_get('/fish_house/themes/retry/videos/preload-once.mp4',retry_asset); app.router.add_get('/fish_house/themes/poison/theme.json',theme_poison); app.router.add_get('/fish_house/themes/rekeyed/theme.json',theme_rekeyed); app.router.add_get('/fish_house/themes/cloned/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/retry/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/poison/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/rekeyed/{name:.*}',clone_asset); app.router.add_static('/',root,show_index=False)
+app=web.Application()
+app.router.add_post('/test-startup-case',set_startup_case)
+app.router.add_get('/fish_house/themes/slow/theme.json',theme_body_hang)
+app.router.add_get('/live',live); app.router.add_get('/ws',ws_route); app.router.add_get('/ws-stats',ws_stats); app.router.add_get('/retry-count',retry_count); app.router.add_get('/favicon.ico',favicon); app.router.add_post('/inject',inject); app.router.add_post('/disconnect',disconnect); app.router.add_get('/fish_house/live.theme.json',theme_selection); app.router.add_get('/fish_house/themes/cloned/theme.json',theme_clone); app.router.add_get('/fish_house/themes/retry/theme.json',theme_retry); app.router.add_get('/fish_house/themes/retry/videos/preload-once.mp4',retry_asset); app.router.add_get('/fish_house/themes/poison/theme.json',theme_poison); app.router.add_get('/fish_house/themes/rekeyed/theme.json',theme_rekeyed); app.router.add_get('/fish_house/themes/cloned/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/retry/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/poison/{name:.*}',clone_asset); app.router.add_get('/fish_house/themes/rekeyed/{name:.*}',clone_asset); app.router.add_static('/',root,show_index=False)
 web.run_app(app,host='127.0.0.1',port=int(os.environ['LIVE_PORT']),access_log=None)`;
 class CDPClient {
   constructor(url) { this.ws = new WebSocket(url); this.pending = new Map(); this.id = 0; this.errors = []; }
@@ -79,6 +101,9 @@ async function main() {
   const check = (name, ok, details) => { report.assertions.push({ name, pass: !!ok, details }); if (!ok) throw Error(name + ": " + details); };
   let cdp;
   try {
+    await until(async () => {
+      try { return (await fetch(`http://127.0.0.1:${PORT}/ws-stats`)).ok; } catch (_) { return false; }
+    }, "loopback fixture server");
     await until(async () => { try { return (await fetch(`http://127.0.0.1:${CDP}/json/version`)).ok; } catch (_) { return false; } }, "Chrome CDP");
     const targets = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json();
     cdp = new CDPClient(targets.find(t => t.type === "page").webSocketDebuggerUrl); await cdp.connect();
@@ -87,6 +112,9 @@ async function main() {
       const wallClock = Date.now;
       window.fhClockOffset = 120000;
       Date.now = () => wallClock() + window.fhClockOffset;
+      if (new URLSearchParams(location.search).get("startup") === "selector-hangs") {
+        Object.defineProperty(window, "AbortController", { value: undefined, configurable: true });
+      }
       window.fhHoldFrame = !location.search;
       window.fhHeldFrames = [];
       const nativeFrame = HTMLVideoElement.prototype.requestVideoFrameCallback;
@@ -98,6 +126,38 @@ async function main() {
       };
       window.fhControlledFrameCallback = HTMLVideoElement.prototype.requestVideoFrameCallback;
     ` });
+    const setStartupCase = async (name) => {
+      const response = await fetch(`http://127.0.0.1:${PORT}/test-startup-case`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ case: name }),
+      });
+      if (!response.ok) throw Error("startup fixture failed: " + response.status);
+    };
+    for (const kind of ["selector-hangs", "theme-body-hangs"]) {
+      await setStartupCase(kind);
+      const opening = Date.now();
+      await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/live?startup=${kind}` });
+      const coverReady = await until(() => cdp.js(`(function () {
+        if (location.search !== ${JSON.stringify("?startup=" + kind)}) return false;
+        var cover = document.getElementById('cover');
+        return cover && cover.naturalWidth > 0 && !cover.classList.contains('cover-hidden');
+      })()`), "default cover while " + kind, 1400).catch(() => false);
+      check("default cover is visible while " + kind, coverReady, "cover must not wait for theme data");
+      await until(() => cdp.js(`(function () {
+        if (location.search !== ${JSON.stringify("?startup=" + kind)}) return false;
+        var state = window.__fishHouseLive && window.__fishHouseLive.getState();
+        return state && state.themeId === '7ce22364d7' && state.currentNode === 'rest' && state.lastSeq >= 1;
+      })()`), "default playback and real socket snapshot after " + kind, 4800);
+      const fallbackMs = Date.now() - opening;
+      check("theme fallback and event stream start when " + kind, fallbackMs < 6300, "fallback after " + fallbackMs + "ms");
+      if (kind === "selector-hangs") {
+        await until(() => cdp.js(`performance.getEntriesByName(location.origin + '/fish_house/live.theme.json')
+          .some(entry => entry.responseEnd > 0 && entry.encodedBodySize > 0)`), "late selector response actually arrived");
+        check("a late selector cannot override fallback without AbortController",
+          await cdp.js("typeof AbortController === 'undefined' && window.__fishHouseLive.getState().themeId === '7ce22364d7'"),
+          "the default theme remains after the timed-out response arrives");
+      }
+    }
+    await setStartupCase("normal");
     await cdp.send("Page.navigate", { url: `http://127.0.0.1:${PORT}/live` });
     await until(() => cdp.js("[...document.querySelectorAll('video')].some(v => !v.paused && v.currentTime > .1)"),
       "initial video started before the first-frame notification");
