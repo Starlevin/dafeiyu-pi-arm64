@@ -556,6 +556,71 @@ private func inbound(_ text: String = "合成消息",
         #expect(await scores.value() == 0)
     }
 
+    @Test func highestWeChatActivityLetsGroupWideStatementsReachTheModel() async {
+        var config = makeConfig(allowed: ["fixture-group"])
+        config.publicQuestionFastEnabled = true
+        config.contextualParticipationEnabled = true
+        config.proactiveAllowedChats = ["fixture-group"]
+        config.allowedAccounts = ["fixture-account"]
+        let calls = CallCounter()
+        let scores = CallCounter()
+        let recorder = RequestRecorder()
+        let core = UnifiedReplyCore(
+            config: config,
+            generator: FixtureReplyGenerator(replyJSON: validJSON("压机那一下直接把节奏接起来了。"),
+                                             fail: false, calls: calls, recorder: recorder),
+            proactiveScorerFactory: { _, _ in FixedProactiveScorer(value: nil, calls: scores) },
+            journal: freshJournal()
+        )
+        let prior = "第五人格这局压机比上一局稳多了"
+        let statement = "你们刚才那波压机是真的稳"
+        var event = inbound(statement, atMe: false, msgId: "group-wide-regular")
+        event.groupAutoReply = true
+        event.groupAutoReplyWindowOK = true
+        event.groupAutoReplySuperseded = false
+        event.groupAutoReplyPublicQuestionSettled = true
+        event.groupAutoReplyPublicQuestionCooldownSeconds = 60
+        event.groupAutoReplyContext = [prior, statement]
+        #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+
+        event.groupAutoReplyPublicQuestionCooldownSeconds = 30
+        let closedOrDirected = [
+            "阿青你刚才那波压机是真的稳",
+            "你们刚才压机很稳，不过阿青你要慢一点",
+            "你们跟阿青私聊压机安排就好",
+            "你们刚才那波压机是真的稳，谢谢大家",
+            "＠阿青你们那波压机稳定了",
+        ]
+        for (index, text) in closedOrDirected.enumerated() {
+            var blocked = event
+            blocked.msgId = "group-wide-blocked-\(index)"
+            blocked.text = text
+            blocked.groupAutoReplyContext = [prior, text]
+            #expect((await core.handle(blocked)).gate == "proactive_context_not_ready")
+        }
+        #expect(await calls.value() == 0)
+
+        event.msgId = "group-wide-without-recent-topic"
+        event.groupAutoReplyContext = [statement]
+        #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+
+        event.msgId = "group-wide-recent-bot-reply"
+        event.groupAutoReplyContext = ["机器人: 那波压机确实稳多了", prior, statement]
+        #expect((await core.handle(event)).gate == "proactive_context_not_ready")
+
+        event.msgId = "group-wide-high"
+        event.groupAutoReplyContext = [prior, statement]
+        let result = await core.handle(event)
+        #expect(result.gate == "replied")
+        #expect(result.reply.action == "reply")
+        event.msgId = "group-wide-too-soon"
+        #expect((await core.handle(event)).gate == "proactive_score_cooldown")
+        #expect(await recorder.publicQuestionContexts == [[prior]])
+        #expect(await recorder.contextualParticipation == [true])
+        #expect(await calls.value() == 1)
+        #expect(await scores.value() == 0)
+    }
+
     @Test func globalProactiveSwitchStillRequiresBridgeEvidenceForNonMentions() async {
         var c = makeConfig(requireAt: false)
         c.proactiveExplicitlyEnabled = true

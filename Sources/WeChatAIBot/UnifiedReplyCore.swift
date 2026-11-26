@@ -996,12 +996,15 @@ public final class UnifiedReplyCore: @unchecked Sendable {
 
     private static func hasContextualOpening(_ body: String, window: [String],
                                              allowSemanticMatch: Bool) -> Bool {
-        let stops = ["@", "＠", "你", "私聊", "已解决", "已经解决", "解决了", "不用了", "算了", "谢谢"]
+        let stops = ["@", "＠", "私聊", "已解决", "已经解决", "解决了", "不用了", "算了", "谢谢"]
+        // At the highest activity level the model can judge if a plural address
+        // is open to the group. Singular or mixed addresses stay blocked.
+        let address = allowSemanticMatch ? body.replacingOccurrences(of: "你们", with: "") : body
         let text = scrubCandidate(body)
         let topic = text.lowercased().filter { $0.isLetter || $0.isNumber }
         let prior = window.dropLast().suffix(3)
         guard (4...125).contains(body.count), text == body, topic.count >= 4,
-              !stops.contains(where: body.contains), !isLightGroupReaction(text),
+              !address.contains("你"), !stops.contains(where: body.contains), !isLightGroupReaction(text),
               let latest = prior.last(where: { !isLightGroupReaction($0) }),
               !latest.hasPrefix("机器人: ") else {
             return false
