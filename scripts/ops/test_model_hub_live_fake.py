@@ -24,6 +24,15 @@ HUB_PATH = Path(os.environ.get(
 AVAILABLE = ["fake-family-auto", "fake-family-2"]
 POSTED_MODELS = []
 QQ_ORDINARY_REQUESTS = []
+MALFORMED_RESPONSES = {
+    "fixture-null": None,
+    "fixture-choices-object": {"choices": {"shape": None}},
+    "fixture-choice-null": {"choices": [None]},
+    "fixture-message-array": {"choices": [{"message": ["bad message"]}]},
+    "fixture-nontext": {"choices": [{"message": {"content": 123}}]},
+    "fixture-invalid-tool-list": {"choices": [{"message": {"tool_calls": {"unexpected": True}}}]},
+}
+FILTERED_RESPONSE = {"choices": [{"finish_reason": "content_filter", "message": ["ignored"]}]}
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -48,6 +57,12 @@ class Upstream(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
         POSTED_MODELS.append(body.get("model"))
+        if body.get("model") in MALFORMED_RESPONSES:
+            self._send(200, MALFORMED_RESPONSES[body["model"]])
+            return
+        if body.get("model") == "fixture-filtered":
+            self._send(200, FILTERED_RESPONSE)
+            return
         if body.get("model") in ("fixture-qq-slow", "fixture-qq-backup"):
             QQ_ORDINARY_REQUESTS.append((body["model"], body.get("max_tokens"),
                                          body.get("reasoning_effort")))
@@ -205,6 +220,38 @@ def main():
         assert hub._test_routes[-1]["actual"] == fallback["id"]
         assert hub.cooldown_until(selected["id"]) == 0
         print("QQ_ORDINARY_SLOW_WORKBUDDY_HTTP_FALLBACK_PASS elapsed_ms=%d" % round(elapsed * 1000))
+
+        for bad_model in MALFORMED_RESPONSES:
+            selected["model"] = bad_model
+            hub.clear_cooldown(selected["id"])
+            POSTED_MODELS.clear()
+            count = len(hub._test_routes)
+            reply = hub.complete(request)
+            assert json.loads(reply["choices"][0]["message"]["content"])["text"] == "海边的风很舒服。"
+            assert POSTED_MODELS == [bad_model, "fixture-qq-backup"]
+            assert len(hub._test_routes) == count + 1
+            assert hub._test_routes[-1]["reason"] == "empty_reply"
+        print("MALFORMED_PRIMARY_HTTP_FALLBACK_PASS shape_count=%d" % len(MALFORMED_RESPONSES))
+
+        selected["model"] = "fixture-null"
+        fallback["model"] = "fixture-choice-null"
+        hub.clear_cooldown(selected["id"])
+        try:
+            hub.complete(request)
+        except hub.UpstreamError as error:
+            assert error.status == 503
+        else:
+            raise AssertionError("Two malformed replies must return the controlled upstream error")
+        assert hub._test_routes[-1]["reason"] == "backup_empty"
+        print("MALFORMED_BACKUP_HTTP_CONTROLLED_FAILURE_PASS")
+
+        selected["model"] = "fixture-filtered"
+        hub.clear_cooldown(selected["id"])
+        POSTED_MODELS.clear()
+        assert hub.complete(request) == FILTERED_RESPONSE
+        assert POSTED_MODELS == ["fixture-filtered"]
+        assert hub.cooldown_until(selected["id"]) == 0
+        print("FILTERED_HTTP_RESULT_NO_FALLBACK_PASS")
     finally:
         server.shutdown()
         server.server_close()

@@ -427,14 +427,22 @@ def route_log(record):
 
 
 def empty_reply(result):
-    choices = result.get('choices') or []
-    if not choices:
+    """Reject unusable upstream completion envelopes, even after HTTP 200."""
+    choices = result.get('choices') if isinstance(result, dict) else None
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
         return True
     choice = choices[0]
-    if choice.get('finish_reason') in ['content_filter', 'sensitive']:
+    if choice.get('finish_reason') in ('content_filter', 'sensitive'):
         return False  # 拒答属于正常结论，不当作上游故障
-    message = choice.get('message') or {}
-    return not (message.get('content') or '').strip() and not message.get('tool_calls')
+    message = choice.get('message')
+    if not isinstance(message, dict):
+        return True
+    tool_calls = message.get('tool_calls')
+    if tool_calls is not None and (
+            not isinstance(tool_calls, list) or any(not isinstance(call, dict) for call in tool_calls)):
+        return True
+    content = message.get('content')
+    return not (isinstance(content, str) and content.strip()) and not tool_calls
 
 
 def _usage_profile(profile):
@@ -807,8 +815,12 @@ def salvage_reply(result, strict=False, proactive=False, stickers=False):
         return result
     try:
         choice = (result.get('choices') or [{}])[0]
-        message = choice.get('message') or {}
+        if choice.get('finish_reason') in ('content_filter', 'sensitive'):
+            return result
+        message = choice.get('message')
     except Exception:
+        return result
+    if not isinstance(message, dict):
         return result
     content = message.get('content')
     if not isinstance(content, str) or not content.strip():
@@ -1004,15 +1016,17 @@ def complete(body):
     def standby_backup(reason):
         try:
             result = attempt_backup()
+            if empty_reply(result):
+                raise Fallbackable('empty_reply')
         except Exception as error:
             if fast_group_route or _is_local_workbuddy(profile):
-                failure = 'backup_' + error.reason if isinstance(error, Fallbackable) else 'backup_failed'
+                failure = 'backup_failed'
+                if isinstance(error, Fallbackable):
+                    failure = 'backup_empty' if error.reason == 'empty_reply' else 'backup_' + error.reason
                 route_log({'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'requested': profile['id'],
                            'actual': '', 'fallback': True, 'reason': failure,
                            'latency_ms': int((time.monotonic() - started) * 1000)})
             raise UpstreamError(503, '主通道不可用（%s），备用模型也不可用：%s' % (reason, error))
-        if empty_reply(result):
-            raise UpstreamError(503, '主通道不可用（%s），备用模型返回空回复' % reason)
         return finish(result, backup['id'], reason)
 
     observed_cooldown = cooldown_state().get(profile['id'])
