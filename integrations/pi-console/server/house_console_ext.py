@@ -36,6 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import NamedTuple
 
 HERE = Path(__file__).resolve().parent
 WECHAT_MEMORY_ROUTE = re.compile(r"/api/memory/wechat(?:/([0-9a-f]{64}))?")
@@ -389,74 +390,45 @@ def _read_wechat_config(path: Path | None) -> dict:
     return data
 
 
-def _wechat_proactive_pj(document: dict) -> dict | None:
-    """Return the proactiveJudge object only when it is structurally usable."""
-    if not isinstance(document, dict):
-        return None
-    group = document.get("group")
-    if not isinstance(group, dict):
-        return None
-    pj = group.get("proactiveJudge")
-    if not isinstance(pj, dict):
-        return None
-    return pj
+class WeChatActivity(NamedTuple):
+    state: str
+    cooldowns: dict[str, int]
+    switches: dict[str, bool]
 
 
-def _wechat_enabled_groups(pj: dict | None) -> list[str]:
-    """Return exact group names only when the judge is enabled and the list is valid."""
-    if not isinstance(pj, dict) or pj.get("enabled") is not True:
-        return []
-    groups = pj.get("groups")
-    if not isinstance(groups, list) or any(
-            not isinstance(name, str) or not name.strip() for name in groups):
-        return []
-    return list(groups)
-
-
-def _wechat_cooldown_map(pj: dict | None, enabled_groups: list[str]) -> dict:
-    """Expose only explicitly configured cooldowns for currently enabled groups."""
-    if not isinstance(pj, dict):
-        return {}
-    stored = pj.get(COOLDOWN_MAP_KEY)
-    if not isinstance(stored, dict):
-        return {}
-    allowed = set(enabled_groups)
-    result = {}
-    for name, seconds in stored.items():
-        if name in allowed and type(seconds) is int:
-            result[name] = seconds
-    return result
-
-
-def _wechat_paused_groups(pj: dict | None) -> set[str] | None:
-    raw = pj.get("pausedGroups", []) if isinstance(pj, dict) else None
-    if not isinstance(raw, list) or any(not isinstance(name, str) or not name.strip()
-                                        for name in raw):
-        return None
-    return set(raw)
-
-
-def _wechat_activity(document: dict) -> tuple[str, dict, list[str], list[str]] | None:
-    pj = _wechat_proactive_pj(document)
-    if pj is None or type(pj.get("enabled")) is not bool:
+def _wechat_activity(document: dict) -> WeChatActivity | None:
+    group = document.get("group") if isinstance(document, dict) else None
+    pj = group.get("proactiveJudge") if isinstance(group, dict) else None
+    if not isinstance(pj, dict) or type(pj.get("enabled")) is not bool:
         return None
     if not pj["enabled"]:
-        return "disabled", {}, [], []
-    raw_groups = pj.get("groups")
-    groups = _wechat_enabled_groups(pj)
-    paused = _wechat_paused_groups(pj)
+        return WeChatActivity("disabled", {}, {})
+
+    groups = pj.get("groups")
+    paused = pj.get("pausedGroups", [])
+    for names in (groups, paused):
+        if not isinstance(names, list) or any(
+                not isinstance(name, str) or not name.strip() for name in names):
+            return None
     cooldowns = pj.get(COOLDOWN_MAP_KEY, {})
-    if (not isinstance(raw_groups, list) or (raw_groups and not groups)
-            or paused is None or not isinstance(cooldowns, dict)):
+    if not isinstance(cooldowns, dict) or any(
+            not isinstance(name, str) or not name.strip() or not _validate_cooldown(seconds)[0]
+            for name, seconds in cooldowns.items()):
         return None
-    if any(not isinstance(name, str) or not name.strip() or not _validate_cooldown(seconds)[0]
-           for name, seconds in cooldowns.items()):
-        return None
-    groups = list(dict.fromkeys(groups))
-    return "available", _wechat_cooldown_map(pj, groups), groups, [name for name in groups if name not in paused]
+
+    paused = set(paused)
+    switches = {name: name not in paused for name in groups}
+    explicit = {name: seconds for name, seconds in cooldowns.items() if name in switches}
+    return WeChatActivity("available", explicit, switches)
 
 
-def _read_wechat_activity(cfg: dict) -> tuple[str, dict, list[str], list[str]] | None:
+def _wechat_group_values(activity: WeChatActivity, group: str, *, explicit=False) -> dict:
+    default = None if explicit else PUBLIC_QUESTION_COOLDOWN_DEFAULT
+    return {COOLDOWN_KEY: activity.cooldowns.get(group, default),
+            ORDINARY_REPLY_KEY: activity.switches[group]}
+
+
+def _read_wechat_activity(cfg: dict) -> WeChatActivity | None:
     try:
         return _wechat_activity(_read_wechat_config(_wechat_config_path(cfg)))
     except (OSError, ValueError):
@@ -473,16 +445,10 @@ def _wechat_proactive_runtime(wechat_adapter, saved) -> dict:
         return unavailable
     if runtime is None:
         return unavailable
-    saved_state, saved_cooldowns, saved_groups, saved_enabled = saved
-    running_state, running_cooldowns, running_groups, running_enabled = runtime
-    running_group_set = set(running_groups)
-    saved_enabled, running_enabled = set(saved_enabled), set(running_enabled)
-    default = PUBLIC_QUESTION_COOLDOWN_DEFAULT
-    matched = [name for name in saved_groups
-               if name in running_group_set and (name in saved_enabled) == (name in running_enabled)
-               and saved_cooldowns.get(name, default) == running_cooldowns.get(name, default)]
-    complete = (saved_state == running_state and len(matched) == len(saved_groups)
-                and running_group_set == set(saved_groups))
+    matched = [name for name in saved.switches if name in runtime.switches
+               and _wechat_group_values(saved, name) == _wechat_group_values(runtime, name)]
+    same_groups = len(matched) == len(saved.switches) == len(runtime.switches)
+    complete = saved.state == runtime.state and same_groups
     return {"verification": "matched" if complete else "pending", "matchedGroups": matched}
 
 
@@ -532,25 +498,22 @@ def _update_wechat_activity(cfg: dict, body: dict, wechat_adapter) -> tuple[int,
         return 503, {"error": "微信核心设置写入通道不可用"}
     try:
         with PROACTIVE_CONFIG_LOCK:
-            saved = _wechat_proactive_pj(_read_wechat_config(path))
-            if group not in _wechat_enabled_groups(saved):
+            saved = _wechat_activity(_read_wechat_config(path))
+            read_error = 409, {"error": "微信运行配置或桥配置回读不一致"}
+            whitelist_error = 409, {"error": "微信运行配置与桥白名单不一致"}
+            if saved is None:
+                return read_error
+            if group not in saved.switches:
                 return 400, {"error": "该群不在微信主动辨别白名单内"}
-            runtime = _wechat_proactive_pj(wechat_adapter._get("/api/settings"))
-            if group not in _wechat_enabled_groups(runtime):
-                return 409, {"error": "微信运行配置与桥白名单不一致"}
+            runtime = _wechat_activity(wechat_adapter._get("/api/settings"))
+            if runtime is None or group not in runtime.switches:
+                return whitelist_error
 
+            requested = {key: body[key] for key in (COOLDOWN_KEY, ORDINARY_REPLY_KEY) if key in body}
             if "expected" in body:
-                for document in (saved, runtime):
-                    before = {}
-                    if COOLDOWN_KEY in body:
-                        before[COOLDOWN_KEY] = _wechat_cooldown_map(document, [group]).get(
-                            group, PUBLIC_QUESTION_COOLDOWN_DEFAULT)
-                    if ORDINARY_REPLY_KEY in body:
-                        paused = _wechat_paused_groups(document)
-                        if paused is None:
-                            return 409, {"error": "微信运行配置或桥配置回读不一致"}
-                        before[ORDINARY_REPLY_KEY] = group not in paused
-                    conflict = _check_previous_proactive_values(body, before)
+                for policy in (saved, runtime):
+                    values = _wechat_group_values(policy, group)
+                    conflict = _check_previous_proactive_values(body, {key: values[key] for key in requested})
                     if conflict is not None:
                         return conflict
 
@@ -558,30 +521,27 @@ def _update_wechat_activity(cfg: dict, body: dict, wechat_adapter) -> tuple[int,
             if not isinstance(result, dict) or result.get("ok") is False:
                 return 503, {"error": "微信核心设置接口未确认写入"}
 
-            runtime = _wechat_proactive_pj(wechat_adapter._get("/api/settings"))
-            saved = _wechat_proactive_pj(_read_wechat_config(path))
-            runtime_groups = _wechat_enabled_groups(runtime)
-            saved_groups = _wechat_enabled_groups(saved)
-            if group not in runtime_groups or group not in saved_groups:
-                return 409, {"error": "微信运行配置与桥白名单不一致"}
+            runtime = _wechat_activity(wechat_adapter._get("/api/settings"))
+            saved = _wechat_activity(_read_wechat_config(path))
+            for policy in (saved, runtime):
+                if policy is None:
+                    return read_error
+                if group not in policy.switches:
+                    return whitelist_error
+                values = _wechat_group_values(policy, group, explicit=True)
+                if any(values[key] != value for key, value in requested.items()):
+                    return read_error
             observed = {}
-            if COOLDOWN_KEY in body:
-                seconds = body[COOLDOWN_KEY]
-                if (_wechat_cooldown_map(runtime, runtime_groups).get(group) != seconds
-                        or _wechat_cooldown_map(saved, saved_groups).get(group) != seconds):
-                    return 409, {"error": "微信运行配置或桥配置回读不一致"}
+            if COOLDOWN_KEY in requested:
+                seconds = requested[COOLDOWN_KEY]
                 observed.update(observed=seconds, runtimeObserved=seconds)
-            if ORDINARY_REPLY_KEY in body:
-                enabled = body[ORDINARY_REPLY_KEY]
-                for paused in (_wechat_paused_groups(runtime), _wechat_paused_groups(saved)):
-                    if paused is None or (group not in paused) != enabled:
-                        return 409, {"error": "微信运行配置或桥配置回读不一致"}
-                observed["ordinaryReplyEnabled"] = enabled
+            if ORDINARY_REPLY_KEY in requested:
+                observed[ORDINARY_REPLY_KEY] = requested[ORDINARY_REPLY_KEY]
         return 200, {"ok": True, "verification": "persisted", "platform": "wechat",
                      "group": group, **observed}
     except FileNotFoundError:
         return 404, {"error": "微信核心配置文件不可用"}
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError):
         return 503, {"error": "微信核心配置读取或写入失败"}
     except Exception:
         return 503, {"error": "微信核心设置接口不可用"}
@@ -811,7 +771,8 @@ def _qq_proactive_runtime(qq_adapter, revision: str) -> dict:
 def _build_proactive_config(cfg: dict, qq_adapter=None, wechat_adapter=None) -> dict:
     # The file remains authoritative for what was saved; the core view only verifies it.
     wx_saved = _read_wechat_activity(cfg)
-    wx_state, wx_cooldowns, wx_groups, wx_enabled_groups = wx_saved or ("unreadable", {}, [], [])
+    wx_state, wx_cooldowns, wx_switches = wx_saved or WeChatActivity("unreadable", {}, {})
+    wx_enabled_groups = [name for name, enabled in wx_switches.items() if enabled]
     wx_enabled = bool(wx_enabled_groups)
     qq_cooldowns = {}
     qq_ordinary = {}
@@ -834,7 +795,7 @@ def _build_proactive_config(cfg: dict, qq_adapter=None, wechat_adapter=None) -> 
         "judgeMode": "QQ:enforce-v2 / WeChat:" + ("enabled" if wx_enabled else "gate-off"),
         "wechatJudgeEnabled": wx_enabled,
         "wechatAllowlistCount": len(wx_enabled_groups),
-        "wechatAuthorizedGroups": wx_groups,
+        "wechatAuthorizedGroups": list(wx_switches),
         "wechatEnabledGroups": wx_enabled_groups,
         "wechatConfigState": wx_state,
         "wechatRuntime": _wechat_proactive_runtime(wechat_adapter, wx_saved),

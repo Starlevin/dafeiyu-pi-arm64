@@ -1035,6 +1035,43 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(current["wechatConfigState"], "unreadable")
         self.assertEqual(current["wechatRuntime"]["verification"], "unavailable")
 
+    def test_wechat_malformed_policy_blocks_both_read_and_write(self):
+        body = {"platform": "wechat", "group": "试点群A", "ordinaryReplyEnabled": False}
+        for side in ("disk", "runtime"):
+            with self.subTest(side=side):
+                baseline = self.wx_config.read_bytes()
+                adapter = self._install_wechat_settings_adapter()
+                if side == "disk":
+                    document = self._wx_doc()
+                    document["group"]["proactiveJudge"]["publicQuestionCooldowns"] = {"试点群A": -1}
+                    self.wx_config.write_text(json.dumps(document), encoding="utf-8")
+                else:
+                    adapter.runtime["group"]["proactiveJudge"]["pausedGroups"] = [" "]
+                try:
+                    current = json.loads(self._get("/api/proactive/config")[1])
+                    self.assertEqual(current["wechatRuntime"]["verification"], "unavailable")
+                    if side == "disk":
+                        self.assertEqual(current["wechatConfigState"], "unreadable")
+                    before = self.wx_config.read_bytes()
+                    with self.assertRaises(urllib.error.HTTPError) as caught:
+                        self._post("/api/proactive/config", body)
+                    self.assertEqual(caught.exception.code, 409)
+                    self.assertEqual(adapter.posts, [])
+                    self.assertEqual(self.wx_config.read_bytes(), before)
+                finally:
+                    self.wx_config.write_bytes(baseline)
+
+    def test_wechat_default_cooldown_is_not_a_write_confirmation(self):
+        adapter = self._install_wechat_settings_adapter(file_write=False)
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self._post("/api/proactive/config", {
+                "platform": "wechat", "group": "试点群A", "publicQuestionCooldownSeconds": 60,
+                "expected": {"publicQuestionCooldownSeconds": 60},
+            })
+        self.assertEqual(caught.exception.code, 409)
+        self.assertEqual(len(adapter.posts), 1)
+        self.assertNotIn("publicQuestionCooldowns", self._wx_doc()["group"]["proactiveJudge"])
+
     def test_wechat_stale_edit_does_not_call_the_core_writer(self):
         adapter = self._install_wechat_settings_adapter()
         change = {"platform": "wechat", "group": "试点群A", "publicQuestionCooldownSeconds": 90,
