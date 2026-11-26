@@ -777,6 +777,34 @@ class HouseConsoleExtTests(unittest.TestCase):
         self.assertEqual(result["qqFunnel"]["scoreSkippedReasons"], {"mode_not_enforce": 1})
         self.assertNotIn(b"raw chat text", raw)
 
+    def test_proactive_funnel_keeps_record_at_exact_tail_boundary(self):
+        log = self.qq_root / "run" / "qq-bot.log"
+        log.parent.mkdir()
+        stamp = int(time.time()) - 10
+        marker = f"[qq_proactive_funnel] at={stamp} scope=1234567890abcdef event=candidate reason=-"
+        record = (marker + "\r\n").encode("ascii")
+
+        # Exactly 2,000,000 bytes start at a whole record, not a clipped line.
+        tail = record + b"x" * (2_000_000 - len(record) - 1) + b"\n"
+        log.write_bytes(b"old data\n" + tail)
+        # A marker embedded in another log line is not a funnel record.
+        log.with_suffix(".log.1").write_bytes(b"debug payload: " + record.replace(b"candidate", b"enqueued"))
+        # A concurrent append can leave an incomplete final line.
+        log.with_suffix(".log.2").write_bytes(marker.replace("candidate", "confirmed").encode("ascii"))
+        # A complete marker split between read blocks must still be counted.
+        later = record.replace(f"at={stamp}".encode(), f"at={stamp + 1}".encode())
+        log.with_suffix(".log.3").write_bytes(b"x" * (32 * 1024 - 15) + b"\n" + later)
+
+        _, raw = self._get("/api/proactive/config")
+        funnel = json.loads(raw)["qqFunnel"]
+        self.assertEqual(funnel["readableLogs"], 4)
+        self.assertTrue(funnel["truncated"])
+        self.assertEqual(funnel["counts"]["candidate"], 2)
+        self.assertEqual(funnel["counts"]["enqueued"], 0)
+        self.assertEqual(funnel["counts"]["confirmed"], 0)
+        self.assertEqual(funnel["firstEventAt"], stamp)
+        self.assertEqual(funnel["lastEventAt"], stamp + 1)
+
     def _write_qq_cfg(self, data):
         cfg = self.qq_root / "data-qq" / "qq-decision-config.json"
         cfg.parent.mkdir(parents=True, exist_ok=True)

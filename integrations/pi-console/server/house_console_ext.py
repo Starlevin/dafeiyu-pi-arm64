@@ -65,9 +65,14 @@ PROACTIVE_EVENTS = (
     "ordinary", "candidate", "gate_passed", "score_passed", "score_rejected", "score_skipped", "score_after_reject",
     "enqueued", "after_enqueue_skip", "confirmed",
 )
+PROACTIVE_TAIL_BYTES = 2_000_000
+PROACTIVE_BLOCK_BYTES = 32 * 1024
+PROACTIVE_LINE_BYTES = 4096
+PROACTIVE_MARKER = b"[qq_proactive_funnel]"
 PROACTIVE_LINE = re.compile(
-    r"\[qq_proactive_funnel\] at=([0-9]{1,12}(?:\.[0-9]{1,9})?) scope=([0-9a-f]{16}) "
-    r"event=(" + "|".join(PROACTIVE_EVENTS) + r") reason=([a-z0-9_-]{1,48}|-)\s*$"
+    rb"^\[qq_proactive_funnel\] at=([0-9]{1,12}(?:\.[0-9]{1,9})?) scope=([0-9a-f]{16}) "
+    rb"event=(" + "|".join(PROACTIVE_EVENTS).encode("ascii") + rb") reason=([a-z0-9_-]{1,48}|-)\r?$",
+    re.MULTILINE,
 )
 PROACTIVE_GROUP = re.compile(r"group:[1-9][0-9]{0,17}")
 PROACTIVE_CONFIG_LOCK = threading.Lock()
@@ -567,6 +572,39 @@ def _ordinary_reply_state(row: dict) -> tuple[bool, str]:
     return legacy, "legacy" if legacy else "default"
 
 
+def _proactive_log_records(log, size):
+    """Scan complete records without reading beyond the file-size snapshot."""
+    remaining = min(size, PROACTIVE_TAIL_BYTES)
+    offset = size - remaining
+    skipping = False
+    carry = b""
+    if offset:
+        log.seek(offset - 1)
+        skipping = log.read(1) != b"\n"
+    while remaining:
+        chunk = log.read(min(remaining, PROACTIVE_BLOCK_BYTES))
+        if not chunk:
+            yield None
+            return
+        remaining -= len(chunk)
+        if skipping:
+            _, newline, chunk = chunk.partition(b"\n")
+            if not newline:
+                continue
+            skipping = False
+        complete, _, carry = (carry + chunk).rpartition(b"\n")
+        if PROACTIVE_MARKER in complete:
+            yield from (match.groups() for match in PROACTIVE_LINE.finditer(complete))
+        if len(carry) > PROACTIVE_LINE_BYTES:
+            # Real markers are at most a few hundred bytes; discard oversized
+            # non-record lines without turning the rest into a partial record.
+            carry = b""
+            skipping = True
+            yield None
+    if carry or skipping:
+        yield None
+
+
 def _proactive_funnel(root: Path | None) -> dict:
     now = time.time()
     counts = dict.fromkeys(PROACTIVE_EVENTS, 0)
@@ -585,47 +623,40 @@ def _proactive_funnel(root: Path | None) -> dict:
             path = root / "run" / ("qq-bot.log" + suffix)
             try:
                 with path.open("rb") as log:
-                    offset = max(0, os.fstat(log.fileno()).st_size - 2_000_000)
-                    log.seek(offset)
-                    if offset:
-                        truncated = True
-                        log.readline()
-                    data = log.read(2_000_001)
+                    size = os.fstat(log.fileno()).st_size
+                    readable += 1
+                    truncated |= size > PROACTIVE_TAIL_BYTES
+                    for record in _proactive_log_records(log, size):
+                        if record is None:
+                            truncated = True
+                            continue
+                        event_at = float(record[0])
+                        if not now - 86400 <= event_at <= now:
+                            continue
+                        # The archive is written before rotating the source so a
+                        # failed rotation cannot lose its records.
+                        if record in seen_records:
+                            continue
+                        seen_records.add(record)
+                        scope, event, reason = (field.decode("ascii") for field in record[1:])
+                        if first_event_at is None or event_at < first_event_at:
+                            first_event_at = event_at
+                        if last_event_at is None or event_at > last_event_at:
+                            last_event_at = event_at
+                        counts[event] += 1
+                        if scope not in groups:
+                            groups[scope] = dict.fromkeys(PROACTIVE_EVENTS, 0)
+                        groups[scope][event] += 1
+                        if event == "score_after_reject":
+                            reasons[reason] = reasons.get(reason, 0) + 1
+                        elif event == "score_rejected":
+                            rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                        elif event == "score_skipped":
+                            skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                        elif event == "after_enqueue_skip":
+                            after_enqueue_skips[reason] = after_enqueue_skips.get(reason, 0) + 1
             except OSError:
                 continue
-            readable += 1
-            truncated |= len(data) > 2_000_000
-            for line in data[:2_000_000].splitlines():
-                if b"[qq_proactive_funnel]" not in line:
-                    continue
-                match = PROACTIVE_LINE.search(line.decode("utf-8", "replace"))
-                if not match:
-                    continue
-                stamp, scope, event, reason = match.groups()
-                event_at = float(stamp)
-                if not now - 86400 <= event_at <= now:
-                    continue
-                # The archive is written before rotating the source so a
-                # failed rotation cannot lose its records.
-                record = (stamp, scope, event, reason)
-                if record in seen_records:
-                    continue
-                seen_records.add(record)
-                if first_event_at is None or event_at < first_event_at:
-                    first_event_at = event_at
-                if last_event_at is None or event_at > last_event_at:
-                    last_event_at = event_at
-                counts[event] += 1
-                scope_counts = groups.setdefault(scope, dict.fromkeys(PROACTIVE_EVENTS, 0))
-                scope_counts[event] += 1
-                if event == "score_after_reject":
-                    reasons[reason] = reasons.get(reason, 0) + 1
-                elif event == "score_rejected":
-                    rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
-                elif event == "score_skipped":
-                    skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
-                elif event == "after_enqueue_skip":
-                    after_enqueue_skips[reason] = after_enqueue_skips.get(reason, 0) + 1
     return {"windowSeconds": 86400, "firstEventAt": first_event_at, "lastEventAt": last_event_at,
             "counts": counts, "scoreAfterRejectReasons": reasons,
             "scoreRejectedReasons": rejection_reasons,
