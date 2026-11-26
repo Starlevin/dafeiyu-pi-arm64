@@ -737,6 +737,54 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
         self.assertTrue(blocked.empty())
         blocked_limiter.take.assert_not_called()
 
+    def test_direction_retry_recovers_latest_after_old_rows_leave_view(self):
+        self.configure(True)
+        app = object()
+        bounds = (0, 0, 500, 500)
+        fresh_bounds = (0, 0, 500, 560)
+        for direct in (False, True):
+            body = "这轮同话题有人接着聊了一句"
+            if direct:
+                body = f"@大肥鱼{bridge.MENTION_TOKEN}{body}"
+            names = ("旧消息一", "旧消息二", "原对话的第一句", "原对话的第二句", body)
+            original = [(text, (0, 275 + i * 52, 500, 50)) for i, text in enumerate(names)]
+            clipped = [(text, (0, 280 + i * 52, 500, 50)) for i, text in enumerate(names[2:])]
+            for case, refreshed, side, should_queue in (
+                ("incoming", clipped, "incoming", True),
+                ("outgoing", clipped, "outgoing", False),
+                ("overtaken", clipped + [("来了一条新消息", (0, 450, 500, 50))], "incoming", False),
+                ("context changed", [("另一句", clipped[0][1])] + clipped[1:], "incoming", False),
+                ("ambiguous overlap", [clipped[0], (clipped[0][0], clipped[1][1]), clipped[2]],
+                 "incoming", False),
+            ):
+                with self.subTest(direct=direct, case=case):
+                    self.args.auto_limiter = Mock(take=Mock(return_value=True))
+                    jobs = Queue()
+                    proof = Mock(return_value=(list(names[2:]), False, True))
+                    latest = clipped[-1][1]
+                    sample = Mock(side_effect=lambda rect, view: (side, 5)
+                                  if rect == latest and view == fresh_bounds else None)
+                    with patch.multiple(
+                        bridge, get_app=Mock(return_value=app), chat_title=Mock(return_value=GROUP),
+                        app_memory_account=Mock(return_value="fixture-account"),
+                        read_messages=Mock(return_value=(fresh_bounds, refreshed)),
+                        avatar_side=sample, bpc=SimpleNamespace(build_proven=proof),
+                        _composer_has_text=Mock(return_value=False),
+                    ), patch.object(bridge.time, "sleep"):
+                        handled = bridge.handle_rows(
+                            app, original, 4, bounds, GROUP, self.args, jobs,
+                            memory_account="fixture-account")
+                    self.assertEqual(handled, should_queue)
+                    if should_queue:
+                        entry = jobs.get_nowait()
+                        self.assertEqual(entry[2]["at_me"], direct)
+                        self.assertEqual(entry[2]["text"], "这轮同话题有人接着聊了一句")
+                        sample.assert_any_call(latest, fresh_bounds)
+                        if not direct:
+                            self.assertEqual(entry[-1]["index"], 2)
+                            self.assertEqual(proof.call_args.args, (clipped, 2))
+                    self.assertTrue(jobs.empty())
+
     def test_delayed_direction_uses_fresh_rows_without_charging_an_unproven_candidate(self):
         bounds = (0, 0, 500, 500)
         app = object()

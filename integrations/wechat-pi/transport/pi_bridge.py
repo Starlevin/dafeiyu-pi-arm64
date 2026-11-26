@@ -2384,13 +2384,23 @@ def _retry_group_message_side(app, rows, index, bounds, target, memory_account, 
         if memory_account and app_memory_account(app) != memory_account:
             return None
         current_bounds, current_rows = read_messages(app)
-        if current_bounds is None or len(current_rows) < len(rows):
+        if current_bounds is None:
             return None
-        if any(original[0] != current[0] for original, current in zip(rows, current_rows)):
+        current_index = index
+        if len(current_rows) < len(rows):
+            # A relayout can hide old rows at the top while retaining the
+            # latest message. Use the same suffix proof as the send guard.
+            if tx_guard is None or index + 1 != len(rows):
+                return None
+            proof = tx_guard.make_auto_context(target, rows, index)
+            if not tx_guard.auto_reply_recheck(proof, current_rows).allow:
+                return None
+            current_index = len(current_rows) - 1
+        elif any(original[0] != current[0] for original, current in zip(rows, current_rows)):
             return None
-        if require_latest and index + 1 != len(current_rows):
+        if require_latest and current_index + 1 != len(current_rows):
             return None
-        text, rect = current_rows[index]
+        text, rect = current_rows[current_index]
         if (rect != rows[index][1] or current_bounds != bounds) and sum(
                 row_text == text for row_text, _ in current_rows) != 1:
             return None
@@ -2399,7 +2409,7 @@ def _retry_group_message_side(app, rows, index, bounds, target, memory_account, 
             return None
         if memory_account and app_memory_account(app) != memory_account:
             return None
-        return side, current_bounds, current_rows
+        return side, current_bounds, current_rows, current_index
     except Exception:
         return None
 
@@ -2454,7 +2464,7 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
             refreshed = _retry_group_message_side(app, rows, i, bounds, target, memory_account,
                                                   require_latest=auto_candidate)
             if refreshed is not None:
-                side, fresh_bounds, fresh_rows = refreshed
+                side, fresh_bounds, fresh_rows, i = refreshed
                 if bounds != fresh_bounds or rows != fresh_rows:
                     bounds, rows = fresh_bounds, fresh_rows
                     text, rect = rows[i]
