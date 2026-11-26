@@ -30,6 +30,8 @@ class Health:
     MAX_TRACES = 2048
     TRACE_RETENTION_SECONDS = 30 * 86400
     INGRESS_RETENTION_SECONDS = 0.9
+    MAX_DELIVERY_TIMES = 8
+    DELIVERY_RETENTION_SECONDS = 10
     VALID_STATUSES = frozenset(("submitting", "unknown", "confirmed"))
 
     def __init__(self, path):
@@ -58,6 +60,13 @@ class Health:
         self.state.pop("last_confirmed_delivery_at", None)
         if type(delivery_at) in (int, float) and 0 < delivery_at <= 4102444800:
             self.state["last_confirmed_delivery_at"] = delivery_at
+        self.state.pop("confirmed_delivery_times", None)
+        delivery_times = prior.get("confirmed_delivery_times")
+        if isinstance(delivery_times, list):
+            valid_times = {at for at in delivery_times[-self.MAX_DELIVERY_TIMES:]
+                           if type(at) in (int, float) and 0 < at <= 4102444800}
+            if valid_times:
+                self.state["confirmed_delivery_times"] = sorted(valid_times)
         self.state.pop("active_generation", None)
         if isinstance(prior.get("active_generation"), dict):
             self.state["active_generation"] = prior["active_generation"]
@@ -245,8 +254,15 @@ class Health:
                                 and (phase, reason) in (("confirmation", "visible_outgoing"),
                                                        ("sticker", "confirmed"))
                                 and self.outbound.get(trace, {}).get("status") == "confirmed"):
-                            self.state["last_confirmed_delivery_at"] = max(
-                                event["time"], self.state.get("last_confirmed_delivery_at", 0.0))
+                            at = event["time"]
+                            previous = self.state.get("last_confirmed_delivery_at", 0.0)
+                            self.state["last_confirmed_delivery_at"] = max(at, previous)
+                            delivery_times = self.state.get("confirmed_delivery_times", [])
+                            recent = {stamp for stamp in (*delivery_times, previous, at)
+                                      if stamp > 0 and abs(stamp - at) < self.DELIVERY_RETENTION_SECONDS}
+                            # Keep verified timestamps only, even when the next
+                            # bridge event is a diagnostic for another message.
+                            self.state["confirmed_delivery_times"] = sorted(recent)[-self.MAX_DELIVERY_TIMES:]
                     if unknown:
                         self.state["last_unknown"] = event
                     # Only the post-guard queue acceptance is eligible. Keep a

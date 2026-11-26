@@ -982,8 +982,15 @@ def live_snapshot():
             or not LIVE_STARTED_AT <= delivery_at <= now
             or now - delivery_at > live_ws.SENT_WINDOW_SEC):
         delivery_at = 0.0
+    delivery_times = diagnostics.get("confirmed_delivery_times")
+    if not isinstance(delivery_times, list):
+        delivery_times = []
+    delivery_times = [at for at in delivery_times[-live_ws.MAX_WECHAT_RECEIPTS:]
+                      if type(at) in (int, float) and LIVE_STARTED_AT <= at <= now
+                      and now - at < live_ws.SENT_WINDOW_SEC]
     return {"wechat": {"activity_state": phase, "activity_at": timestamp,
-                        "activity_until": activity_until, "delivery_at": delivery_at}}
+                        "activity_until": activity_until, "delivery_at": delivery_at,
+                        "delivery_times": delivery_times}}
 
 
 _THEME_CHOICE_LOCK = threading.Lock()

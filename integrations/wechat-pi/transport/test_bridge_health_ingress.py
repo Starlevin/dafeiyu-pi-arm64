@@ -117,6 +117,7 @@ class BridgeHealthIngressTests(unittest.TestCase):
             with patch.object(bridge_health.time, "time", side_effect=lambda: now[0]):
                 health.update("confirmation", "visible_outgoing", text, success=True)
                 self.assertNotIn("last_confirmed_delivery_at", health.state)
+                self.assertNotIn("confirmed_delivery_times", health.state)
                 self.assertTrue(health.reserve_submit(text))
                 self.assertTrue(health.finish_submit(text, confirmed=True))
                 health.update("confirmation", "visible_outgoing", text, success=True)
@@ -133,6 +134,27 @@ class BridgeHealthIngressTests(unittest.TestCase):
                 self.assertTrue(health.finish_submit(sticker, confirmed=True))
                 health.update("sticker", "confirmed", sticker, success=True)
                 self.assertEqual(health.state["last_confirmed_delivery_at"], 1000.25)
+                reloaded = self.make_health(path)
+                self.assertEqual(reloaded.state["confirmed_delivery_times"], [1000.125, 1000.25])
+
+    def test_confirmed_delivery_history_is_bounded_and_expires(self):
+        with tempfile.TemporaryDirectory(prefix="wechat-delivery-burst-") as directory:
+            health = self.make_health(Path(directory) / "health.json")
+            with patch.object(bridge_health.time, "time") as clock:
+                for i in range(12):
+                    clock.return_value = 1020 + i / 10
+                    trace = f"{i:064x}"
+                    self.assertTrue(health.reserve_submit(trace))
+                    self.assertTrue(health.finish_submit(trace, confirmed=True))
+                    health.update("confirmation", "visible_outgoing", trace, success=True)
+                self.assertEqual(health.state["confirmed_delivery_times"],
+                                 [1020 + i / 10 for i in range(4, 12)])
+                clock.return_value = 1100
+                trace = "ab" * 32
+                self.assertTrue(health.reserve_submit(trace))
+                self.assertTrue(health.finish_submit(trace, confirmed=True))
+                health.update("confirmation", "visible_outgoing", trace, success=True)
+                self.assertEqual(health.state["confirmed_delivery_times"], [1100])
 
 
 if __name__ == "__main__":

@@ -83,6 +83,7 @@ EVIDENCE_DEGRADED = "degraded"
 
 # 鍥哄畾鏉ユ簮鏃堕棿绐楋細inbound 鐢ㄦ椿鍔ㄧ獥鍙ｏ紝sent 鐢ㄥ洖鎵х獥鍙ｃ€?INBOUND_WINDOW_SEC = 40.0
 SENT_WINDOW_SEC = 8.0
+MAX_WECHAT_RECEIPTS = 8
 QQ_RECEIVED_WINDOW_SEC = 15.0
 LIVE_TTL_MS = 15000
 
@@ -533,21 +534,25 @@ def pick_evidence(live: dict[str, Any], panel: dict[str, Any] | None, *,
     """Prefer recent verified activity and retain overlapping delivery receipts."""
     wx = wechat_evidence(live, now=now)
     qq = qq_evidence(live, panel, now=now)
-    wechat = live.get("wechat") if isinstance(live, dict) else None
-    if last_sent_at is not None and isinstance(wechat, dict):
-        delivery = receipt_evidence("wechat", wechat.get("delivery_at"), now=now)
-        if delivery is not None and (wx.phase != "sent" or wx.at != delivery.at):
-            # A later diagnostic can replace last_event before the next tick.
-            # A reconnect may see the same receipt, but it cannot supersede newer activity.
-            retained_delivery = delivery.at > last_sent_at.get("wechat", 0.0)
-            current_receipt = current_event == ("wechat", "sent", delivery.at)
-            if retained_delivery or (current_receipt and (wx.phase == "idle" or wx.at <= delivery.at)):
-                wx = delivery
     if last_sent_at is not None:
+        wechat = live.get("wechat") if isinstance(live, dict) else None
+        wx_receipts = [wx] if wx.phase == "sent" else []
+        if isinstance(wechat, dict):
+            delivery_times = wechat.get("delivery_times")
+            if not isinstance(delivery_times, list):
+                delivery_times = []
+            for at in (*delivery_times[-MAX_WECHAT_RECEIPTS:], wechat.get("delivery_at")):
+                delivery = receipt_evidence("wechat", at, now=now)
+                if delivery is None:
+                    continue
+                wx_receipts.append(delivery)
+                if (current_event == ("wechat", "sent", delivery.at)
+                        and (wx.phase == "idle" or wx.at <= delivery.at)):
+                    wx = delivery
         qq_receipt = pending_qq_receipt(panel, after=last_sent_at.get("qq", 0.0), now=now)
         # Present each fresh verified receipt once, oldest first. A newly
         # queued task or activity on the other platform cannot erase a send.
-        pending = [candidate for candidate in (wx, qq_receipt or qq)
+        pending = [candidate for candidate in (*wx_receipts, qq_receipt or qq)
                    if candidate.phase == "sent" and candidate.at > last_sent_at.get(candidate.source, 0.0)]
         if pending:
             return min(pending, key=lambda candidate: candidate.at)

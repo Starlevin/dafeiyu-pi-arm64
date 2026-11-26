@@ -508,6 +508,33 @@ class EvidenceTests(unittest.TestCase):
             with patch.object(mod, "LIVE_STARTED_AT", NOW - 0.6):
                 self.assertEqual(mod.live_snapshot()["wechat"]["delivery_at"], 0.0)
 
+    def test_wechat_burst_reaches_house_in_order_without_replaying(self):
+        spec = importlib.util.spec_from_file_location("fh_delivery_burst", ROOT / "server.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        first, second = NOW - 2.75, NOW - 0.55
+        event = {"phase": "mention", "reason": "direction_unverified",
+                 "time": NOW - 0.5, "trace": "c" * 64}
+        diagnostics = {"last_confirmed_delivery_at": second, "last_event": event,
+                       "last_failure": event, "confirmed_delivery_times": [
+                           NOW - 12, NOW - 5, True, first, second, NOW + 1]}
+        panel = {"runtimeRecords": [
+            {"state": "confirmed", "timestamp": NOW - 1, "_chat": True}]}
+        bridge = live_ws.LiveBridge(lambda: FlowRouter(ThemeFlow(THEME)), mod.live_snapshot,
+                                    lambda: panel)
+        with patch.object(mod.bridge_health_file, "read", return_value=diagnostics), \
+             patch.object(mod, "LIVE_STARTED_AT", NOW - 3), \
+             patch.object(live_ws.time, "time", return_value=NOW):
+            for source, stamp in (("wechat", first), ("qq", NOW - 1), ("wechat", second)):
+                frames = bridge.produce()
+                self.assertEqual([f["type"] for f in frames], ["flow_goto", "state"])
+                self.assertEqual((frames[-1]["source"], frames[-1]["phase"], frames[-1]["event_at"]),
+                                 (source, "sent", stamp))
+                self.assertEqual(frames[-1]["expires_at"], stamp + live_ws.SENT_WINDOW_SEC)
+                self.assertNotIn(event["trace"], json.dumps(frames))
+            self.assertEqual(mod.live_snapshot()["wechat"]["delivery_times"], [first, second])
+            self.assertEqual(bridge.produce(), [])
+
 
 # ------------------------------------------------------------------ framing
 class FramingTests(unittest.TestCase):
