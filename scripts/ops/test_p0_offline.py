@@ -90,6 +90,29 @@ def test_restarts_keep_recent_funnel_without_copying_private_logs():
         print("funnel history across 4 startup rotations and timer: PASS")
 
 
+def test_archive_recovers_confirmed_reply_before_original_tail_window():
+    rot = load("logrotate_wide_archive_test", "dafeiyu-logrotate.py")
+    rot.MAX_BYTES = 256
+    rot.HISTORY_BYTES = 144
+    with tempfile.TemporaryDirectory() as directory:
+        log = Path(directory) / "qq-bot.log"
+        stamp = int(time.time()) - 1
+        receipt = f"[qq_proactive_funnel] at={stamp} scope=0123456789abcdef event=confirmed reason=-\n".encode()
+        unrelated = b"private fixture unrelated to the receipt\n" * 5
+        unfinished = receipt.replace(b"confirmed", b"candidate").rstrip(b"\n")
+        payload = receipt + unrelated
+        # Force the bounded scan to begin immediately after a newline.
+        padding = b"x" * len(unfinished) + b"\n"
+        width = rot.MAX_BYTES + rot.HISTORY_BYTES
+        aligned_prefix = b"p" * (width - len(payload) - len(unfinished) - 1) + b"\n"
+        log.with_suffix(".log.2").write_bytes(padding + payload + aligned_prefix + unfinished)
+        log.write_bytes(b"restart\n")
+
+        assert rot.rotate(log, starting=True).startswith("rotated_startup")
+        assert log.with_suffix(".log.3").read_bytes() == receipt
+        print("standalone receipt survives a verbose log and an aligned scan: PASS")
+
+
 def test_launcher_retains_only_the_current_panel_address_in_active_log():
     if os.name == "nt":
         return
@@ -127,4 +150,5 @@ if __name__ == "__main__":
     test_classify()
     test_rotate()
     test_restarts_keep_recent_funnel_without_copying_private_logs()
+    test_archive_recovers_confirmed_reply_before_original_tail_window()
     test_launcher_retains_only_the_current_panel_address_in_active_log()

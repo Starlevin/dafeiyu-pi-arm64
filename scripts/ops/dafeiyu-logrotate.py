@@ -30,17 +30,25 @@ FUNNEL_LINE = re.compile(
 def _preserve_funnel(path: Path, evicted: Path, *, now: float) -> None:
     """Keep only complete, already-deidentified records from the retiring log."""
     history = {}
-    for source in (path, evicted):
+    for source, scan_bytes in ((path, HISTORY_BYTES), (evicted, MAX_BYTES + HISTORY_BYTES)):
         try:
             log = source.open("rb")
         except FileNotFoundError:
             continue
         with log:
-            offset = max(0, log.seek(0, os.SEEK_END) - HISTORY_BYTES)
-            log.seek(offset)
+            # The retained archive is small, but an evicted full log can exceed
+            # the rotation threshold between timer ticks.
+            offset = max(0, log.seek(0, os.SEEK_END) - scan_bytes)
             if offset:
-                log.readline()
-            for raw in log.read(HISTORY_BYTES).splitlines():
+                log.seek(offset - 1)
+                if log.read(1) != b"\n":
+                    log.readline()
+            else:
+                log.seek(0)
+            for raw in log:
+                if not raw.endswith(b"\n"):
+                    break
+                raw = raw[:-1].removesuffix(b"\r")
                 match = FUNNEL_LINE.fullmatch(raw)
                 if not match:
                     continue
