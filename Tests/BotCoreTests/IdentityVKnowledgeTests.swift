@@ -100,6 +100,30 @@ struct IdentityVKnowledgeTests {
         #expect(withSignal.matchedIDs.contains("role_doctor"))
     }
 
+    @Test func followUpKeepsGameFactsUntilConversationNamesAnotherGame() throws {
+        let k = try knowledge()
+        let opening = "第五人格这把压机没压好"
+        let followUp = k.lookup(messages: [opening, "那这时候再开是不是太早了"])
+        #expect(followUp.matchedIDs.contains("term_prime"))
+        for other in ["三角洲现在大坝人好多", "无畏契约今晚有比赛", "CS2 刚排完一局"] {
+            let directSwitch = k.lookup(messages: [opening, other])
+            #expect(directSwitch.topic == .noMatch)
+            let continuedOther = k.lookup(messages: [opening, other, "那这时候再上有点晚了"])
+            #expect(continuedOther.facts.isEmpty)
+        }
+        let back = k.lookup(messages: [opening, "三角洲刚打完", "第五人格再聊聊飞轮"])
+        #expect(back.matchedIDs.contains("skill_flywheel"))
+        #expect(!back.matchedIDs.contains("term_prime"))
+    }
+
+    @Test func currentTermWinsShortFactBudgetAndNearbySpeakerCannotDisambiguate() throws {
+        let k = try knowledge(enabled(1))
+        let newest = k.lookup(messages: ["第五人格压机，也叫压最后一台", "飞轮这波交早了"])
+        #expect(newest.matchedIDs == ["skill_flywheel"])
+        let daily = k.lookup(messages: ["刚看了会第五人格", "医生说我多休息"])
+        #expect(daily.facts.isEmpty)
+    }
+
     @Test func unknownTopicWhenSignalButNoFact() throws {
         // 构造：只有泛游戏信号，没有可命中条目
         let result = try knowledge().lookup(messages: ["第五人格 啊这"])

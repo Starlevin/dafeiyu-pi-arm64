@@ -176,21 +176,31 @@ public struct IdentityVKnowledge: Sendable {
         guard isEnabled, let index else {
             return IdentityVLookup(topic: .noMatch, facts: [], matchedIDs: [], topicReason: "模块禁用")
         }
-        let window = Array(messages.suffix(config.maxContextMessages))
+        var window = messages.suffix(config.maxContextMessages)
+        if let switchIndex = window.lastIndex(where: Self.namesAnotherGame) {
+            window = window.suffix(from: window.index(after: switchIndex))
+            if window.isEmpty {
+                return IdentityVLookup(topic: .noMatch, facts: [], matchedIDs: [],
+                                       topicReason: "当前话题已换到其他游戏")
+            }
+        }
+        let latest = window.last ?? ""
         let context = window.joined(separator: "\n")
-        // 匹配用整个有限窗口（连续对局对话里前一句的术语也算本话题）；
-        // 歧义消解仍只看最后 1-2 个短句，避免跨消息把「厂长开会」误接成角色。
-        let ambiguityScope = Self.lastSentenceScope(context)
+        // 前文可补足对局续聊；歧义词只在当前这条发言里找游戏信号。
+        let ambiguityScope = Self.lastSentenceScope(latest)
         let gameSignal = index.gameSignals.contains { context.contains($0) }
         let scopedSignal = index.gameSignals.contains { ambiguityScope.contains($0) }
 
-        var hits: [(entry: IdentityVKnowledgeEntry, score: Int)] = []
+        var hits: [(entry: IdentityVKnowledgeEntry, current: Bool, score: Int)] = []
         for entry in index.entries {
             guard Self.matches(entry, in: context, ambiguityScope: ambiguityScope,
-                               gameSignal: gameSignal, scopedSignal: scopedSignal) else { continue }
-            hits.append((entry, Self.score(entry, in: context, gameSignal: gameSignal)))
+                               scopedSignal: scopedSignal) else { continue }
+            let currentMatch = Self.matches(entry, in: latest, ambiguityScope: ambiguityScope,
+                                            scopedSignal: scopedSignal)
+            hits.append((entry, currentMatch, Self.score(entry, in: context, gameSignal: gameSignal)))
         }
         hits.sort { lhs, rhs in
+            if lhs.current != rhs.current { return lhs.current }
             if lhs.score != rhs.score { return lhs.score > rhs.score }
             return lhs.entry.id < rhs.entry.id
         }
@@ -209,10 +219,17 @@ public struct IdentityVKnowledge: Sendable {
         return IdentityVLookup(topic: .noMatch, facts: [], matchedIDs: [], topicReason: "未检测到游戏主题")
     }
 
+    private static func namesAnotherGame(_ message: String) -> Bool {
+        switch GameKnowledgeV2.detectGame(message) {
+        case .deltaForce, .valorant, .counterStrike: return true
+        case .identityV, .none: return false
+        }
+    }
+
     /// 歧义词：必须在同一短句作用域内出现游戏信号才激活，避免「修手机」「厂长开会」误命中。
     /// 非歧义的纯游戏黑话可在整个有限窗口内命中（队局连续对话）。
     private static func matches(_ entry: IdentityVKnowledgeEntry, in context: String,
-                                ambiguityScope: String, gameSignal: Bool, scopedSignal: Bool) -> Bool {
+                                ambiguityScope: String, scopedSignal: Bool) -> Bool {
         let forms = [entry.canonical] + entry.aliases
         if entry.contextRequired {
             guard forms.contains(where: { ambiguityScope.contains($0) }) else { return false }
