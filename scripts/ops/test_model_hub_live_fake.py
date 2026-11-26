@@ -28,11 +28,15 @@ MALFORMED_RESPONSES = {
     "fixture-null": None,
     "fixture-choices-object": {"choices": {"shape": None}},
     "fixture-choice-null": {"choices": [None]},
+    "fixture-trailing-choice-null": {"choices": [{"message": {"content": "valid first choice"}}, None]},
     "fixture-message-array": {"choices": [{"message": ["bad message"]}]},
     "fixture-nontext": {"choices": [{"message": {"content": 123}}]},
     "fixture-invalid-tool-list": {"choices": [{"message": {"tool_calls": {"unexpected": True}}}]},
 }
 FILTERED_RESPONSE = {"choices": [{"finish_reason": "content_filter", "message": ["ignored"]}]}
+TOOL_RESPONSE = {"choices": [{"finish_reason": "tool_calls", "message": {
+    "content": None, "tool_calls": [{"id": "fixture-tool-call", "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"}}]}}]}
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -59,6 +63,9 @@ class Upstream(BaseHTTPRequestHandler):
         POSTED_MODELS.append(body.get("model"))
         if body.get("model") in MALFORMED_RESPONSES:
             self._send(200, MALFORMED_RESPONSES[body["model"]])
+            return
+        if body.get("model") == "fixture-tool":
+            self._send(200, TOOL_RESPONSE)
             return
         if body.get("model") == "fixture-filtered":
             self._send(200, FILTERED_RESPONSE)
@@ -252,6 +259,12 @@ def main():
         assert POSTED_MODELS == ["fixture-filtered"]
         assert hub.cooldown_until(selected["id"]) == 0
         print("FILTERED_HTTP_RESULT_NO_FALLBACK_PASS")
+
+        selected["model"] = "fixture-tool"
+        POSTED_MODELS.clear()
+        assert hub.complete(request) == TOOL_RESPONSE
+        assert POSTED_MODELS == ["fixture-tool"]
+        print("TOOL_ONLY_HTTP_RESULT_NO_FALLBACK_PASS")
     finally:
         server.shutdown()
         server.server_close()

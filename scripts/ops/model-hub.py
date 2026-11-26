@@ -434,15 +434,24 @@ def empty_reply(result):
     choice = choices[0]
     if choice.get('finish_reason') in ('content_filter', 'sensitive'):
         return False  # 拒答属于正常结论，不当作上游故障
-    message = choice.get('message')
-    if not isinstance(message, dict):
-        return True
-    tool_calls = message.get('tool_calls')
-    if tool_calls is not None and (
-            not isinstance(tool_calls, list) or any(not isinstance(call, dict) for call in tool_calls)):
-        return True
-    content = message.get('content')
-    return not (isinstance(content, str) and content.strip()) and not tool_calls
+    # Swift decodes the entire choices array, even when it uses only the first
+    # choice. A malformed later choice would still discard an otherwise usable reply.
+    for option in choices:
+        if not isinstance(option, dict):
+            return True
+        finish = option.get('finish_reason')
+        message = option.get('message')
+        if (finish is not None and not isinstance(finish, str)) or not isinstance(message, dict):
+            return True
+        for field in ('content', 'reasoning_content'):
+            value = message.get(field)
+            if value is not None and not isinstance(value, str):
+                return True
+        tools = message.get('tool_calls')
+        if tools is not None and (not isinstance(tools, list) or any(not isinstance(call, dict) for call in tools)):
+            return True
+    first_message = choice['message']
+    return not (first_message.get('content') or '').strip() and not first_message.get('tool_calls')
 
 
 def _usage_profile(profile):
