@@ -179,8 +179,7 @@ def read_withdrawals(files, scope):
     return ids, source_ids
 
 
-def suppress_withdrawn_turns(files, source_ids_by_scope):
-    journal = json.loads(files[JOURNAL])
+def suppress_withdrawn_turns(files, journal, source_ids_by_scope):
     changed = 0
     for entry in journal["entries"]:
         if not isinstance(entry, dict):
@@ -206,6 +205,15 @@ def suppress_withdrawn_turns(files, source_ids_by_scope):
 
 def preserve_withdrawals(files, newer):
     scopes = {name.split("/")[1] for name in files if name.startswith(GROUPS + "/")}
+    newer_scopes = {name.split("/")[1] for name in newer if name.startswith(GROUPS + "/")}
+    journal = json.loads(files[JOURNAL])
+    # A group can have confirmed turns before it has any long-term files.
+    # Treat a group in the old journal as present if the newer source knows it.
+    for entry in journal["entries"]:
+        memory = entry.get("memory") if isinstance(entry, dict) else None
+        scope = memory.get("sessionDigest") if isinstance(memory, dict) else None
+        if isinstance(scope, str) and scope in newer_scopes:
+            scopes.add(scope)
     changed, source_ids_by_scope = 0, {}
     for scope in sorted(scopes):
         ids, sources = read_withdrawals(newer, scope)
@@ -223,7 +231,8 @@ def preserve_withdrawals(files, newer):
         separator = b"\n" if prior and not prior.endswith(b"\n") else b""
         files[name] = prior + separator + json.dumps(record, sort_keys=True).encode() + b"\n"
         changed += 1
-    suppressed = suppress_withdrawn_turns(files, source_ids_by_scope) if source_ids_by_scope else 0
+    suppressed = (suppress_withdrawn_turns(files, journal, source_ids_by_scope)
+                  if source_ids_by_scope else 0)
     if sum(map(len, files.values())) > MAX_BYTES:
         raise ValueError("Restored Swift memory exceeds its size limit")
     return changed, suppressed

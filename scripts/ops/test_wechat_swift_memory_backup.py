@@ -184,5 +184,41 @@ class SwiftMemoryBackupTests(unittest.TestCase):
         self.assertEqual([other_group, another], recovered[1:])
 
 
+    def test_restore_keeps_withdrawals_for_a_group_only_in_the_older_journal(self):
+        source_id = "fixture-receipt"
+        unrelated = "b" * 64
+        new_only = "c" * 64
+        def done(scope):
+            return {"key": scope, "state": "done",
+                    "reply": {"ok": True, "action": "reply", "reply": "fixture reply",
+                              "memoryReceipt": source_id},
+                    "memory": {"sessionDigest": scope, "incoming": "fixture older turn", "confirmedAt": 12}}
+
+        kept = done(unrelated)
+        self.write_archive({JOURNAL: json.dumps({"version": 1, "entries": [done(SCOPE), kept]}).encode()})
+        marker = json.dumps({"kind": "tombstone", "ids": ["fixture-id"],
+                             "forgottenSourceIDs": [source_id]}).encode() + b"\n"
+        (self.source / ARCHIVE).write_bytes(marker)
+        unrelated_new = self.source / ARCHIVE.replace(SCOPE, new_only)
+        unrelated_new.parent.mkdir(parents=True)
+        unrelated_new.write_bytes(marker)
+        newer = self.root / "current.zip"
+        OPS["create"](self.source, newer)
+        archives_before = self.output.read_bytes(), newer.read_bytes()
+
+        result = OPS["restore"](self.output, self.destination, withdrawals_from=newer)
+
+        self.assertEqual(1, result["withdrawalScopesMerged"])
+        self.assertEqual(1, result["withdrawnTurnsSuppressed"])
+        entries = json.loads((self.destination / JOURNAL).read_bytes())["entries"]
+        self.assertNotIn("memory", entries[0])
+        self.assertEqual("ignore", entries[0]["reply"]["action"])
+        self.assertEqual("memory_withdrawn", entries[0]["reply"]["reason"])
+        self.assertEqual(kept, entries[1])
+        self.assertFalse((self.destination / STATE).exists())
+        self.assertFalse((self.destination / unrelated_new.relative_to(self.source)).exists())
+        self.assertEqual(archives_before, (self.output.read_bytes(), newer.read_bytes()))
+
+
 if __name__ == "__main__":
     unittest.main()
