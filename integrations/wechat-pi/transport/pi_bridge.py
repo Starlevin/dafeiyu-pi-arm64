@@ -2387,16 +2387,17 @@ def _retry_group_message_side(app, rows, index, bounds, target, memory_account, 
         if current_bounds is None:
             return None
         current_index = index
-        if len(current_rows) < len(rows):
-            # A relayout can hide old rows at the top while retaining the
-            # latest message. Use the same suffix proof as the send guard.
+        same_prefix = all(original[0] == current[0] for original, current in zip(rows, current_rows))
+        expanded_top = require_latest and len(current_rows) > len(rows) and not same_prefix
+        if len(current_rows) < len(rows) or expanded_top:
+            # A relayout can hide or reveal older rows above the latest message.
             if tx_guard is None or index + 1 != len(rows):
                 return None
             proof = tx_guard.make_auto_context(target, rows, index)
             if not tx_guard.auto_reply_recheck(proof, current_rows).allow:
                 return None
             current_index = len(current_rows) - 1
-        elif any(original[0] != current[0] for original, current in zip(rows, current_rows)):
+        elif not same_prefix:
             return None
         if require_latest and current_index + 1 != len(current_rows):
             return None

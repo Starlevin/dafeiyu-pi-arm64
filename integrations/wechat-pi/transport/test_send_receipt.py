@@ -268,18 +268,17 @@ def side_for(row, _bounds):
 
 
 class SendReceiptTests(unittest.TestCase):
-    def test_settled_candidate_submits_once_after_top_rows_are_clipped(self):
+    def test_settled_candidate_submits_once_after_only_top_rows_change(self):
         rows = [(f"row {index}", (0, index * 50, 600, 50)) for index in range(5)]
-        ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, rows, 4)
-        clipped = rows[2:]
-        harness = SendReplyHarness(baseline_rows=rows, pre_return_rows=clipped,
-                                   post_rows=clipped + [("我的回复", 1)])
-
-        status = harness.send(auto_ctx=ctx)
-
-        self.assertNotIn("auto_reply_stale", status)
-        self.assertEqual(harness.state["return_key_count"], 1)
-        self.assertEqual(harness.state["submit_count"], 1)
+        for before, after in [(rows, rows[2:]), (rows[2:], rows)]:
+            with self.subTest(before=len(before), after=len(after)):
+                ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, before, len(before) - 1)
+                harness = SendReplyHarness(baseline_rows=before, pre_return_rows=after,
+                                           post_rows=after + [("我的回复", 1)])
+                status = harness.send(auto_ctx=ctx)
+                self.assertNotIn("auto_reply_stale", status)
+                self.assertEqual(harness.state["return_key_count"], 1)
+                self.assertEqual(harness.state["submit_count"], 1)
 
     def test_candidate_suffix_proof_rejects_changed_or_ambiguous_rows(self):
         bounds = (0, 0, 600, 50)
@@ -299,6 +298,10 @@ class SendReceiptTests(unittest.TestCase):
             ("repeated candidate", [candidate] + original[1:], 4, clipped),
             ("repeated context", [old, other, first, first, candidate], 4,
              [first, first, candidate]),
+            ("expanded then overtaken", clipped, 2, original + [new]),
+            ("expanded duplicate", clipped, 2, [candidate] + original),
+            ("expanded short proof", clipped[1:], 1, original),
+            ("expanded with changed middle", clipped, 2, [old, other, first, new, candidate]),
         ]
         for name, rows, index, current in cases:
             with self.subTest(name=name):

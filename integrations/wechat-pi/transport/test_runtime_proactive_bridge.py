@@ -785,6 +785,25 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                             self.assertEqual(proof.call_args.args, (clipped, 2))
                     self.assertTrue(jobs.empty())
 
+    def test_auto_direction_retry_uses_original_latest_row_after_top_expansion(self):
+        app = object()
+        view = (0, 0, 500, 600)
+        texts = ("前文一", "前文二", "群友最新一句")
+        original = [(text, (0, 100 + i * 50, 500, 45)) for i, text in enumerate(texts)]
+        expanded = [("重新显示的旧消息", (0, 25, 500, 45))] + original
+        with patch.multiple(
+            bridge, get_app=Mock(return_value=app), chat_title=Mock(return_value=GROUP),
+            app_memory_account=Mock(return_value="fixture-account"),
+            read_messages=Mock(return_value=(view, expanded)),
+            avatar_side=Mock(return_value=("incoming", 1)),
+        ), patch.object(bridge.time, "sleep"):
+            observed = bridge._retry_group_message_side(
+                app, original, 2, view, GROUP, "fixture-account", require_latest=True)
+            self.assertEqual(observed, (("incoming", 1), view, expanded, 3))
+            bridge.avatar_side.assert_called_once_with(expanded[-1][1], view)
+            self.assertIsNone(bridge._retry_group_message_side(
+                app, original, 2, view, GROUP, "fixture-account"))
+
     def test_delayed_direction_uses_fresh_rows_without_charging_an_unproven_candidate(self):
         bounds = (0, 0, 500, 500)
         app = object()
