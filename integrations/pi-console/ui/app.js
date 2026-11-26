@@ -606,6 +606,8 @@
       setStatus('读取状态失败：' + e.message, 'error',
                 { at: state.lastLoadedAt, stale: true });
       state.overviewStale = true;
+      const bridge = $('wechatActivityBridge');
+      if (bridge) bridge.textContent = '微信桥接状态待确认';
       syncDisabled();
       return false;
     }
@@ -751,12 +753,21 @@
     const status = $('wechatActivityStatus');
     const data = state.proactive || {};
     const enabled = new Set(arr(data.wechatEnabledGroups));
-    const groups = data.wechatAuthorizedGroups || [...enabled];
+    const groups = Array.isArray(data.wechatAuthorizedGroups) ? data.wechatAuthorizedGroups : [...enabled];
+    const matched = new Set(arr((data.wechatRuntime || {}).matchedGroups));
     clear(host);
     if (!groups.length) {
-      host.appendChild(node('p', 'card-note', '暂无已授权的微信群。'));
+      const emptyLabel = data.wechatConfigState === 'unreadable' ? '微信接话配置暂时无法读取或校验。'
+        : data.wechatConfigState === 'disabled' ? '微信接话总开关已关闭。' : '暂无已授权的微信群。';
+      host.appendChild(node('p', 'card-note', emptyLabel));
       return;
     }
+    const overview = !state.overviewStale && state.overview && state.overview.wechat;
+    const bridgeLabel = overview && overview.running === true && overview.bridgeStatus === 'ready'
+      ? '微信桥接就绪' : overview && overview.running === false ? '微信桥接未就绪' : '微信桥接状态待确认';
+    const bridge = node('p', 'card-note', bridgeLabel);
+    bridge.id = 'wechatActivityBridge';
+    host.appendChild(bridge);
     const cooldowns = (data.publicQuestionCooldowns || {}).wechat || {};
     groups.forEach((name) => {
       const row = node('form', 'memory-toolbar');
@@ -781,7 +792,8 @@
       const save = node('button', 'btn btn-primary btn-sm', '保存');
       save.type = 'submit';
       save.disabled = state.proactiveStale;
-      row.append(field, toggleField, save);
+      const coreLabel = !state.proactiveStale && matched.has(name) ? '核心回读一致' : '核心回读待确认';
+      row.append(field, toggleField, node('span', 'cell-sub', coreLabel), save);
       row.addEventListener('submit', (event) => {
         event.preventDefault();
         const value = Number(input.value);
@@ -813,7 +825,8 @@
             status.textContent = '已写入，页面回读未确认。';
             return;
           }
-          status.textContent = '已保存并核对本次修改。';
+          status.textContent = arr((loaded.wechatRuntime || {}).matchedGroups).includes(name)
+            ? '已保存，微信核心回读一致。' : '已保存，微信核心待再次核对。';
         }).catch(async (error) => {
           if (error.status === 401) { handleUnauthorized(); return; }
           if (error.status === 409) await loadQQOrdinaryConfig();

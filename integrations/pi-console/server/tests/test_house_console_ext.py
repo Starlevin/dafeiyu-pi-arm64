@@ -999,6 +999,41 @@ class HouseConsoleExtTests(unittest.TestCase):
         })
         self.assertEqual(result["wechatEnabledGroups"], ["试点群A", "试点群B"])
         self.assertTrue(result["wechatJudgeEnabled"])
+        self.assertEqual(result["wechatRuntime"], {
+            "verification": "matched", "matchedGroups": ["试点群A", "试点群B"],
+        })
+
+    def test_wechat_get_only_confirms_exact_runtime_matches(self):
+        adapter = self._install_wechat_settings_adapter()
+        judge = adapter.runtime["group"]["proactiveJudge"]
+        judge["groups"].append("只在运行配置里的群")
+        judge["publicQuestionCooldowns"] = {"试点群A": 90}
+        current = json.loads(self._get("/api/proactive/config")[1])
+        self.assertEqual(current["wechatConfigState"], "available")
+        self.assertEqual(current["wechatRuntime"], {
+            "verification": "pending", "matchedGroups": ["试点群B"],
+        })
+        self.assertNotIn("只在运行配置里的群", json.dumps(current, ensure_ascii=False))
+        self.assertEqual(adapter.posts, [])
+        with patch.object(adapter, "_get", side_effect=OSError()):
+            current = json.loads(self._get("/api/proactive/config")[1])
+        self.assertEqual(current["wechatAuthorizedGroups"], ["试点群A", "试点群B"])
+        self.assertEqual(current["wechatRuntime"], {
+            "verification": "unavailable", "matchedGroups": [],
+        })
+
+    def test_unreadable_wechat_policy_is_distinct_from_disabled_policy(self):
+        document = self._wx_doc()
+        document["group"]["proactiveJudge"]["enabled"] = False
+        self.wx_config.write_text(json.dumps(document), encoding="utf-8")
+        self._install_wechat_settings_adapter()
+        current = json.loads(self._get("/api/proactive/config")[1])
+        self.assertEqual(current["wechatConfigState"], "disabled")
+        self.assertEqual(current["wechatAuthorizedGroups"], [])
+        self.wx_config.write_text("{not valid json", encoding="utf-8")
+        current = json.loads(self._get("/api/proactive/config")[1])
+        self.assertEqual(current["wechatConfigState"], "unreadable")
+        self.assertEqual(current["wechatRuntime"]["verification"], "unavailable")
 
     def test_wechat_stale_edit_does_not_call_the_core_writer(self):
         adapter = self._install_wechat_settings_adapter()

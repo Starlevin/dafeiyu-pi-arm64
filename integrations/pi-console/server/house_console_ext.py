@@ -436,15 +436,54 @@ def _wechat_paused_groups(pj: dict | None) -> set[str] | None:
     return set(raw)
 
 
-def _read_wechat_activity(cfg: dict) -> tuple[dict, list[str], list[str]]:
+def _wechat_activity(document: dict) -> tuple[str, dict, list[str], list[str]] | None:
+    pj = _wechat_proactive_pj(document)
+    if pj is None or type(pj.get("enabled")) is not bool:
+        return None
+    if not pj["enabled"]:
+        return "disabled", {}, [], []
+    raw_groups = pj.get("groups")
+    groups = _wechat_enabled_groups(pj)
+    paused = _wechat_paused_groups(pj)
+    cooldowns = pj.get(COOLDOWN_MAP_KEY, {})
+    if (not isinstance(raw_groups, list) or (raw_groups and not groups)
+            or paused is None or not isinstance(cooldowns, dict)):
+        return None
+    if any(not isinstance(name, str) or not name.strip() or not _validate_cooldown(seconds)[0]
+           for name, seconds in cooldowns.items()):
+        return None
+    groups = list(dict.fromkeys(groups))
+    return "available", _wechat_cooldown_map(pj, groups), groups, [name for name in groups if name not in paused]
+
+
+def _read_wechat_activity(cfg: dict) -> tuple[str, dict, list[str], list[str]] | None:
     try:
-        pj = _wechat_proactive_pj(_read_wechat_config(_wechat_config_path(cfg)))
-        groups = _wechat_enabled_groups(pj)
-        paused = _wechat_paused_groups(pj)
-        enabled = [name for name in groups if name not in paused] if paused is not None else []
-        return _wechat_cooldown_map(pj, groups), groups, enabled
-    except (OSError, ValueError, UnicodeDecodeError):
-        return {}, [], []
+        return _wechat_activity(_read_wechat_config(_wechat_config_path(cfg)))
+    except (OSError, ValueError):
+        return None
+
+
+def _wechat_proactive_runtime(wechat_adapter, saved) -> dict:
+    unavailable = {"verification": "unavailable", "matchedGroups": []}
+    if wechat_adapter is None or saved is None:
+        return unavailable
+    try:
+        runtime = _wechat_activity(wechat_adapter._get("/api/settings"))
+    except Exception:
+        return unavailable
+    if runtime is None:
+        return unavailable
+    saved_state, saved_cooldowns, saved_groups, saved_enabled = saved
+    running_state, running_cooldowns, running_groups, running_enabled = runtime
+    running_group_set = set(running_groups)
+    saved_enabled, running_enabled = set(saved_enabled), set(running_enabled)
+    default = PUBLIC_QUESTION_COOLDOWN_DEFAULT
+    matched = [name for name in saved_groups
+               if name in running_group_set and (name in saved_enabled) == (name in running_enabled)
+               and saved_cooldowns.get(name, default) == running_cooldowns.get(name, default)]
+    complete = (saved_state == running_state and len(matched) == len(saved_groups)
+                and running_group_set == set(saved_groups))
+    return {"verification": "matched" if complete else "pending", "matchedGroups": matched}
 
 
 def _check_previous_proactive_values(body: dict, current: dict) -> tuple[int, dict] | None:
@@ -769,11 +808,10 @@ def _qq_proactive_runtime(qq_adapter, revision: str) -> dict:
             and state.get("connected") is True, "groups": groups}
 
 
-def _build_proactive_config(cfg: dict, qq_adapter=None) -> dict:
-    # Derive WeChat state exclusively from the local authoritative config.json:
-    # offline fixtures need no network, and this is the same file the WeChat
-    # bridge reads. Never trust a secondary HTTP view over the authoritative file.
-    wx_cooldowns, wx_groups, wx_enabled_groups = _read_wechat_activity(cfg)
+def _build_proactive_config(cfg: dict, qq_adapter=None, wechat_adapter=None) -> dict:
+    # The file remains authoritative for what was saved; the core view only verifies it.
+    wx_saved = _read_wechat_activity(cfg)
+    wx_state, wx_cooldowns, wx_groups, wx_enabled_groups = wx_saved or ("unreadable", {}, [], [])
     wx_enabled = bool(wx_enabled_groups)
     qq_cooldowns = {}
     qq_ordinary = {}
@@ -798,6 +836,8 @@ def _build_proactive_config(cfg: dict, qq_adapter=None) -> dict:
         "wechatAllowlistCount": len(wx_enabled_groups),
         "wechatAuthorizedGroups": wx_groups,
         "wechatEnabledGroups": wx_enabled_groups,
+        "wechatConfigState": wx_state,
+        "wechatRuntime": _wechat_proactive_runtime(wechat_adapter, wx_saved),
         "qqConfigState": config_state,
         "qqGroups": groups,
         "qqRuntime": _qq_proactive_runtime(qq_adapter, qq_revision),
@@ -1417,7 +1457,8 @@ def resolve(handler, method: str, path: str) -> bool:
         if path == "/api/proactive/config":
             if not handler.need_auth():
                 return True
-            handler.json(200, _build_proactive_config(cfg, handler.app.console.qq))
+            adapters = handler.app.console
+            handler.json(200, _build_proactive_config(cfg, adapters.qq, adapters.wechat))
             return True
 
         if path == "/api/trace/summary":
