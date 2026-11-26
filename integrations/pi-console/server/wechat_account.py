@@ -17,6 +17,7 @@ STATE_LABELS = {"online": "微信已登录", "scan": "微信等待扫码", "conf
 NATIVE_LOCK = threading.Lock()
 RESTART_LOCK = threading.Lock()
 LAST_RESTART = float("-inf")
+GENERATION_WINDOW_SECONDS = 240
 
 
 def _native(root, action):
@@ -70,7 +71,19 @@ def _status(root, action):
     return result
 
 
-def _idle(health_path):
+def _generation_owner_live(pid, thread, start_ticks):
+    """Match the live Linux worker, including protection against ID reuse."""
+    try:
+        stat = Path(f"/proc/{pid}/task/{thread}/stat").read_text(encoding="utf-8")
+        fields = stat.rsplit(")", 1)[1].split()
+        return fields[0] not in {"Z", "X", "x"} and fields[19] == start_ticks
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except (OSError, UnicodeError, IndexError):
+        return True  # A current generation with unreadable owner is not idle.
+
+
+def _idle(health_path, bridge_pid):
     path = Path(health_path) if health_path else Path.home() / ".local/state/dafeiyu-wechat/bridge-health.json"
     try:
         with path.open("rb") as stream:
@@ -78,13 +91,21 @@ def _idle(health_path):
         if len(raw) > 512_000:
             return False
         data = json.loads(raw)
+        now = time.time()
+        active = data.get("active_generation")
+        if isinstance(active, dict) and active.get("pid") == bridge_pid:
+            at, thread, ticks = active.get("time"), active.get("thread"), active.get("start_ticks")
+            if (type(at) in (int, float) and -2 <= now - at < GENERATION_WINDOW_SECONDS
+                    and type(thread) is int and thread > 0 and isinstance(ticks, str)
+                    and ticks.isdecimal() and _generation_owner_live(bridge_pid, thread, ticks)):
+                return False
         event = data.get("last_event") or {}
         if event.get("phase") in {"queue", "generation", "submit"}:
-            if 0 <= time.time() - float(event.get("time", 0)) <= 180:
+            if 0 <= now - float(event.get("time", 0)) <= 180:
                 return False
         traces = data.get("outbound_traces", {})
         return not any(item.get("status") == "submitting" and
-                       0 <= time.time() - float(item.get("time", 0)) <= 180 for item in traces.values())
+                       0 <= now - float(item.get("time", 0)) <= 180 for item in traces.values())
     except (OSError, ValueError, TypeError, AttributeError):
         return False
 
@@ -105,7 +126,7 @@ def _reconnect(root, cfg):
         if time.monotonic() - LAST_RESTART < 60:
             return 429, {"error": "重连请求已提交，请稍后刷新状态"}
         previous = int(_systemctl("show", "-p", "MainPID", "--value", BRIDGE))
-        if previous and not _idle(cfg.get("wechatBridgeHealthPath")):
+        if previous and not _idle(cfg.get("wechatBridgeHealthPath"), previous):
             return 409, {"error": "微信桥接可能正在处理消息，请稍后重连"}
         LAST_RESTART = time.monotonic()
         _systemctl("restart", BRIDGE, timeout=23)

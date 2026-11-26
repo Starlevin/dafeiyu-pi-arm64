@@ -336,6 +336,32 @@ class HouseConsoleExtTests(unittest.TestCase):
             self.assertEqual(wechat_account._reconnect(self.wx_root, {})[0], 409)
             command.assert_called_once()
 
+    def test_wechat_reconnect_uses_live_generation_even_after_another_event(self):
+        health = self.wx_root / "bridge-health.json"
+        now = time.time()
+        for label, owner, age, worker_alive, expected in (
+            ("active", 11, 6, True, 409),
+            ("active vision and reply", 11, 205, True, 409),
+            ("dead generation thread", 11, 6, False, 200),
+            ("old bridge", 10, 6, True, 200),
+            ("stale marker", 11, 245, True, 200),
+        ):
+            with self.subTest(case=label):
+                health.write_text(json.dumps({
+                    "last_event": {"phase": "received", "time": now},
+                    "active_generation": {"pid": owner, "thread": 12, "start_ticks": "123",
+                                          "time": now - age, "trace": "a" * 64},
+                    "outbound_traces": {},
+                }), encoding="utf-8")
+                with patch.object(wechat_account, "_generation_owner_live", return_value=worker_alive), \
+                        patch.object(wechat_account, "LAST_RESTART", float("-inf")), \
+                        patch.object(wechat_account, "_systemctl",
+                                     side_effect=["11", "", "13", "active"]) as command:
+                    status, _ = wechat_account._reconnect(
+                        self.wx_root, {"wechatBridgeHealthPath": str(health)})
+                    self.assertEqual(status, expected)
+                    self.assertEqual(command.call_count, 1 if expected == 409 else 4)
+
     def test_wechat_account_separates_native_login_from_the_bridge(self):
         situations = (
             (True, {"online": True, "listener": False}, "window_blocked", "window_pending"),
