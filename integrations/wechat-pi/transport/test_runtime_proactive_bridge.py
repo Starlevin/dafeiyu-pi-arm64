@@ -635,6 +635,108 @@ class RuntimeProactiveBridgeTests(unittest.TestCase):
                 else:
                     delay.assert_called_once_with(0.14)
 
+    def test_native_mention_retry_uses_refreshed_geometry_and_text_prefix(self):
+        bounds = (0, 0, 500, 500)
+        app = object()
+        fresh_bounds = (0, 0, 500, 560)
+        body = f"@大肥鱼{bridge.MENTION_TOKEN}同行重排复读"
+        old = (body, (0, 200, 500, 55))
+        shifted = (body, (0, 300, 500, 55))
+        for case in ("incoming", "outgoing", "changed_text"):
+            with self.subTest(case=case):
+                jobs = Queue()
+                current = ([shifted] if case != "outgoing" else [("草稿已发布", shifted[1])])
+                if case == "changed_text":
+                    current = [(body + "补了一句", shifted[1])]
+                side = ("outgoing", 5) if case == "outgoing" else ("incoming", 5)
+                side_mock = Mock(side_effect=[None, side])
+                with patch.multiple(
+                    bridge, get_app=Mock(return_value=app), chat_title=Mock(return_value=GROUP),
+                    app_memory_account=Mock(return_value="fixture-account"),
+                    read_messages=Mock(return_value=(fresh_bounds, current)),
+                    avatar_side=side_mock,
+                ), patch.object(bridge.time, "sleep"):
+                    handled = bridge.handle_rows(
+                        app, [old], 0, bounds, GROUP, self.args, jobs,
+                        memory_account="fixture-account")
+                calls = side_mock.call_args_list
+                if case == "incoming":
+                    self.assertTrue(handled)
+                    self.assertTrue(jobs.get_nowait()[2]["at_me"])
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(calls[0].args, (old[1], bounds))
+                    self.assertEqual(calls[1].args, (shifted[1], fresh_bounds))
+                else:
+                    self.assertFalse(handled)
+                    self.assertTrue(jobs.empty())
+                    self.assertEqual(len(calls), 1)
+
+    def test_ordinary_retry_uses_fresh_rows_for_context_and_draft_still_blocks(self):
+        bounds = (0, 0, 500, 500)
+        fresh_bounds = (0, 0, 500, 560)
+        app = object()
+        body = "同话题普通候选刷新后仍可入队"
+        rows = [("前文同话题-preview", (0, 200, 500, 55)), (body, (0, 300, 500, 55))]
+        refreshed = [(rows[0][0], (0, 240, 500, 55)), (body, (0, 350, 500, 55))]
+        self.configure(True)
+        jobs = Queue()
+        limiter = Mock(take=Mock(return_value=True))
+        self.args.auto_limiter = limiter
+        seen = {}
+
+        def build_proven(current, index, candidate_text, side_fn=None):
+            seen["candidate"] = candidate_text
+            seen["rows"] = list(current)
+            return [rows[0][0], body], False, True
+
+        def side_for(rect, view_bounds):
+            # Only the retry with the refreshed row+viewport proves direction.
+            if tuple(rect) == refreshed[1][1] and view_bounds == fresh_bounds:
+                return ("incoming", 5)
+            return None
+
+        side_mock = Mock(side_effect=side_for)
+        with patch.multiple(
+            bridge, get_app=Mock(return_value=app), chat_title=Mock(return_value=GROUP),
+            app_memory_account=Mock(return_value="fixture-account"),
+            read_messages=Mock(return_value=(fresh_bounds, refreshed)),
+            avatar_side=side_mock,
+            bpc=SimpleNamespace(build_proven=build_proven),
+            _composer_has_text=Mock(return_value=False),
+        ), patch.object(bridge.time, "sleep"):
+            handled = bridge.handle_rows(app, rows, 0, bounds, GROUP, self.args, jobs,
+                                         memory_account="fixture-account")
+        self.assertTrue(handled)
+        self.assertTrue(any(call.args == (refreshed[1][1], fresh_bounds)
+                            for call in side_mock.call_args_list))
+        payload = jobs.get_nowait()[2]
+        self.assertEqual(seen["candidate"], body)
+        self.assertEqual(seen["rows"], refreshed)
+        self.assertEqual(payload["group_auto_reply_context"][-1], body)
+        self.assertEqual(payload["group_auto_reply_context"][0], rows[0][0])
+        limiter.take.assert_called_once()
+
+        # Draft in composer: even proven refreshed direction must not queue.
+        self.configure(True)
+        blocked = Queue()
+        blocked_limiter = Mock(take=Mock(return_value=True))
+        self.args.auto_limiter = blocked_limiter
+        health = Mock()
+        with patch.multiple(
+            bridge, get_app=Mock(return_value=app), chat_title=Mock(return_value=GROUP),
+            app_memory_account=Mock(return_value="fixture-account"),
+            read_messages=Mock(return_value=(fresh_bounds, refreshed)),
+            avatar_side=Mock(side_effect=side_for),
+            bpc=SimpleNamespace(build_proven=build_proven),
+            _composer_has_text=Mock(return_value=True),
+        ), patch.object(bridge.time, "sleep"):
+            accepted = bridge.handle_rows(
+                app, rows, 0, bounds, GROUP, self.args, blocked, health,
+                memory_account="fixture-account")
+        self.assertFalse(accepted)
+        self.assertTrue(blocked.empty())
+        blocked_limiter.take.assert_not_called()
+
     def test_delayed_direction_uses_fresh_rows_without_charging_an_unproven_candidate(self):
         bounds = (0, 0, 500, 500)
         app = object()

@@ -2374,7 +2374,7 @@ def _composer_has_text(app):
 
 def _retry_group_message_side(app, rows, index, bounds, target, memory_account, *,
                               require_latest=False):
-    """Retry a transient avatar paint only while the original view is still proven."""
+    """Retry avatar proof for the same row, using the newly observed geometry."""
     try:
         if chat_title(app) != target:
             return None
@@ -2384,16 +2384,22 @@ def _retry_group_message_side(app, rows, index, bounds, target, memory_account, 
         if memory_account and app_memory_account(app) != memory_account:
             return None
         current_bounds, current_rows = read_messages(app)
-        if current_bounds != bounds or len(current_rows) < len(rows) or current_rows[:len(rows)] != rows:
+        if current_bounds is None or len(current_rows) < len(rows):
+            return None
+        if any(original[0] != current[0] for original, current in zip(rows, current_rows)):
             return None
         if require_latest and index + 1 != len(current_rows):
             return None
-        side = avatar_side(rows[index][1], bounds)
-        if not side or chat_title(app) != target:
+        text, rect = current_rows[index]
+        if (rect != rows[index][1] or current_bounds != bounds) and sum(
+                row_text == text for row_text, _ in current_rows) != 1:
+            return None
+        side = avatar_side(rect, current_bounds)
+        if not side or get_app() != app or chat_title(app) != target:
             return None
         if memory_account and app_memory_account(app) != memory_account:
             return None
-        return side
+        return side, current_bounds, current_rows
     except Exception:
         return None
 
@@ -2445,8 +2451,14 @@ def handle_rows(app, rows, start, bounds, target, args, jobs, health=None,
         if (side is None and is_group and app is not None and not direction_retried
                 and (not auto_candidate or i + 1 == len(rows))):
             direction_retried = True
-            side = _retry_group_message_side(app, rows, i, bounds, target, memory_account,
-                                             require_latest=auto_candidate)
+            refreshed = _retry_group_message_side(app, rows, i, bounds, target, memory_account,
+                                                  require_latest=auto_candidate)
+            if refreshed is not None:
+                side, fresh_bounds, fresh_rows = refreshed
+                if bounds != fresh_bounds or rows != fresh_rows:
+                    bounds, rows = fresh_bounds, fresh_rows
+                    text, rect = rows[i]
+                    side_cache, row_side = _make_row_side_fn(bounds)
         if rect is not None:
             rkey = tuple(rect) if isinstance(rect, (list, tuple)) else rect
             side_cache[rkey] = side[0] if side else None
