@@ -101,51 +101,8 @@ def _read_policy(path):
     return None, None
 
 
-def runtime_proactive_group_allowed(target, policy_path):
-    """Read the live Node proactive policy and fail closed on every bad state.
-
-    Cached permissions are tied to the path's device/inode/size/mtime/ctime.
-    A missing, oversized, malformed, or unstable update cannot reuse an older
-    allowlist. The lock also prevents concurrent threads from parsing duplicate
-    versions of the bounded JSON file.
-    """
-    if not isinstance(target, str) or not target.strip() or not policy_path:
-        return False
-    try:
-        path = Path(policy_path).expanduser().absolute()
-    except (OSError, TypeError, ValueError):
-        return False
-
-    key = os.fspath(path)
-    with _policy_cache_lock:
-        try:
-            signature = _file_signature(path.stat())
-        except (OSError, ValueError):
-            _policy_cache.pop(key, None)
-            return False
-
-        cached = _policy_cache.get(key)
-        if cached is not None and cached[0] == signature:
-            policy = cached[1]
-        else:
-            read_signature, policy = _read_policy(path)
-            if read_signature is None:
-                _policy_cache.pop(key, None)
-                return False
-            signature = read_signature
-            if key not in _policy_cache and len(_policy_cache) >= _POLICY_CACHE_LIMIT:
-                _policy_cache.clear()
-            _policy_cache[key] = (signature, policy)
-
-    return policy is not None and policy.groups is not None and target in policy.groups
-
-
-def runtime_public_question_cooldown(target, policy_path):
-    """Return the exact group's public-question cooldown or fail closed.
-
-    A missing map/key means the stable default of 60 seconds. Malformed,
-    oversized, missing, or unstable policy files return None.
-    """
+def _runtime_policy_for_allowed_group(target, policy_path):
+    """Get one current policy version and require exact, unpaused membership."""
     if not isinstance(target, str) or not target.strip() or not policy_path:
         return None
     try:
@@ -174,8 +131,24 @@ def runtime_public_question_cooldown(target, policy_path):
                 _policy_cache.clear()
             _policy_cache[key] = (signature, policy)
 
-    if (policy is None or policy.groups is None or target not in policy.groups
-            or policy.public_question_cooldowns is None):
+    if policy is not None and policy.groups is not None and target in policy.groups:
+        return policy
+    return None
+
+
+def runtime_proactive_group_allowed(target, policy_path):
+    """Read the live allowlist, refusing missing, outdated or invalid state."""
+    return _runtime_policy_for_allowed_group(target, policy_path) is not None
+
+
+def runtime_public_question_cooldown(target, policy_path):
+    """Return the exact group's public-question cooldown or fail closed.
+
+    A missing map/key means the stable default of 60 seconds. Malformed,
+    oversized, missing, or unstable policy files return None.
+    """
+    policy = _runtime_policy_for_allowed_group(target, policy_path)
+    if policy is None or policy.public_question_cooldowns is None:
         return None
     return policy.public_question_cooldowns.get(target, 60)
 
