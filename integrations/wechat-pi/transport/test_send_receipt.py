@@ -268,6 +268,51 @@ def side_for(row, _bounds):
 
 
 class SendReceiptTests(unittest.TestCase):
+    def test_settled_candidate_submits_once_after_top_rows_are_clipped(self):
+        rows = [(f"row {index}", (0, index * 50, 600, 50)) for index in range(5)]
+        ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, rows, 4)
+        clipped = rows[2:]
+        harness = SendReplyHarness(baseline_rows=rows, pre_return_rows=clipped,
+                                   post_rows=clipped + [("我的回复", 1)])
+
+        status = harness.send(auto_ctx=ctx)
+
+        self.assertNotIn("auto_reply_stale", status)
+        self.assertEqual(harness.state["return_key_count"], 1)
+        self.assertEqual(harness.state["submit_count"], 1)
+
+    def test_candidate_suffix_proof_rejects_changed_or_ambiguous_rows(self):
+        bounds = (0, 0, 600, 50)
+        old, other, first, second, candidate, new = [
+            (text, bounds) for text in ("old", "other", "first", "second", "candidate", "new")
+        ]
+        original = [old, other, first, second, candidate]
+        clipped = original[2:]
+        cases = [
+            ("new arrival", original, 4, clipped + [new]),
+            ("same-text arrival", original, 4, clipped[1:] + [candidate]),
+            ("replaced context", original, 4, [new, second, candidate]),
+            ("reordered context", original, 4, [second, first, candidate]),
+            ("noncontiguous overlap", original, 4, [old, first, second, candidate]),
+            ("short overlap", original, 4, clipped[1:]),
+            ("candidate not last", original + [new], 4, clipped),
+            ("repeated candidate", [candidate] + original[1:], 4, clipped),
+            ("repeated context", [old, other, first, first, candidate], 4,
+             [first, first, candidate]),
+        ]
+        for name, rows, index, current in cases:
+            with self.subTest(name=name):
+                ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, rows, index)
+                self.assertFalse(real_tx_guard.auto_reply_recheck(ctx, current).allow)
+
+        ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, original, 4)
+        ctx["trace"] = "invalid"
+        self.assertFalse(real_tx_guard.auto_reply_recheck(ctx, clipped).allow)
+
+        foreign = real_tx_guard.make_auto_context("different target", original, 4)
+        ctx["trace"] = foreign["trace"]
+        self.assertFalse(real_tx_guard.auto_reply_recheck(ctx, clipped).allow)
+
     def test_settled_candidate_rejects_message_arriving_after_delivery_recheck(self):
         rows = [("群友提问", (0, 1, 600, 50))]
         ctx = real_tx_guard.make_auto_context(SendReplyHarness.TARGET, rows, 0)

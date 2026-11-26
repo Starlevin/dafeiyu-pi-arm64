@@ -459,8 +459,8 @@ def make_auto_context(target, rows, index):
 def auto_reply_recheck(cand, current_rows):
     """投递前证明候选未被新 incoming 超越；**证明不了就 deny（静默丢弃）**。
 
-    只允许一种可证明情形：可见行快照与候选时刻**完全一致**，且候选身份可由
-    当前行复算一致。任何新增行 / 视口滚动 / 重排 / 读不出 / 身份变化 → deny。
+    接受快照完全一致，或只裁去顶部旧行且仍能唯一确认候选与原上下文。
+    新增行、重排、候选不唯一或读不出时仍拒绝。
     真 @ 从不调用本函数（真 @ 的 auto_ctx 为 None）。
     """
     if not isinstance(cand, dict):
@@ -474,7 +474,16 @@ def auto_reply_recheck(cand, current_rows):
     if current_rows is None:
         return deny("rows_unreadable", "auto_recheck")
     current = row_digests(current_rows)
-    if index < 0 or index >= len(cand_rows) or index >= len(current):
+    if not 0 <= index < len(cand_rows):
+        return deny("candidate_not_locatable", "auto_recheck")
+    if (index == len(cand_rows) - 1
+            and 3 <= len(current) < len(cand_rows)
+            and tuple(cand_rows[-len(current):]) == current
+            and len(set(current[-3:])) == 3
+            and cand_rows.count(current[-1]) == 1
+            and rowset_trace(cand["target"], cand_rows, index) == trace):
+        return ok("candidate_not_overtaken", "auto_recheck")
+    if index >= len(current):
         return deny("candidate_not_locatable", "auto_recheck")
     if rowset_trace(cand["target"], current, index) != trace:
         return deny("candidate_identity_changed", "auto_recheck")
