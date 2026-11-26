@@ -44,3 +44,20 @@ python3 scripts/test-onebot-transport.py 'dist/WeChat AI Bot.app/Contents/MacOS/
 兼容过程中修复了系统 libcurl 不支持 WebSocket、Linux 自定义 URLProtocol 下载文件行为不一致的问题；Linux 使用 NIO WebSocket 和有界 HTTP 数据接收。取消夹具等待 URLSession 确认后再检查旧结果，辅助 HTTP 进程在测试结束时可靠回收，没有删除暂停或取消覆盖来让检查通过。
 
 本次检查没有连接真实 QQ、调用付费模型、重启原有机器人或修改生产配置。Windows 实机 WSL 安装、跨系统浏览器访问、扫码与对端收发，以及 Linux ARM64 尚未验收；不能用上述 x86_64 CI 代替。微信和长期运行边界保持上表所述。
+
+## 树莓派家园与微信桥回归包
+
+在开发机从待验证的 Git 提交打包。包只含家园 Python 部分、默认主题 JSON、微信桥回执处理源码及对应测试，不带视频、截图或未提交的工作文件。命令会输出提交号、压缩与解包后的文件字节数、SHA-256，可用 `--max-staging-bytes` 在上传前限制这些文件的总大小。
+
+```sh
+python3 scripts/release/pack_house_bridge_regression.py house-bridge-regression.tgz --commit HEAD --max-staging-bytes 1048576
+```
+
+将包放进树莓派单独的暂存目录，核对 SHA-256 后解开。在解包目录内跑下面两组回归。如果设备支持用户网络命名空间，可用 `unshare -Urn` 隔离网络，只在其内开启回环地址供本机 HTTP 测试。
+
+```sh
+python3 -B -m unittest discover -s integrations/fish-house-lan/tests -p 'test_*py'
+python3 -B -m unittest discover -s integrations/wechat-pi/transport -p 'test_bridge_health_ingress.py'
+```
+
+这份包用于验证服务端事件与回执，不包含播放器的真实视频素材。浏览器播放测试、静态资源发布和生产回滚沿用各自的文件。
